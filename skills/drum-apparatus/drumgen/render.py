@@ -14,6 +14,18 @@ POWER_HAND = {
     "none":      (None, []),
 }
 
+# Authored cymbal/accent lane: char -> (map role, base velocity). Used by
+# breakdown grooves to place a cymbal on specific accents (the big stab, the
+# snare smash) instead of running a grid ostinato. Char map mirrors the
+# breakdown vocabulary David approved 2026-06-16.
+CYMBAL_CHARS = {
+    "X": ("CRASH_R", 125),
+    "C": ("CHINA_R", 118),
+    "p": ("SPLASH_R", 110),
+    "r": ("RIDE_TIP", 95),
+    "b": ("RIDE_BELL", 105),
+}
+
 
 def _emit(events, abs_qn, pitch, vel, p, rng, bar_idx, step_idx, offset_cache):
     key = (bar_idx, step_idx)
@@ -33,8 +45,12 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
     steps_in_bar = int(round(blq / sq))
     steps_per_beat = int(round(1.0 / sq))
     pat_len = len(groove["kick"])
+    has_cymbal = bool(groove.get("cymbal"))
+    cymbal_lane = groove.get("cymbal", "")
     ph_name = groove.get("_power_hand", p["power_hand"])
     ph_pitch_role, ph_var_roles = POWER_HAND.get(ph_name, (None, []))
+    if has_cymbal:
+        ph_pitch_role = None  # authored cymbal lane replaces the grid ostinato
 
     for bar in range(bars):
         bar_base_qn = bar_offset_qn + bar * blq
@@ -48,9 +64,10 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
             si = i - 1
             if si in fill_zone:
                 continue
-            sidx = (si % pat_len)
+            sidx = ((bar * steps_in_bar + si) % pat_len)  # continuous across bars
             k = groove["kick"][sidx]
             s = groove["snare"][sidx]
+            cym = cymbal_lane[sidx] if has_cymbal else "-"
             pos_qn = bar_base_qn + si * sq
             if k != "-":
                 foot = "KICK_L" if i % 2 == 0 else "KICK_R"
@@ -69,6 +86,11 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
                     vel = humanize_velocity(base, p["velocity_mode"], p["humanize"], False, rng)
                     _emit(events, pos_qn, drum_map[role], vel, p, rng, bar, si, offset_cache)
                     limb[si] += 1
+            if has_cymbal and cym != "-" and cym in CYMBAL_CHARS:
+                role, base = CYMBAL_CHARS[cym]
+                vel = humanize_velocity(base, p["velocity_mode"], p["humanize"], False, rng)
+                _emit(events, pos_qn, drum_map[role], vel, p, rng, bar, si, offset_cache)
+                limb[si] += 1
 
         if apply_fill:
             for step in range(turnaround, steps_in_bar):

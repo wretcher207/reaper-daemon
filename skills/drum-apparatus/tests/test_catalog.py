@@ -20,11 +20,22 @@ def test_rs_monarch_known_notes():
 
 def test_grooves_count_and_validity():
     grooves = load_grooves()
-    assert len(grooves) == 36
+    assert len(grooves) == 38  # 36 base + 2 breakdown grooves (cymbal lane)
     cats = {g["category"] for g in grooves}
     assert len(cats) == 10
     legal_kick, legal_snare = set("KkS-"), set("Ssgf-")  # 'S'-in-kick = ghost kick (Linear Precision)
+    legal_cymbal = set("CXprb-")  # china/crash/splash/ride/bell/rest
     for g in grooves:
         assert set(g["kick"]) <= legal_kick, g["name"]
         assert set(g["snare"]) <= legal_snare, g["name"]
         assert len(g["kick"]) == len(g["snare"]), g["name"]
+        if "cymbal" in g:  # optional accent lane
+            assert set(g["cymbal"]) <= legal_cymbal, g["name"]
+            assert len(g["cymbal"]) == len(g["kick"]), g["name"]
+
+
+def test_breakdown_grooves_have_cymbal_lane():
+    grooves = {g["name"]: g for g in load_grooves()}
+    we = grooves["World Ending Stomp"]
+    assert "cymbal" in we and len(we["cymbal"]) == 32  # 2-bar pattern
+    assert we["cymbal"][0] == "X" and we["cymbal"][8] == "C"

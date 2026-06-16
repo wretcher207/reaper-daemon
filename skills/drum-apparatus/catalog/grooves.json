@@ -34,5 +34,7 @@
   {"category":"BREAKDOWNS","name":"The Pit Opener","kick":"K-------K-------","snare":"--------S-------"},
   {"category":"BREAKDOWNS","name":"Wall of Groove","kick":"K---k---K---k---","snare":"--------S-------"},
   {"category":"BREAKDOWNS","name":"Stutter Breakdown","kick":"K-K---K-K-K---K-","snare":"--------S-------"},
-  {"category":"BREAKDOWNS","name":"The Silence Drop","kick":"----------------","snare":"----------------"}
+  {"category":"BREAKDOWNS","name":"The Silence Drop","kick":"----------------","snare":"----------------"},
+  {"category":"BREAKDOWNS","name":"World Ending Stomp","kick":"K----------kkk--K----------kkkk-","snare":"--------S---------------S-------","cymbal":"X-------C-------X-------C-------"},
+  {"category":"BREAKDOWNS","name":"Chug Breakdown","kick":"K----------kkkk-","snare":"--------S-------","cymbal":"X-------C-------"}
 ]
