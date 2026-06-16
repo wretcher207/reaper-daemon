@@ -21,3 +21,8 @@ bridge/bridge_config.json
 
 # dev test venv for skills
 .venvs/
+
+# python bytecode
+__pycache__/
+*.pyc
+.pytest_cache/
