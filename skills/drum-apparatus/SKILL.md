@@ -39,6 +39,18 @@ positive = pushed), `power_hand` (hh_closed|hh_open|ride|crash|china|stack|none)
   loose, human grooves.
 - Put a `fill: true` on the section before a transition, not every section.
 
+## Breakdowns (read this — they are NOT grooves)
+A breakdown is spaced stabs + silence + naked kick chug, with a cymbal on the
+BIG accents only (the stab, the snare smash) — not a steady groove with a hat.
+Use the breakdown grooves that carry a `cymbal` accent lane: **"World Ending
+Stomp"** (2-bar) and **"Chug Breakdown"** (1-bar). The cymbal lane auto-suppresses
+the power-hand grid. Generate with `--no-fills` and low `--humanize` (~15) so the
+stabs stay tight, e.g.
+`python generate.py --groove "World Ending Stomp" --bars 8 --no-fills --humanize 15`.
+Authoring your own breakdown groove: add a `cymbal` step-string (`X`=crash,
+`C`=china, `p`=splash, `r`=ride, `b`=bell, `-`=rest) same length as `kick`;
+patterns may be 2 bars (32 steps) — cross-bar indexing handles it.
+
 ## Catalog
 36 grooves across 10 subgenres: DEATH METAL, SLAM DEATH, BLACK METAL, GRINDCORE,
 METALCORE, DOOM & SLUDGE, PROGRESSIVE METAL, ROCK, THRASH METAL, BREAKDOWNS.
