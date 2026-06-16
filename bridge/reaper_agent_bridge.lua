@@ -571,6 +571,11 @@ local function insert_midi_payload(payload)
   end
   if not item then error("INSERT_FAILED: REAPER did not create a media item") end
 
+  -- InsertMedia does not reliably honor the edit cursor (it can drop the item
+  -- at 0), so pin the item to the resolved start_time explicitly. This makes
+  -- placement deterministic for every position type, not cursor-dependent.
+  reaper.SetMediaItemInfo_Value(item, "D_POSITION", start_time)
+
   if requested_length and requested_length > 0 then
     reaper.SetMediaItemInfo_Value(item, "B_LOOPSRC", payload.loop == false and 0 or 1)
     reaper.SetMediaItemInfo_Value(item, "D_LENGTH", requested_length)
