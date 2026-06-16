@@ -1,0 +1,13 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "set_track_volume",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "undo_label": "Agent: set track volume",
+  "payload": {
+    "target_track_name": "Drums",
+    "volume_db": -3.0
+  }
+}

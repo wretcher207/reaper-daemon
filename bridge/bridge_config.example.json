@@ -1,0 +1,10 @@
+{
+  "bridge_root": "",
+  "poll_interval_seconds": 0.25,
+  "archive_successful_commands": true,
+  "allow_execute_lua": false,
+  "allow_risk_level_3": false,
+  "bridge_version": 3,
+  "default_timeout_ms": 30000,
+  "tools": {}
+}

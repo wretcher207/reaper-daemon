@@ -1,0 +1,15 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "add_fx",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "undo_label": "Agent: add FX",
+  "payload": {
+    "target_track_name": "Lead Synth",
+    "fx_name": "ReaSynth (Cockos)",
+    "fx_scope": "track",
+    "show": false
+  }
+}

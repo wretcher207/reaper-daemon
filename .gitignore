@@ -1,0 +1,20 @@
+# Runtime working folders — keep the folder, ignore the churn
+inbox/*
+processing/*
+outbox/*
+failed/*
+archive/*
+logs/*
+!*/.gitkeep
+
+# Atomic-write temp files
+*.tmp
+
+# Bridge runtime state
+bridge/heartbeat.json
+
+# Machine-specific config (the bridge regenerates this on first run)
+bridge/bridge_config.json
+
+# Editor / agent local settings
+.claude/settings.local.json

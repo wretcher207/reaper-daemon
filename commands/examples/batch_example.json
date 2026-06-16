@@ -1,0 +1,26 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "batch",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "undo_label": "Agent: set up lead synth",
+  "payload": {
+    "stop_on_error": true,
+    "commands": [
+      {
+        "type": "add_track",
+        "payload": { "name": "Lead Synth", "color": { "r": 90, "g": 160, "b": 230 } }
+      },
+      {
+        "type": "add_fx",
+        "payload": { "target_track_name": "Lead Synth", "fx_name": "ReaSynth (Cockos)" }
+      },
+      {
+        "type": "set_track_volume",
+        "payload": { "target_track_name": "Lead Synth", "volume_db": -6.0 }
+      }
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "get_fx_parameters",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "payload": {
+    "target_track_name": "Bass",
+    "fx_name_contains": "ReaEQ",
+    "fx_scope": "all",
+    "limit": 200,
+    "offset": 0,
+    "include_empty": false
+  }
+}

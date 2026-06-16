@@ -1,0 +1,21 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "write_fx_param_automation",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "undo_label": "Agent: automate FX parameter",
+  "payload": {
+    "target_track_name": "Lead Synth",
+    "fx_name_contains": "ReaSynth",
+    "fx_scope": "track",
+    "param_name_contains": "Volume",
+    "clear_existing_in_range": true,
+    "points": [
+      { "bar": 9, "beat": 1, "value": 0.2, "shape": "linear" },
+      { "bar": 13, "beat": 1, "value": 0.9, "shape": "linear" },
+      { "bar": 13, "beat": 2, "value": 0.0, "shape": "square" }
+    ]
+  }
+}

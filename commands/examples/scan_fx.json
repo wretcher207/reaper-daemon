@@ -1,0 +1,12 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "scan_fx",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "payload": {
+    "include_values": false,
+    "max_params": 500
+  }
+}

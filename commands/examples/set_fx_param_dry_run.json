@@ -1,0 +1,15 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "set_fx_param",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": true,
+  "undo_label": "Agent: set FX parameter",
+  "payload": {
+    "target_track_name": "Bass",
+    "fx_name_contains": "ReaEQ",
+    "param_name_contains": "Gain",
+    "normalized_value": 0.5
+  }
+}

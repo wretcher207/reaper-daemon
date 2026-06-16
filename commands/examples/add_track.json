@@ -1,0 +1,14 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "add_track",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "undo_label": "Agent: add track",
+  "payload": {
+    "name": "Lead Synth",
+    "color": { "r": 90, "g": 160, "b": 230 },
+    "select": true
+  }
+}

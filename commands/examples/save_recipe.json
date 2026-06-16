@@ -1,0 +1,17 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "save_recipe",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "payload": {
+    "name": "lead-synth-setup",
+    "description": "Adds a lead synth track with a synth FX and a -6 dB level.",
+    "commands": [
+      { "type": "add_track", "payload": { "name": "Lead Synth", "color": { "r": 90, "g": 160, "b": 230 } } },
+      { "type": "add_fx", "payload": { "target_track_name": "Lead Synth", "fx_name": "ReaSynth (Cockos)" } },
+      { "type": "set_track_volume", "payload": { "target_track_name": "Lead Synth", "volume_db": -6.0 } }
+    ]
+  }
+}

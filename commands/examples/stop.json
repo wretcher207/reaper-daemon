@@ -1,0 +1,9 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "stop",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "payload": {}
+}
