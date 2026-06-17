@@ -77,14 +77,6 @@ header {
 }
 .eyebrow:hover { color: var(--bone); }
 
-.dpd-mark {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  background: var(--blood);
-  flex-shrink: 0;
-}
-
 main {
   max-width: 760px;
   margin: 0 auto;
