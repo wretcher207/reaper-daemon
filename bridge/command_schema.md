@@ -1,6 +1,6 @@
 # Command Schema
 
-Every command is a JSON file in `inbox\`. Every result is a JSON file in
+Every command is a JSON file in `inbox/`. Every result is a JSON file in
 `outbox\` with the same `id`.
 
 ## Envelope
@@ -99,11 +99,14 @@ Or `"length_bars": 8` instead of `end`. `{ "clear": true }` clears it.
 ### render
 Gated — requires `allow_risk_level_3: true` in `bridge_config.json`.
 ```json
-{ "output_file": "C:\\path\\out.wav", "bounds": "time_selection" }
+{ "output_file": "/path/to/out.wav", "bounds": "time_selection" }
 ```
 `bounds`: `project`, `time_selection`, `regions`, `selected_items`. Uses
 REAPER's most recent render settings (format, sample rate); configure those
-once in REAPER's Render dialog.
+once in REAPER's Render dialog. Render is synchronous — it blocks the bridge
+for the entire render duration, so `heartbeat.alive_at` goes stale. The
+heartbeat written just before render includes `"busy": "render"` so an agent
+can distinguish "rendering" from "bridge died".
 
 ---
 
@@ -196,7 +199,7 @@ deletes across every track.
 
 ### insert_midi_file
 ```json
-{ "midi_path": "C:\\path\\groove.mid", "target_track_name": "Drums",
+{ "midi_path": "/path/to/groove.mid", "target_track_name": "Drums",
   "position": { "type": "cursor" }, "length": { "type": "bars", "bars": 4 },
   "loop": true, "replace_existing_in_range": false }
 ```
@@ -227,6 +230,6 @@ The whole batch is one undo block.
 { "name": "lead-synth-setup" }
 { "name": "lead-synth-setup", "stop_on_error": true }
 ```
-A recipe is a saved command list in `recipes\<name>.json`. `apply_recipe` runs
+A recipe is a saved command list in `recipes/<name>.json`. `apply_recipe` runs
 it as one undo block. Recipe names allow letters, numbers, space, dash,
 underscore, dot.

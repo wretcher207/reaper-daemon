@@ -34,7 +34,7 @@ awk -v b="$BEGIN" -v e="$END" '
 
 # Trim a single trailing blank line if removal left one.
 # (awk preserves everything else exactly.)
-awk 'NR==FNR{n=NR; next} FNR<n || NF{print}' "$tmp" "$tmp" > "$tmp.2"
+sed -e '${/^$/d}' "$tmp" > "$tmp.2"
 mv -f "$tmp.2" "$STARTUP"
 rm -f "$tmp"
 

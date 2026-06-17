@@ -70,7 +70,7 @@ All handlers are in `reaper_agent_bridge.lua`:
 1. Write a `command_<name>(command)` function returning a plain table (becomes
    `data`).
 2. Register it: `handlers.<name> = command_<name>`.
-3. If it mutates the project, leave it out of the `READ_ONLY` set so
+3. If it mutates the project, leave it out of the `NO_UNDO_BLOCK` set so
    `is_mutating()` returns true. Mutating commands are auto-wrapped in
    `Undo_BeginBlock`/`EndBlock` (skipped inside `batch`/`apply_recipe`, which
    wrap the whole set). Read-only commands skip the `dry_run` short-circuit so

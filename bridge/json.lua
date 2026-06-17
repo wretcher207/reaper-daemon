@@ -122,10 +122,38 @@ function Parser:parse_string()
         end
         local code = tonumber(hex, 16)
         self.pos = self.pos + 4
-        if code < 128 then
+        -- High surrogate: pair with the following low surrogate to form a
+        -- code point above U+FFFF. Reject a lone high surrogate (invalid JSON).
+        if code >= 0xD800 and code <= 0xDBFF then
+          if self.text:sub(self.pos, self.pos + 1) ~= "\\u" then
+            error("Lone high surrogate at byte " .. (self.pos - 4))
+          end
+          local low_hex = self.text:sub(self.pos + 2, self.pos + 5)
+          if not low_hex:match("^%x%x%x%x$") then
+            error("Invalid low surrogate at byte " .. (self.pos + 2))
+          end
+          local low = tonumber(low_hex, 16)
+          if low < 0xDC00 or low > 0xDFFF then
+            error("Invalid low surrogate at byte " .. (self.pos + 2))
+          end
+          code = 0x10000 + ((code - 0xD800) * 0x400) + (low - 0xDC00)
+          self.pos = self.pos + 6
+        end
+        -- Encode the code point as UTF-8.
+        if code < 0x80 then
           out[#out + 1] = string.char(code)
+        elseif code < 0x800 then
+          out[#out + 1] = string.char(0xC0 + math.floor(code / 0x40),
+                                       0x80 + (code % 0x40))
+        elseif code < 0x10000 then
+          out[#out + 1] = string.char(0xE0 + math.floor(code / 0x1000),
+                                       0x80 + (math.floor(code / 0x40) % 0x40),
+                                       0x80 + (code % 0x40))
         else
-          out[#out + 1] = "?"
+          out[#out + 1] = string.char(0xF0 + math.floor(code / 0x40000),
+                                       0x80 + (math.floor(code / 0x1000) % 0x40),
+                                       0x80 + (math.floor(code / 0x40) % 0x40),
+                                       0x80 + (code % 0x40))
         end
       else
         error("Invalid escape at byte " .. self.pos)

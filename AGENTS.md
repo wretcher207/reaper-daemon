@@ -136,7 +136,6 @@ references FX by name works on any project that has those plugins.
   track is selected. Do not act on all tracks unless explicitly asked.
 - Do not overwrite existing media items unless `replace_existing_in_range` is
   true. Do not delete items, tracks, or FX without clear intent.
-- `render` and `allow_execute_lua` are gated behind config flags; do not assume
-  they are enabled.
+- `render` is gated behind a config flag; do not assume it is enabled.
 - Every mutating command is wrapped in a REAPER undo block, so a mistake is
   recoverable with Cmd+Z.
