@@ -38,7 +38,15 @@ command per tick, writes results to `outbox/`, and a heartbeat to
 All JSON writes are atomic (write `.tmp`, then rename). Command files move
 `inbox/` → `processing/` → `archive/` (ok) or `failed/` (error).
 
-## Setup (macOS)
+## One-shot install via your AI agent (easiest)
+
+If you already have a coding agent on your Mac (Claude Code, Codex CLI,
+Cursor's terminal agent, etc.), copy [INSTALL.md](INSTALL.md) and paste it
+into the agent. It will clone the repo, wire up REAPER's startup, pause for
+you to restart REAPER once, and run a real smoke test to confirm the bridge
+is live. No shell commands to type yourself.
+
+## Setup (macOS, manual)
 
 Requires REAPER (no third-party extensions — uses native REAPER API only).
 
@@ -55,6 +63,9 @@ Prefer to load it manually instead of at startup? In REAPER:
 `bridge/reaper_agent_bridge.lua`, run it once. It runs as a background deferred
 script and regenerates `bridge/bridge_config.json` and its working folders on
 first run.
+
+To remove the auto-loader later, run `./setup/macos-uninstall.sh` and restart
+REAPER. Your clone, recipes, and working folders are left untouched.
 
 ## Test it
 
