@@ -130,11 +130,12 @@ cd "$REPO"
 ./send_reaper_command.sh commands/examples/get_context.json --wait
 ```
 
-The output is a single JSON object. Parse it. Required:
+The helper prints `Sent command <id>` and then the JSON reply on the next
+line — parse the JSON line (it starts with `{`). Required:
 
 - `"ok": true`
-- A `data.project` object with a `name`
-- A `data.tracks` array (may be empty if the project is empty)
+- `data.project_name` — the open project's name (string)
+- `data.tracks` — an array (may be empty if the project is empty)
 
 If `ok` is false or the command times out, surface the error to the user and
 stop. Do not retry — read the error first.

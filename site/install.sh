@@ -100,19 +100,22 @@ if ! result=$("$INSTALL_DIR/send_reaper_command.sh" "$INSTALL_DIR/commands/examp
   abort "Smoke test command failed:
 $result"
 fi
-if ! printf '%s' "$result" | grep -q '"ok":true'; then
+# send_reaper_command.sh prints "Sent command <id>" before the JSON reply —
+# isolate the JSON line (the compact reply starts with '{').
+reply=$(printf '%s\n' "$result" | grep -m1 '^{' || true)
+if [[ -z "$reply" ]] || ! printf '%s' "$reply" | grep -q '"ok":true'; then
   echo
   abort "Smoke test returned not-ok:
 $result"
 fi
 echo "ok"
 
-# Phase 8 — done
-project=$(printf '%s' "$result" | python3 -c "import sys,json
-try: r=json.load(sys.stdin); print(r.get('data',{}).get('project',{}).get('name','unknown'))
+# Phase 8 — done. get_context returns project_name + tracks at the top of data.
+project=$(printf '%s' "$reply" | python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('data',{}).get('project_name') or 'unknown')
 except Exception: print('unknown')" 2>/dev/null || echo "unknown")
-tracks=$(printf '%s' "$result" | python3 -c "import sys,json
-try: r=json.load(sys.stdin); print(len(r.get('data',{}).get('tracks',[])))
+tracks=$(printf '%s' "$reply" | python3 -c "import sys,json
+try: print(len(json.load(sys.stdin).get('data',{}).get('tracks',[])))
 except Exception: print('?')" 2>/dev/null || echo "?")
 
 cat <<EOF
