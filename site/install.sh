@@ -2,10 +2,10 @@
 # install.sh — Reaper Daemon one-shot installer for macOS.
 #
 # Pipe it from the landing page:
-#   curl -fsSL https://reaperdaemon.deadpixeldesign.com/install.sh | bash
+#   curl -fsSL https://reaper-daemon.netlify.app/install.sh | bash
 #
 # Or download and run locally:
-#   curl -fsSLO https://reaperdaemon.deadpixeldesign.com/install.sh
+#   curl -fsSLO https://reaper-daemon.netlify.app/install.sh
 #   bash install.sh
 set -euo pipefail
 
