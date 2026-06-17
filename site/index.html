@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Reaper Daemon — Dead Pixel Design</title>
+  <meta name="description" content="The daemon you let into REAPER. Drive REAPER from Claude, Codex, or any AI agent on your Mac. No extensions, no server, no MCP.">
+  <meta property="og:title" content="Reaper Daemon">
+  <meta property="og:description" content="The daemon you let into REAPER.">
+  <meta property="og:type" content="website">
+  <meta name="theme-color" content="#0a0a0a">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="scanlines" aria-hidden="true"></div>
+  <div class="dead-pixel" id="deadPixel" aria-hidden="true"></div>
+
+  <header>
+    <a href="https://deadpixeldesign.com" class="eyebrow">
+      <span class="dpd-mark" aria-hidden="true"></span>
+      Dead Pixel Design
+    </a>
+  </header>
+
+  <main>
+    <h1>Reaper<br>Daemon</h1>
+    <p class="tagline">The daemon you let into REAPER.</p>
+    <p class="subline">Drive REAPER from Claude, Codex, or any AI agent on your Mac. No extensions. No server. No MCP. One paste, and the daemon is in.</p>
+
+    <div class="install-block">
+      <code id="installCmd">curl -fsSL https://reaperdaemon.deadpixeldesign.com/install.sh | bash</code>
+      <button id="copyBtn" type="button" aria-label="Copy install command">
+        <span class="copy-label">Copy</span>
+      </button>
+    </div>
+
+    <p class="meta">macOS · REAPER · ~30 seconds</p>
+
+    <a class="github-link" href="https://github.com/wretcher207/reaper-agent-bridge-macos">View on GitHub →</a>
+
+    <details class="agent-toggle">
+      <summary>Rather have your AI agent install it? →</summary>
+      <p>If you already run Claude Code, Codex, or another coding agent on your Mac, paste <a href="https://github.com/wretcher207/reaper-agent-bridge-macos/blob/main/INSTALL.md">INSTALL.md</a> into it. The agent handles preflight, clone, REAPER startup wiring, the restart pause, and a real smoke test end-to-end. No shell commands to type yourself.</p>
+    </details>
+  </main>
+
+  <footer>
+    <p>
+      <span>Built by <a href="https://deadpixeldesign.com">Dead Pixel Design</a></span>
+      <span class="sep">·</span>
+      <a href="https://github.com/wretcher207/reaper-agent-bridge-macos">GitHub</a>
+      <span class="sep">·</span>
+      <span>Windows? <a href="https://github.com/wretcher207/reaper-agent-bridge">here</a></span>
+    </p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

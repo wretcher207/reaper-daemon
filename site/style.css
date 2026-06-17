@@ -1,0 +1,277 @@
+:root {
+  --bg: #0a0a0a;
+  --bg-elevated: #141414;
+  --bone: #e8e6e1;
+  --bone-dim: #807e78;
+  --bone-faint: #4a4845;
+  --blood: #a83232;
+  --blood-bright: #cd4040;
+  --border: #232220;
+  --font-display: 'Cinzel', 'Times New Roman', serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Menlo', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--bg);
+  color: var(--bone);
+  font-family: var(--font-mono);
+  font-size: 16px;
+  line-height: 1.6;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  position: relative;
+  overflow-x: hidden;
+}
+
+/* Faint CRT scanlines — atmospheric, not garish */
+.scanlines {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0) 0,
+    rgba(255, 255, 255, 0) 2px,
+    rgba(255, 255, 255, 0.022) 3px,
+    rgba(255, 255, 255, 0) 4px
+  );
+}
+
+/* The literal dead pixel — drifts via JS */
+.dead-pixel {
+  position: fixed;
+  width: 2px;
+  height: 2px;
+  background: var(--blood-bright);
+  z-index: 51;
+  pointer-events: none;
+  transition: opacity 0.08s;
+  box-shadow: 0 0 2px var(--blood-bright);
+}
+
+header {
+  padding: 2rem 3rem;
+  position: relative;
+  z-index: 2;
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--bone-dim);
+  text-decoration: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  transition: color 0.15s;
+}
+.eyebrow:hover { color: var(--bone); }
+
+.dpd-mark {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  background: var(--blood);
+  flex-shrink: 0;
+}
+
+main {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 4rem 2rem 2rem;
+  position: relative;
+  z-index: 2;
+}
+
+h1 {
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-size: clamp(72px, 14vw, 168px);
+  line-height: 0.88;
+  letter-spacing: -0.005em;
+  margin-bottom: 2.5rem;
+  color: var(--bone);
+  text-transform: uppercase;
+}
+
+.tagline {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: clamp(22px, 3.4vw, 30px);
+  color: var(--bone);
+  margin-bottom: 1.5rem;
+  letter-spacing: 0.015em;
+  line-height: 1.3;
+}
+
+.subline {
+  color: var(--bone-dim);
+  font-size: 15px;
+  max-width: 540px;
+  margin-bottom: 3rem;
+  line-height: 1.75;
+}
+
+.install-block {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  margin-bottom: 1rem;
+}
+
+.install-block code {
+  flex: 1;
+  padding: 1.4rem 1.6rem;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--bone);
+  white-space: nowrap;
+  overflow-x: auto;
+  display: flex;
+  align-items: center;
+  background: transparent;
+  scrollbar-width: none;
+}
+.install-block code::-webkit-scrollbar { display: none; }
+
+#copyBtn {
+  flex-shrink: 0;
+  padding: 0 2rem;
+  background: var(--blood);
+  border: none;
+  border-left: 1px solid var(--border);
+  color: var(--bone);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.05s;
+  min-width: 110px;
+}
+#copyBtn:hover { background: var(--blood-bright); }
+#copyBtn:active { transform: translateY(1px); }
+#copyBtn.copied { background: var(--bone); color: var(--bg); }
+
+.meta {
+  color: var(--bone-faint);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  margin-bottom: 3rem;
+}
+
+.github-link {
+  display: inline-block;
+  color: var(--bone);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+  margin-bottom: 3rem;
+  transition: color 0.15s, border-color 0.15s;
+}
+.github-link:hover {
+  color: var(--blood-bright);
+  border-color: var(--blood);
+}
+
+.agent-toggle {
+  margin-bottom: 4rem;
+  font-size: 13px;
+}
+.agent-toggle summary {
+  cursor: pointer;
+  color: var(--bone-dim);
+  letter-spacing: 0.04em;
+  list-style: none;
+  padding: 0.6rem 0;
+  transition: color 0.15s;
+}
+.agent-toggle summary::-webkit-details-marker { display: none; }
+.agent-toggle summary::marker { content: ''; }
+.agent-toggle summary:hover { color: var(--bone); }
+.agent-toggle[open] summary { color: var(--bone); }
+.agent-toggle p {
+  color: var(--bone-dim);
+  padding-top: 1rem;
+  max-width: 560px;
+  line-height: 1.75;
+}
+.agent-toggle a {
+  color: var(--blood-bright);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--blood);
+  transition: color 0.15s;
+}
+.agent-toggle a:hover { color: var(--bone); }
+
+footer {
+  padding: 3rem 3rem 4rem;
+  border-top: 1px solid var(--border);
+  margin-top: 6rem;
+  color: var(--bone-dim);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  position: relative;
+  z-index: 2;
+}
+footer p {
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+}
+footer a {
+  color: var(--bone);
+  text-decoration: none;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 2px;
+  transition: color 0.15s, border-color 0.15s;
+}
+footer a:hover {
+  color: var(--blood-bright);
+  border-color: var(--blood);
+}
+footer .sep { color: var(--bone-faint); }
+
+@media (max-width: 640px) {
+  header { padding: 1.5rem; }
+  main { padding: 2rem 1.5rem; }
+  footer { padding: 2rem 1.5rem 3rem; }
+  h1 { margin-bottom: 2rem; }
+  .install-block { flex-direction: column; }
+  #copyBtn {
+    padding: 1.1rem;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    min-width: 0;
+  }
+  .install-block code {
+    white-space: pre;
+    font-size: 12.5px;
+    padding: 1.2rem 1.3rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dead-pixel { display: none; }
+  * { transition: none !important; }
+}

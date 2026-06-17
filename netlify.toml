@@ -1,0 +1,18 @@
+[build]
+  publish = "site"
+  command = ""
+
+# Serve install.sh as text/plain so curl-pipe-to-bash is clean and browsers
+# don't try to render it as binary.
+[[headers]]
+  for = "/install.sh"
+  [headers.values]
+    Content-Type = "text/plain; charset=utf-8"
+    Cache-Control = "no-cache, must-revalidate"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
