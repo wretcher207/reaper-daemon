@@ -29,11 +29,17 @@ fi
 mkdir -p "$RES_DIR/Scripts"
 
 block() {
+  # Escape backslashes and double quotes so BRIDGE_DIR is safe inside a Lua
+  # double-quoted string. Default paths don't need this, but a repo cloned
+  # into a path containing " or \ would otherwise emit broken Lua that fails
+  # to load on startup (silently — the pcall in __startup swallows it).
+  local esc="${BRIDGE_DIR//\\/\\\\}"
+  esc="${esc//\"/\\\"}"
   cat <<LUA
 $BEGIN
 -- Auto-load the REAPER Agent Bridge watcher. Managed by setup/macos-install.sh.
 do
-  local BRIDGE_DIR = "$BRIDGE_DIR"
+  local BRIDGE_DIR = "$esc"
   local bridge_file = BRIDGE_DIR .. "/reaper_agent_bridge.lua"
   local f = io.open(bridge_file, "r")
   if f then

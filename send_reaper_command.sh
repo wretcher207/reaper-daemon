@@ -35,8 +35,11 @@ if [[ -z "$COMMAND_PATH" || ! -f "$COMMAND_PATH" ]]; then
 fi
 
 # Fill id/created_at/created_by and emit the finalized command + its id.
-# python3 ships with macOS; keeps us free of a jq dependency.
-read -r ID FINAL_JSON < <(python3 - "$COMMAND_PATH" <<'PY'
+# python3 ships with macOS; keeps us free of a jq dependency. Capture the
+# output (not a `read` from process substitution) so a python failure — bad
+# JSON, missing file, etc. — propagates via set -e with its traceback instead
+# of silently yielding an empty id that blows up later as a cryptic mv error.
+PYOUT="$(python3 - "$COMMAND_PATH" <<'PY'
 import json, sys, datetime, secrets
 
 with open(sys.argv[1], "r", encoding="utf-8") as f:
@@ -55,7 +58,16 @@ if not cmd.get("created_by"):
 # so the first token is always the id.
 print(cmd["id"], json.dumps(cmd, separators=(",", ":")))
 PY
-)
+)"
+
+# First token is the id; everything after the first space is the compact JSON.
+# The FINAL_JSON == PYOUT guard catches output with no space (malformed print).
+ID="${PYOUT%% *}"
+FINAL_JSON="${PYOUT#* }"
+if [[ -z "$ID" || -z "$FINAL_JSON" || "$FINAL_JSON" == "$PYOUT" ]]; then
+  echo "error: command JSON produced no id/output (is '$COMMAND_PATH' valid JSON?)" >&2
+  exit 1
+fi
 
 INBOX="$BRIDGE_ROOT/inbox/$ID.json"
 OUTBOX="$BRIDGE_ROOT/outbox/$ID.json"

@@ -1501,6 +1501,34 @@ local function maybe_heartbeat(force)
   end
 end
 
+-- One-shot retention sweep at startup: bound logs/ and the archive|failed|outbox
+-- dirs so a long-lived install never grows without limit. Runs once before the
+-- loop, so zero per-tick cost. Log: rotate bridge.log -> bridge.log.1 past
+-- 1 MB (one backup, max ~2 MB). Dirs: keep the 200 newest .json files; command
+-- ids are timestamp-prefixed (manual-/agent-YYYY-MM-DDTHH-MM-SS-hex), so
+-- list_json_files' lexical sort == chronological, and files[1] is the oldest.
+local function sweep_once()
+  local log_path = join(paths.logs, "bridge.log")
+  local f = io.open(log_path, "rb")
+  if f then
+    local size = f:seek("end")
+    f:close()
+    if size > 1024 * 1024 then
+      -- POSIX rename atomically replaces any existing bridge.log.1.
+      os.rename(log_path, join(paths.logs, "bridge.log.1"))
+    end
+  end
+  local keep = 200
+  for _, dir in ipairs({ paths.archive, paths.failed, paths.outbox }) do
+    local files = list_json_files(dir)
+    if #files > keep then
+      for i = 1, #files - keep do
+        os.remove(join(dir, files[i]))
+      end
+    end
+  end
+end
+
 local function loop()
   local current = reaper.time_precise()
   if current - last_poll >= poll_interval then
@@ -1529,6 +1557,8 @@ end
 for _, filename in ipairs(list_json_files(paths.processing)) do
   move_file(join(paths.processing, filename), join(paths.inbox, filename))
 end
+
+sweep_once()
 
 log_line("bridge started")
 loop()
