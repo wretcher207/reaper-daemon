@@ -26,3 +26,6 @@ bridge/bridge_config.json
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Local Netlify folder
+.netlify
