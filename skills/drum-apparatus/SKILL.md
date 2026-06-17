@@ -55,3 +55,13 @@ patterns may be 2 bars (32 steps) — cross-bar indexing handles it.
 36 grooves across 10 subgenres: DEATH METAL, SLAM DEATH, BLACK METAL, GRINDCORE,
 METALCORE, DOOM & SLUDGE, PROGRESSIVE METAL, ROCK, THRASH METAL, BREAKDOWNS.
 Read `catalog/grooves.json` for exact names.
+
+## Drum kit maps (MIDI note assignments)
+`catalog/maps.json` holds named maps of drum roles (KICK_R, SNARE, etc.) to MIDI
+note numbers. `--map <name>` selects one at render time. Ships with: RS Monarch,
+Odeholm Default (Wretcher Fix), Ultimate Heavy Drums (MDL Tone), Sleep Token II
+by MixWave. `python generate.py --list-maps` prints them.
+
+If the user's kit isn't in `maps.json`, ask for their note assignments and add
+an entry to `catalog/maps.json`. The bridge can't see this — `scan_fx` exposes
+VST parameters, not drum note maps. The agent is the setup feature.

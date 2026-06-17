@@ -2,6 +2,7 @@
 import argparse, json, sys
 from drumgen.render import render_arrangement
 from drumgen.smf import write_smf
+from drumgen.catalog import load_maps
 
 DEFAULTS = dict(humanize=45, push_pull=0, velocity_mode=1, power_hand="hh_open",
                 ph_velocity=90, ph_variance=40, fills=True, fill_velocity=115,
@@ -24,12 +25,18 @@ def build_params(args, overrides):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--groove"); ap.add_argument("--bars", type=int, default=4)
-    ap.add_argument("--spec"); ap.add_argument("--out", required=True)
+    ap.add_argument("--spec"); ap.add_argument("--out")
     ap.add_argument("--map"); ap.add_argument("--tempo", type=int)
     ap.add_argument("--humanize", type=int); ap.add_argument("--push-pull", dest="push_pull", type=int)
     ap.add_argument("--power-hand", dest="power_hand")
     ap.add_argument("--no-fills", action="store_true"); ap.add_argument("--seed", type=int)
+    ap.add_argument("--list-maps", dest="list_maps", action="store_true")
     args = ap.parse_args()
+
+    if args.list_maps:
+        for name in sorted(load_maps().keys()):
+            print(name)
+        return
 
     overrides = {}
     if args.spec:
@@ -40,6 +47,9 @@ def main():
         sections = [{"groove": args.groove, "bars": args.bars}]
     else:
         print("error: pass --groove or --spec", file=sys.stderr); sys.exit(2)
+
+    if not args.out:
+        print("error: --out is required", file=sys.stderr); sys.exit(2)
 
     params = build_params(args, overrides)
     events = render_arrangement(sections, params)

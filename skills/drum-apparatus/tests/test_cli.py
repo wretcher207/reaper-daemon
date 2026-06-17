@@ -1,6 +1,7 @@
 import json, subprocess, sys
 from pathlib import Path
 from drumgen.smf import parse_smf
+from drumgen.catalog import load_maps
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -29,3 +30,11 @@ def test_cli_arrangement_spec(tmp_path):
                        capture_output=True, text=True, cwd=str(ROOT))
     assert r.returncode == 0, r.stderr
     assert out.exists()
+
+
+def test_cli_list_maps():
+    r = subprocess.run([sys.executable, str(ROOT / "generate.py"), "--list-maps"],
+                       capture_output=True, text=True, cwd=str(ROOT))
+    assert r.returncode == 0, r.stderr
+    printed = [line for line in r.stdout.splitlines() if line]
+    assert set(printed) == set(load_maps().keys())
