@@ -6,7 +6,8 @@ from drumgen.catalog import load_maps, find_groove
 BASE = dict(humanize=0, push_pull=0, velocity_mode=1, power_hand="none",
             ph_velocity=90, ph_variance=40, fills=False, fill_velocity=115,
             tempo=120, ppq=480, map_name="RS Monarch",
-            bar_length_qn=4.0, step_qn=0.25, ph_spacing_qn=0.5, seed=1)
+            bar_length_qn=4.0, step_qn=0.25, ph_spacing_qn=0.5, seed=1,
+            accent_cymbal="none", accent_every_bars=1, cymbal_density=1)
 
 
 def _params(**kw):
@@ -53,3 +54,17 @@ def test_cross_bar_pattern_indexing_reaches_second_bar():
     # crashes authored at global steps 0 and 16 -> ticks 0 and 16*120=1920
     assert 0 in crashes
     assert 1920 in crashes
+
+
+def test_cymbal_density_doubles_hits():
+    # Chug Breakdown has X at step 0 (crash) and C at step 8 (china).
+    # cymbal_density=2 should double each: repeat at 8th-note offset (step 2, step 10).
+    g = find_groove("Chug Breakdown")
+    dm = load_maps()["RS Monarch"]
+    evs = render_section(g, dm, 1, _params(cymbal_density=2), random.Random(1))
+    crashes = sorted(e["tick"] for e in evs if e["pitch"] == dm["CRASH_R"])
+    chinas = sorted(e["tick"] for e in evs if e["pitch"] == dm["CHINA_R"])
+    assert len(crashes) == 2  # steps 0 and 2
+    assert len(chinas) == 2   # steps 8 and 10
+    assert crashes[1] - crashes[0] == 2 * 120  # 8th note = 2 steps * 120 ticks
+    assert chinas[1] - chinas[0] == 2 * 120

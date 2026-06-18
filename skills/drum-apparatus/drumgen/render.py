@@ -47,8 +47,9 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
     pat_len = len(groove["kick"])
     has_cymbal = bool(groove.get("cymbal"))
     cymbal_lane = groove.get("cymbal", "")
-    ph_name = groove.get("_power_hand", p["power_hand"])
+    ph_name = groove.get("_power_hand") or groove.get("power_hand") or p["power_hand"]
     ph_pitch_role, ph_var_roles = POWER_HAND.get(ph_name, (None, []))
+    ph_is_hat = ph_name in ("hh_closed", "hh_open", "hh_pedal")
     if has_cymbal:
         ph_pitch_role = None  # authored cymbal lane replaces the grid ostinato
 
@@ -91,6 +92,18 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
                 vel = humanize_velocity(base, p["velocity_mode"], p["humanize"], False, rng)
                 _emit(events, pos_qn, drum_map[role], vel, p, rng, bar, si, offset_cache)
                 limb[si] += 1
+                density = p.get("cymbal_density", 1)
+                for d in range(1, density):
+                    rep_si = si + d * 2  # 8th-note spacing
+                    if rep_si < steps_in_bar:
+                        _emit(events, bar_base_qn + rep_si * sq, drum_map[role], vel, p, rng, bar, rep_si, offset_cache)
+
+        accent_role = p.get("accent_cymbal", "CRASH_R")
+        accent_every = p.get("accent_every_bars", 1)
+        if accent_role and accent_role != "none" and not has_cymbal and accent_role in drum_map:
+            if bar % accent_every == 0:
+                vel = humanize_velocity(127, p["velocity_mode"], p["humanize"], False, rng)
+                _emit(events, bar_base_qn, drum_map[accent_role], vel, p, rng, bar, 0, offset_cache)
 
         if apply_fill:
             for step in range(turnaround, steps_in_bar):
@@ -105,7 +118,7 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
             for j in range(ph_steps):
                 pos_qn = j * spacing
                 nearest = int(round(pos_qn / sq))
-                if nearest in fill_zone or limb[min(nearest, steps_in_bar)] >= 2:
+                if nearest in fill_zone or (ph_is_hat and limb[min(nearest, steps_in_bar)] >= 2):
                     continue
                 pitch = drum_map[ph_pitch_role]
                 if ph_var_roles and rng.randint(1, 100) < p["ph_variance"]:

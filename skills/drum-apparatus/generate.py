@@ -7,7 +7,8 @@ from drumgen.catalog import load_maps
 DEFAULTS = dict(humanize=45, push_pull=0, velocity_mode=1, power_hand="hh_open",
                 ph_velocity=90, ph_variance=40, fills=True, fill_velocity=115,
                 tempo=120, ppq=480, map_name="RS Monarch",
-                bar_length_qn=4.0, step_qn=0.25, ph_spacing_qn=0.5, seed=1)
+                bar_length_qn=4.0, step_qn=0.25, ph_spacing_qn=0.5, seed=1,
+                accent_cymbal="CRASH_R", accent_every_bars=1, cymbal_density=1)
 
 
 def build_params(args, overrides):
@@ -19,6 +20,9 @@ def build_params(args, overrides):
     if args.power_hand: p["power_hand"] = args.power_hand
     if args.no_fills: p["fills"] = False
     if args.seed is not None: p["seed"] = args.seed
+    if args.accent_cymbal is not None: p["accent_cymbal"] = args.accent_cymbal
+    if args.accent_every_bars is not None: p["accent_every_bars"] = args.accent_every_bars
+    if args.cymbal_density is not None: p["cymbal_density"] = args.cymbal_density
     return p
 
 
@@ -30,6 +34,9 @@ def main():
     ap.add_argument("--humanize", type=int); ap.add_argument("--push-pull", dest="push_pull", type=int)
     ap.add_argument("--power-hand", dest="power_hand")
     ap.add_argument("--no-fills", action="store_true"); ap.add_argument("--seed", type=int)
+    ap.add_argument("--accent-cymbal", dest="accent_cymbal")
+    ap.add_argument("--accent-every-bars", dest="accent_every_bars", type=int)
+    ap.add_argument("--cymbal-density", dest="cymbal_density", type=int)
     ap.add_argument("--list-maps", dest="list_maps", action="store_true")
     args = ap.parse_args()
 
