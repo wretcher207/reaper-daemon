@@ -1,7 +1,22 @@
--- Reaper Daemon v3 (REAPER agent file bridge)
--- Load this once in REAPER's Action List. It runs as a deferred script and
--- watches <bridge_root>\inbox for JSON commands. The bridge root is the folder
--- one level up from this script, so it works wherever the repo is cloned.
+-- @description Reaper Daemon (REAPER agent file bridge)
+-- @version 3.0.0
+-- @author Dead Pixel Design
+-- @link https://github.com/wretcher207/reaper-daemon
+-- @provides
+--   json.lua
+-- @about
+--   Reaper Daemon lets an AI coding agent control REAPER through a local file
+--   bridge: the agent drops JSON command files in inbox/, this background
+--   script runs them inside REAPER and writes JSON results to outbox/. No
+--   network, no socket. ReaPack note: this does NOT auto-start; run the action
+--   once per REAPER session, or add it to Scripts/__startup.lua. The bridge
+--   root (where inbox/ and outbox/ are created on first run) is the folder one
+--   level up from this script. Point your agent there.
+-- @changelog
+--   First ReaPack release. Same v3 file-bridge protocol as the manual install.
+
+-- Runs as a deferred script. The bridge root is the folder one level up from
+-- this script, so it works wherever the repo is cloned or ReaPack installs it.
 
 local SCRIPT_PATH = ({ reaper.get_action_context() })[2] or ""
 local SCRIPT_DIR = SCRIPT_PATH:match("^(.*)[/\\][^/\\]+$") or "."
