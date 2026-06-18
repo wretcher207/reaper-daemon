@@ -49,6 +49,9 @@ do
     if not ok then
       reaper.ShowConsoleMsg("[agent-bridge] startup load failed: " .. tostring(err) .. "\n")
     end
+  else
+    reaper.ShowConsoleMsg("[agent-bridge] startup: bridge NOT found at " .. bridge_file ..
+      " -- repo moved/renamed? re-run setup/macos-install.sh from the bridge folder.\n")
   end
 end
 $END

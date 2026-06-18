@@ -75,7 +75,6 @@ local function default_config()
   return {
     bridge_root = DEFAULT_BRIDGE_ROOT,
     poll_interval_seconds = 0.25,
-    archive_successful_commands = true,
     allow_risk_level_3 = false,
     bridge_version = 3,
   }
@@ -165,14 +164,16 @@ local function atomic_write_json(path, value)
 end
 
 local function move_file(src, dst)
-  local ok = os.rename(src, dst)
-  if ok then return true end
-  -- Cross-volume or perm failure: fall back to copy + remove. Returning the
-  -- remove result prevents a stranded src from being re-queued and re-run.
+  if os.rename(src, dst) then return true end
+  -- Cross-volume or perm failure: fall back to copy + remove. If the remove
+  -- fails, drop the copy so the file isn't left in both places (which would
+  -- re-queue and re-run the command).
   local text = read_file(src)
   if not text then return false end
   write_file(dst, text)
-  return os.remove(src)
+  if os.remove(src) then return true end
+  os.remove(dst)
+  return false
 end
 
 local function list_json_files(dir)
@@ -199,6 +200,14 @@ local function db_from_volume(volume)
   return 20.0 * math.log(volume, 10)
 end
 
+-- JSON has no Infinity/NaN; some plugins report a non-finite param value or bound
+-- (e.g. an unbounded gain max). Coerce to nil so the field drops out of the result
+-- instead of throwing in json.encode and stranding the whole scan with no reply.
+local function finite_or_nil(x)
+  if type(x) ~= "number" or x ~= x or x == math.huge or x == -math.huge then return nil end
+  return x
+end
+
 -- TimeMap2_timeToBeats / TimeMap2_beatsToTime are present in every REAPER
 -- build we target and handle tempo changes + non-4/4 meters correctly. The
 -- old fallbacks here used 240/tempo, which is seconds-per-bar ONLY in 4/4 —
@@ -212,6 +221,21 @@ local function time_from_bar(bar)
   return reaper.TimeMap2_beatsToTime(0, 0, math.max(0, bar - 1))
 end
 
+-- The master track is a real MediaTrack but is excluded from CountTracks/GetTrack
+-- enumeration; REAPER reports its IP_TRACKNUMBER as -1. Use that as the test.
+local function is_master_track(track)
+  return reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER") == -1
+end
+
+-- End time N bars after start_time, preserving the beat offset WITHIN the start
+-- bar and honoring tempo/meter changes. The old time_from_bar(bar_from_time(s)+n)
+-- discarded the fractional beat (bar_from_time floors to a whole bar), so a 4-bar
+-- region from bar 5 beat 3 snapped to the bar 9 downbeat instead of bar 9 beat 3.
+local function bars_from(start_time, n)
+  local beat_in_measure, measure = reaper.TimeMap2_timeToBeats(0, start_time)
+  return reaper.TimeMap2_beatsToTime(0, beat_in_measure, measure + n)
+end
+
 local function get_project_name()
   local _, name = reaper.EnumProjects(-1, "")
   if name and name ~= "" then
@@ -220,6 +244,20 @@ local function get_project_name()
   local ok, project_name = reaper.GetProjectName(0, "")
   if ok and project_name and project_name ~= "" then return project_name end
   return "Untitled"
+end
+
+-- Heartbeat shape in one place so write_heartbeat and the pre-render heartbeat
+-- can't drift. `extra` overlays fields (render passes busy="render").
+local function heartbeat_payload(extra)
+  local hb = {
+    alive_at = now(),
+    bridge_version = 3,
+    project_name = get_project_name(),
+    in_flight_command = in_flight_command,
+    reaper_focused = true,
+  }
+  if extra then for k, v in pairs(extra) do hb[k] = v end end
+  return hb
 end
 
 local function get_time_selection()
@@ -279,6 +317,36 @@ local function get_tracks(include_fx)
     end
     tracks[#tracks + 1] = track_info
   end
+
+  -- The master track is not in CountTracks/GetTrack, so add it explicitly or it
+  -- is invisible to the documented get_context discovery call. index 0 + is_master
+  -- match find_track's master convention.
+  local master = reaper.GetMasterTrack(0)
+  local master_vol = reaper.GetMediaTrackInfo_Value(master, "D_VOL")
+  local master_info = {
+    index = 0,
+    is_master = true,
+    guid = reaper.GetTrackGUID(master),
+    name = "MASTER",
+    selected = reaper.IsTrackSelected(master),
+    muted = reaper.GetMediaTrackInfo_Value(master, "B_MUTE") == 1,
+    soloed = reaper.GetMediaTrackInfo_Value(master, "I_SOLO") ~= 0,
+    armed = false,
+    volume = master_vol,
+    volume_db = db_from_volume(master_vol),
+    pan = reaper.GetMediaTrackInfo_Value(master, "D_PAN"),
+    folder_depth = 0,
+    item_count = 0,
+  }
+  if include_fx then
+    master_info.fx = {}
+    for fx = 0, reaper.TrackFX_GetCount(master) - 1 do
+      local _, fx_name = reaper.TrackFX_GetFXName(master, fx, "")
+      master_info.fx[#master_info.fx + 1] = { index = fx, api_index = fx, scope = "track", name = fx_name }
+    end
+    master_info.input_fx = {}
+  end
+  tracks[#tracks + 1] = master_info
   return tracks
 end
 
@@ -330,6 +398,10 @@ end
 
 local function find_track(payload)
   if payload.target_track_guid then
+    -- Master isn't in the CountTracks enumeration; check it first so a GUID
+    -- captured for the master (the contract's first-choice selector) resolves.
+    local master = reaper.GetMasterTrack(0)
+    if reaper.GetTrackGUID(master) == payload.target_track_guid then return master, 0 end
     for i = 0, reaper.CountTracks(0) - 1 do
       local track = reaper.GetTrack(0, i)
       if reaper.GetTrackGUID(track) == payload.target_track_guid then return track, i + 1 end
@@ -339,6 +411,9 @@ local function find_track(payload)
   if payload.target_track_name then
     local found, found_index = nil, nil
     local needle = payload.target_track_name:lower()
+    if needle == "master" then
+      return reaper.GetMasterTrack(0), 0
+    end
     for i = 0, reaper.CountTracks(0) - 1 do
       local track = reaper.GetTrack(0, i)
       local _, name = reaper.GetTrackName(track, "")
@@ -433,10 +508,10 @@ local function get_fx_param_info(track, api_index, param_index)
   return {
     index = param_index,
     name = name,
-    value = value,
-    normalized_value = normalized,
-    min = min_value,
-    max = max_value,
+    value = finite_or_nil(value),
+    normalized_value = finite_or_nil(normalized),
+    min = finite_or_nil(min_value),
+    max = finite_or_nil(max_value),
     formatted_value = formatted,
   }
 end
@@ -534,8 +609,7 @@ local function resolve_length(length, position_end, start_time)
   length = length or { type = "as_generated" }
   local kind = length.type or "as_generated"
   if kind == "bars" then
-    local end_time = time_from_bar(bar_from_time(start_time) + (tonumber(length.bars or 1) or 1))
-    return end_time - start_time
+    return bars_from(start_time, tonumber(length.bars or 1) or 1) - start_time
   end
   if kind == "region" or kind == "time_selection" then
     if not position_end or position_end <= start_time then
@@ -546,6 +620,20 @@ local function resolve_length(length, position_end, start_time)
   if kind == "seconds" then return tonumber(length.seconds or 0) or 0 end
   if kind == "as_generated" then return nil end
   error("BAD_LENGTH: Unsupported length type " .. tostring(kind))
+end
+
+-- Turn a payload's end / length_bars / length_seconds into an end time, off the
+-- given start. Shared by set_time_selection, add_region (and the bars math is
+-- now meter-correct via bars_from).
+local function resolve_range_end(payload, start_time)
+  if payload["end"] then
+    return (resolve_position(payload["end"]))
+  elseif payload.length_bars then
+    return bars_from(start_time, tonumber(payload.length_bars) or 1)
+  elseif payload.length_seconds then
+    return start_time + (tonumber(payload.length_seconds) or 0)
+  end
+  error("BAD_RANGE: Provide end, length_bars, or length_seconds")
 end
 
 local function range_has_items(track, start_time, end_time)
@@ -676,7 +764,9 @@ local function resolve_color(color)
   if type(color) == "table" then
     return reaper.ColorToNative(color.r or 0, color.g or 0, color.b or 0) | 0x1000000
   end
-  if type(color) == "number" then return color end
+  -- Force REAPER's "color is set" high bit so a raw RGB int actually shows,
+  -- matching the {r,g,b} branch above (the bit is idempotent if already set).
+  if type(color) == "number" then return color | 0x1000000 end
   error("BAD_COLOR: Provide a native color number or {r, g, b}")
 end
 
@@ -711,7 +801,7 @@ local function command_get_fx_parameters(command)
   local matched_count = 0
   for param = 0, param_count - 1 do
     local info = get_fx_param_info(track, api_index, param)
-    local looks_empty = info.name:match("^#%d+$") and (info.formatted_value == nil or info.formatted_value == "")
+    local looks_empty = info.name:match("^#%d+$") and info.formatted_value == ""
     if (include_empty or not looks_empty) and (not filter or contains_ci(info.name, filter)) then
       matched_count = matched_count + 1
       if matched_count > offset and #params < limit then
@@ -854,8 +944,14 @@ end
 
 local function track_summary(track)
   local _, name = reaper.GetTrackName(track, "")
-  local index = math.floor(reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER"))
-  return { index = index, name = name, guid = reaper.GetTrackGUID(track) }
+  local raw = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER")
+  local is_master = raw == -1
+  return {
+    index = is_master and 0 or math.floor(raw),
+    name = name,
+    guid = reaper.GetTrackGUID(track),
+    is_master = is_master or nil,
+  }
 end
 
 local function command_pause()
@@ -882,14 +978,7 @@ local function command_set_time_selection(command)
     return { time_selection = { active = false } }
   end
   local start_time = resolve_position(payload.start or { type = "cursor" })
-  local end_time
-  if payload["end"] then
-    end_time = resolve_position(payload["end"])
-  elseif payload.length_bars then
-    end_time = time_from_bar(bar_from_time(start_time) + (tonumber(payload.length_bars) or 1))
-  else
-    error("BAD_RANGE: Provide end or length_bars")
-  end
+  local end_time = resolve_range_end(payload, start_time)
   reaper.GetSet_LoopTimeRange(true, payload.loop == true, start_time, end_time, false)
   return { time_selection = get_time_selection() }
 end
@@ -1020,9 +1109,117 @@ local function command_add_fx(command)
   }
 end
 
+-- Load a saved REAPER FX chain (.RfxChain) onto a track WITH its stored state.
+-- add_fx only instantiates a single plugin by name (TrackFX_AddByName) and
+-- cannot carry a chain file's saved parameters. This reads the .RfxChain and
+-- merges it into the track's FXCHAIN via the state chunk, so the dialed-in
+-- settings come across intact. Appends to whatever FX the track already has.
+local function command_add_fx_chain(command)
+  local payload = command.payload or {}
+  local track = find_track(payload)
+  -- The master stores its FX under <MASTERFXLIST>; regular tracks use <FXCHAIN>.
+  local container = is_master_track(track) and "MASTERFXLIST" or "FXCHAIN"
+
+  local name = payload.chain_name or payload.fx_chain or payload.name
+  local path = payload.chain_path
+  if not path or path == "" then
+    if not name or name == "" then
+      error("BAD_CHAIN_NAME: Provide chain_name (a saved .RfxChain) or chain_path")
+    end
+    local base = tostring(name):gsub("%.RfxChain$", "")
+    path = join(reaper.GetResourcePath(), "FXChains", base .. ".RfxChain")
+  end
+  if not exists(path) then error("CHAIN_NOT_FOUND: " .. tostring(path)) end
+
+  local body = read_file(path)
+  if not body or not body:match("%S") then error("CHAIN_EMPTY: " .. tostring(path)) end
+  body = body:gsub("\r\n", "\n"):gsub("\r", "\n"):gsub("%s+$", "")
+
+  local function split_lines(s)
+    local out = {}
+    for line in (s .. "\n"):gmatch("(.-)\n") do out[#out + 1] = line end
+    return out
+  end
+
+  local function is_fx_open(line)
+    return line:match("^%s*<VST") or line:match("^%s*<JS")
+      or line:match("^%s*<AU") or line:match("^%s*<CLAP")
+      or line:match("^%s*<LV2") or line:match("^%s*<DX")
+  end
+
+  local body_lines = split_lines(body)
+  local fx_in_chain = 0
+  for _, line in ipairs(body_lines) do
+    if is_fx_open(line) then fx_in_chain = fx_in_chain + 1 end
+  end
+  if fx_in_chain == 0 then error("CHAIN_NO_FX: no FX blocks parsed from " .. tostring(path)) end
+
+  local ok_chunk, chunk = reaper.GetTrackStateChunk(track, "", false)
+  if not ok_chunk then error("CHUNK_READ_FAILED: GetTrackStateChunk returned false") end
+  local lines = split_lines(chunk)
+
+  -- Find an existing top-level <FXCHAIN> (a direct child of <TRACK>), if any.
+  -- Line-based depth: a line opening with '<' enters a block, a lone '>' exits.
+  local fxchain_close
+  do
+    local depth, fxchain_open = 0, nil
+    for i, line in ipairs(lines) do
+      if depth == 1 and (line:match("^%s*<FXCHAIN") or line:match("^%s*<MASTERFXLIST")) then fxchain_open = i end
+      if line:match("^%s*<") then
+        depth = depth + 1
+      elseif line:match("^%s*>%s*$") then
+        depth = depth - 1
+        if fxchain_open and not fxchain_close and depth == 1 then
+          fxchain_close = i
+        end
+      end
+    end
+  end
+
+  local merged = {}
+  local function push(t) for _, v in ipairs(t) do merged[#merged + 1] = v end end
+
+  if fxchain_close then
+    -- Append the chain's FX into the existing FXCHAIN, before its closing '>'.
+    for i = 1, fxchain_close - 1 do merged[#merged + 1] = lines[i] end
+    push(body_lines)
+    for i = fxchain_close, #lines do merged[#merged + 1] = lines[i] end
+  else
+    -- No FX yet: wrap the chain in a fresh FXCHAIN block before the TRACK close.
+    local track_close
+    for i = #lines, 1, -1 do
+      if lines[i]:match("^%s*>%s*$") then track_close = i; break end
+    end
+    if not track_close then error("CHUNK_NO_TRACK_CLOSE: malformed track chunk") end
+    for i = 1, track_close - 1 do merged[#merged + 1] = lines[i] end
+    push({ "<" .. container, "SHOW 0", "LASTSEL 0", "DOCKED 0" })
+    push(body_lines)
+    merged[#merged + 1] = ">"
+    for i = track_close, #lines do merged[#merged + 1] = lines[i] end
+  end
+
+  if not reaper.SetTrackStateChunk(track, table.concat(merged, "\n"), false) then
+    error("CHUNK_WRITE_FAILED: SetTrackStateChunk rejected the merged chunk")
+  end
+
+  local fx_after = reaper.TrackFX_GetCount(track)
+  local fx_names = {}
+  for i = 0, fx_after - 1 do
+    local _, fxname = reaper.TrackFX_GetFXName(track, i, "")
+    fx_names[#fx_names + 1] = fxname
+  end
+
+  return {
+    track = track_summary(track),
+    chain = { name = name or path, path = path, fx_in_chain = fx_in_chain },
+    fx_count_after = fx_after,
+    fx = fx_names,
+  }
+end
+
 local function command_remove_fx(command)
   local payload = command.payload or {}
-  local track, track_index, api_index, fx_name, fx_scope, display_fx_index = find_fx(payload)
+  local track, _, api_index, fx_name, fx_scope, display_fx_index = find_fx(payload)
   local ok = reaper.TrackFX_Delete(track, api_index)
   if not ok then error("REMOVE_FX_FAILED: REAPER rejected the FX delete") end
   return {
@@ -1033,7 +1230,7 @@ end
 
 local function command_bypass_fx(command)
   local payload = command.payload or {}
-  local track, track_index, api_index, fx_name, fx_scope, display_fx_index = find_fx(payload)
+  local track, _, api_index, fx_name, fx_scope, display_fx_index = find_fx(payload)
   local bypass = payload.bypass ~= false
   reaper.TrackFX_SetEnabled(track, api_index, not bypass)
   return {
@@ -1044,7 +1241,7 @@ end
 
 local function command_move_fx(command)
   local payload = command.payload or {}
-  local track, track_index, api_index, fx_name, fx_scope, display_fx_index = find_fx(payload)
+  local track, _, api_index, fx_name, fx_scope, display_fx_index = find_fx(payload)
   if fx_scope == "input" then error("UNSUPPORTED: move_fx only supports track FX") end
   local to_index = tonumber(payload.to_index)
   if to_index == nil then error("BAD_VALUE: Provide to_index (0-based)") end
@@ -1069,14 +1266,7 @@ end
 local function command_add_region(command)
   local payload = command.payload or {}
   local start_time = resolve_position(payload.start or payload.position or { type = "cursor" })
-  local end_time
-  if payload["end"] then
-    end_time = resolve_position(payload["end"])
-  elseif payload.length_bars then
-    end_time = time_from_bar(bar_from_time(start_time) + (tonumber(payload.length_bars) or 1))
-  else
-    error("BAD_RANGE: Provide end or length_bars")
-  end
+  local end_time = resolve_range_end(payload, start_time)
   local color = payload.color ~= nil and resolve_color(payload.color) or 0
   local index = reaper.AddProjectMarker2(0, true, start_time, end_time, payload.name or "", payload.want_index or -1, color)
   return {
@@ -1115,7 +1305,7 @@ local function command_delete_items_in_range(command)
   local end_time = range_end
   if not end_time then
     if payload.length_bars then
-      end_time = time_from_bar(bar_from_time(start_time) + (tonumber(payload.length_bars) or 1))
+      end_time = bars_from(start_time, tonumber(payload.length_bars) or 1)
     elseif payload.length_seconds then
       end_time = start_time + (tonumber(payload.length_seconds) or 0)
     else
@@ -1153,14 +1343,11 @@ local function command_render(command)
   -- Render is synchronous — it blocks the defer loop for the whole duration,
   -- so no heartbeats tick during it. Write one first with `busy` set so an
   -- agent can distinguish "rendering" from "bridge died".
-  atomic_write_json(paths.heartbeat, {
-    alive_at = now(),
-    bridge_version = 3,
-    project_name = get_project_name(),
-    in_flight_command = in_flight_command,
-    reaper_focused = true,
-    busy = "render",
-  })
+  atomic_write_json(paths.heartbeat, heartbeat_payload({ busy = "render" }))
+  -- Refresh the lock too: render blocks the loop, so without this a long render
+  -- lets the lock age past the 60s stale-reclaim window and a second bridge could
+  -- grab the inbox.
+  write_file(lockfile, tostring(os.time()))
   -- Render with the project's most recent render settings (format, sample rate,
   -- etc. must be configured once in REAPER's Render dialog).
   reaper.Main_OnCommand(42230, 0) -- 42230 = File: Render project
@@ -1227,6 +1414,13 @@ local function command_scan_fx(command)
       total_fx = total_fx + #summary.fx
       tracks[#tracks + 1] = summary
     end
+    -- Master is outside the CountTracks enumeration; scan it too (master-bus
+    -- limiter / EQ / dither live here and were invisible to the no-target scan).
+    local master = reaper.GetMasterTrack(0)
+    local master_summary = track_summary(master)
+    master_summary.fx = scan_track_fx(master, include_values, max_params)
+    total_fx = total_fx + #master_summary.fx
+    tracks[#tracks + 1] = master_summary
   end
   return {
     project_name = get_project_name(),
@@ -1333,8 +1527,11 @@ local function run_command(command, in_batch)
     return { dry_run = true, would_run = command.type, payload = command.payload or {} }
   end
 
+  -- batch and apply_recipe open their own single Undo block around the whole set,
+  -- so don't double-wrap them here.
+  local self_wraps = command.type == "batch" or command.type == "apply_recipe"
   local undo_started = false
-  if is_mutating(command.type) and not in_batch then
+  if is_mutating(command.type) and not in_batch and not self_wraps then
     reaper.Undo_BeginBlock()
     undo_started = true
   end
@@ -1357,7 +1554,8 @@ local function command_batch(command)
     results[#results + 1] = { index = i, type = sub.type, ok = ok, data = ok and data or nil, error = ok and nil or tostring(data) }
     if not ok and payload.stop_on_error ~= false then
       reaper.Undo_EndBlock(command.undo_label or payload.undo_label or "Agent: batch failed", -1)
-      error("BATCH_FAILED: sub-command " .. i .. " failed: " .. tostring(data))
+      local inner = tostring(data):match("([A-Z_]+):") or "BATCH_FAILED"
+      error(inner .. ": batch sub-command " .. i .. " failed: " .. tostring(data))
     end
   end
   reaper.Undo_EndBlock(command.undo_label or payload.undo_label or "Agent: batch", -1)
@@ -1377,7 +1575,8 @@ local function command_apply_recipe(command)
     results[#results + 1] = { index = i, type = sub.type, ok = ok, data = ok and data or nil, error = ok and nil or tostring(data) }
     if not ok and payload.stop_on_error ~= false then
       reaper.Undo_EndBlock("Agent: recipe " .. name .. " (failed)", -1)
-      error("RECIPE_FAILED: command " .. i .. " (" .. tostring(sub.type) .. ") failed: " .. tostring(data))
+      local inner = tostring(data):match("([A-Z_]+):") or "RECIPE_FAILED"
+      error(inner .. ": recipe command " .. i .. " (" .. tostring(sub.type) .. ") failed: " .. tostring(data))
     end
   end
   reaper.Undo_EndBlock(command.undo_label or ("Agent: recipe " .. name), -1)
@@ -1415,6 +1614,7 @@ handlers.arm_track = command_arm_track
 
 -- FX
 handlers.add_fx = command_add_fx
+handlers.add_fx_chain = command_add_fx_chain
 handlers.remove_fx = command_remove_fx
 handlers.bypass_fx = command_bypass_fx
 handlers.move_fx = command_move_fx
@@ -1484,7 +1684,12 @@ local function process_file(filename)
   in_flight_command = command.id
   log_line("start " .. command.id .. " " .. tostring(command.type))
   local run_ok, data = pcall(run_command, command, false)
-  write_result(command, run_ok, data)
+  -- write_result -> json.encode can throw (a value json can't encode); if it does,
+  -- still emit a failure reply so the command never strands with no outbox.
+  local wrote_ok, werr = pcall(write_result, command, run_ok, data)
+  if not wrote_ok then
+    pcall(write_result, command, false, "RESULT_ENCODE_FAILED: " .. tostring(werr))
+  end
   log_line((run_ok and "ok " or "fail ") .. command.id .. " " .. tostring(command.type))
 
   local destination = run_ok and paths.archive or paths.failed
@@ -1493,14 +1698,7 @@ local function process_file(filename)
 end
 
 local function write_heartbeat()
-  local heartbeat = {
-    alive_at = now(),
-    bridge_version = 3,
-    project_name = get_project_name(),
-    in_flight_command = in_flight_command,
-    reaper_focused = true,
-  }
-  atomic_write_json(paths.heartbeat, heartbeat)
+  atomic_write_json(paths.heartbeat, heartbeat_payload())
   write_file(lockfile, tostring(os.time()))
 end
 
@@ -1537,13 +1735,30 @@ local function sweep_once()
     end
   end
   local keep = 200
+  -- Order by the embedded ISO stamp, not the whole filename: ids are prefixed
+  -- "manual-"/"agent-" and "manual" > "agent" lexically, so a plain name sort
+  -- groups by prefix and would delete the wrong (newer) files. files[1] must be
+  -- the oldest for the slice below to drop the oldest.
+  local function stamp(f) return f:match("(%d%d%d%d%-%d%d%-%d%dT%d%d%-%d%d%-%d%d)") or f end
   for _, dir in ipairs({ paths.archive, paths.failed, paths.outbox }) do
     local files = list_json_files(dir)
+    table.sort(files, function(a, b) return stamp(a) < stamp(b) end)
     if #files > keep then
       for i = 1, #files - keep do
         os.remove(join(dir, files[i]))
       end
     end
+  end
+end
+
+local last_sweep = nil
+-- Run the retention sweep periodically, not just at startup: REAPER stays open
+-- for hours and the dirs would otherwise grow unbounded within one session.
+local function maybe_sweep()
+  local t = reaper.time_precise()
+  if last_sweep == nil or t - last_sweep >= 300 then
+    sweep_once()
+    last_sweep = t
   end
 end
 
@@ -1559,7 +1774,9 @@ local function loop()
       local files = list_json_files(paths.inbox)
       for i = 1, math.min(#files, 50) do
         process_file(files[i])
+        maybe_heartbeat(false)  -- keep heartbeat/lock fresh mid-drain (self-throttles)
       end
+      maybe_sweep()
     end)
     if not ok then
       log_line("loop error " .. tostring(err))
@@ -1577,6 +1794,7 @@ for _, filename in ipairs(list_json_files(paths.processing)) do
 end
 
 sweep_once()
+last_sweep = reaper.time_precise()
 
 log_line("bridge started")
 loop()

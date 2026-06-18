@@ -1,0 +1,9 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "get_context",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "payload": { "include_fx": true }
+}

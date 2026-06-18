@@ -1,0 +1,13 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "add_fx_chain",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "undo_label": "Agent: add FX chain",
+  "payload": {
+    "target_track_name": "GTR_Buss",
+    "chain_name": "rhythm_gtr_mix"
+  }
+}
