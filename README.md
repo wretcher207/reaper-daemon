@@ -67,6 +67,30 @@ first run.
 To remove the auto-loader later, run `./setup/macos-uninstall.sh` and restart
 REAPER. Your clone, recipes, and working folders are left untouched.
 
+## Install via ReaPack (REAPER-native, alternative)
+
+Prefer REAPER's own package manager? Add this repo to ReaPack:
+
+1. In REAPER: `Extensions > ReaPack > Import repositories`.
+2. Paste: `https://github.com/wretcher207/reaper-daemon/raw/main/index.xml`
+3. `Extensions > ReaPack > Browse packages`, find **Reaper Daemon**, install.
+
+Two things to know, because ReaPack delivers the script but not the rest of the
+setup the clone install handles for you:
+
+- **It does not auto-start.** ReaPack installs the bridge as an Action but does
+  not run it on launch. Run the action once per session (Actions list, search
+  "Reaper Daemon"), or add it to your `Scripts/__startup.lua` to load it every
+  launch.
+- **Point your agent at the install folder.** ReaPack installs to
+  `<REAPER resource>/Scripts/reaper-daemon/`, and the bridge creates `inbox/`,
+  `outbox/`, and the rest there on first run. Right-click the package in ReaPack
+  and choose "Show in explorer/finder" to get the exact path, then aim your
+  agent at that folder.
+
+For the hands-off experience (auto-start wired up, a clean folder you pick), use
+the git clone install above instead.
+
 ## Test it
 
 With REAPER open and a project loaded:
