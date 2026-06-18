@@ -18,6 +18,7 @@ bridge/bridge_config.json
 
 # Editor / agent local settings
 .claude/settings.local.json
+.DS_Store
 
 # dev test venv for skills
 .venvs/

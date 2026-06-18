@@ -104,8 +104,9 @@ end
 -- Singleton guard: refuse to start a second defer loop pointed at the same
 -- root. Two bridges on one inbox race on os.rename (non-deterministic which
 -- one grabs a file) and write competing heartbeats. The lock holds the
--- startup time; a clean shutdown removes it, a crash leaves it — so on
--- startup we also reclaim a lock older than 60s (no bridge tick is that long).
+-- startup time and is refreshed every heartbeat (~5s); a dead bridge's lock
+-- goes stale, so on startup we reclaim one older than 60s (no bridge tick
+-- is that long).
 local lockfile = join(paths.logs, "bridge.lock")
 do
   local existing = read_file(lockfile)
@@ -1484,6 +1485,7 @@ local function write_heartbeat()
     reaper_focused = true,
   }
   atomic_write_json(paths.heartbeat, heartbeat)
+  write_file(lockfile, tostring(os.time()))
 end
 
 -- Write the heartbeat at most every `heartbeat_interval` seconds, or
