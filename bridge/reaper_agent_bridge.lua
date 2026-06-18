@@ -13,7 +13,8 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
---   First ReaPack release. Same v3 file-bridge protocol as the manual install.
+--   Reaper Daemon v3, packaged for ReaPack. Same file-bridge protocol as the
+--   git/manual install.
 
 -- Runs as a deferred script. The bridge root is the folder one level up from
 -- this script, so it works wherever the repo is cloned or ReaPack installs it.
