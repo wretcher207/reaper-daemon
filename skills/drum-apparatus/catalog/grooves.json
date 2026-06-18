@@ -36,5 +36,8 @@
   {"category":"BREAKDOWNS","name":"Stutter Breakdown","kick":"K-K---K-K-K---K-","snare":"--------S-------"},
   {"category":"BREAKDOWNS","name":"The Silence Drop","kick":"----------------","snare":"----------------"},
   {"category":"BREAKDOWNS","name":"World Ending Stomp","kick":"K----------kkk--K----------kkkk-","snare":"--------S---------------S-------","cymbal":"X-------C-------X-------C-------"},
-  {"category":"BREAKDOWNS","name":"Chug Breakdown","kick":"K----------kkkk-","snare":"--------S-------","cymbal":"X-------C-------"}
+  {"category":"BREAKDOWNS","name":"Chug Breakdown","kick":"K----------kkkk-","snare":"--------S-------","cymbal":"X-------C-------"},
+  {"category":"BREAKDOWNS","name":"Tight Chug Breakdown","kick":"K-------KKKK----","snare":"--------S-------","cymbal":"X-------C--X----"},
+  {"category":"BREAKDOWNS","name":"Gallop Stomp","kick":"K---kkk----kkk--","snare":"--------S-------","cymbal":"X---X---C---X---"},
+  {"category":"BREAKDOWNS","name":"Dead Stop Breakdown","kick":"K---------------K---------------","snare":"--------S-----------------------","cymbal":"X-------C-------X---------------"}
 ]
