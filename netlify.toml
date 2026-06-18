@@ -2,6 +2,21 @@
   publish = "site"
   command = ""
 
+# The marketing page now lives on deadpixeldesign.com. Redirect the landing
+# page there, but keep serving install.sh so the curl-pipe-to-bash install
+# command (and the README) keeps working. First match wins, so the install.sh
+# rule must come before the catch-all.
+[[redirects]]
+  from = "/install.sh"
+  to = "/install.sh"
+  status = 200
+
+[[redirects]]
+  from = "/*"
+  to = "https://deadpixeldesign.com/workflows/reaper-daemon/"
+  status = 301
+  force = true
+
 # Serve install.sh as text/plain so curl-pipe-to-bash is clean and browsers
 # don't try to render it as binary.
 [[headers]]
