@@ -1,13 +1,19 @@
 [
   {"category":"DEATH METAL","name":"Standard 16th Stream","kick":"KKKKKKKKKKKKKKKK","snare":"----S-------S---"},
+  {"category":"DEATH METAL","name":"2-Step Deathcore","kick":"KK--KK--KK--KK--","snare":"----S-------S---"},
+  {"category":"DEATH METAL","name":"Fighting Double Bass","kick":"KKKK----KKKK----","snare":"----S-------S---"},
+  {"category":"DEATH METAL","name":"Half-Time Blast","kick":"KKKKKKKKKKKKKKKK","snare":"--------S-------","power_hand":"ride"},
   {"category":"DEATH METAL","name":"The Gallop","kick":"K-kkK-kkK-kkK-kk","snare":"----S-------S---"},
   {"category":"DEATH METAL","name":"Tech Death Pulse","kick":"K-K-K-K-KKKKKKKK","snare":"----S-------S---"},
   {"category":"DEATH METAL","name":"Hammer Blast","kick":"KKKKKKKKKKKKKKKK","snare":"S-S-S-S-S-S-S-S-","power_hand":"ride"},
   {"category":"SLAM DEATH","name":"Slam Breakdown (Lurch)","kick":"K-k-K--k-K-k-K--","snare":"--------S-------"},
+  {"category":"SLAM DEATH","name":"Slam Ping","kick":"KK--K---KK--K---","snare":"----S-------S---"},
+  {"category":"SLAM DEATH","name":"Driving Slam Groove","kick":"K---K---K-------","snare":"------------S---"},
   {"category":"SLAM DEATH","name":"Bomb Blast","kick":"KKKKKKKKKKKKKKKK","snare":"S---S---S---S---","power_hand":"ride"},
   {"category":"SLAM DEATH","name":"Stuttered Double Kick","kick":"KK-K---KK-K---K-","snare":"----S-------S---"},
   {"category":"SLAM DEATH","name":"Half-Time Crushing","kick":"K---K-K-----K---","snare":"--------S-------"},
   {"category":"BLACK METAL","name":"Traditional Blast","kick":"KKKKKKKKKKKKKKKK","snare":"S-S-S-S-S-S-S-S-","power_hand":"ride"},
+  {"category":"BLACK METAL","name":"Blackened Gallop","kick":"KK--K--KK--K--K-","snare":"--S-------S-----"},
   {"category":"BLACK METAL","name":"Norsecore (Primitive)","kick":"K-------K-------","snare":"----S-------S---"},
   {"category":"BLACK METAL","name":"D-Beat (Black 'n' Roll)","kick":"K---K-K---K-K---","snare":"----S-------S---"},
   {"category":"GRINDCORE","name":"Traditional Blast","kick":"KKKKKKKKKKKKKKKK","snare":"S-S-S-S-S-S-S-S-","power_hand":"ride"},
@@ -39,5 +45,7 @@
   {"category":"BREAKDOWNS","name":"Chug Breakdown","kick":"K----------kkkk-","snare":"--------S-------","cymbal":"X-------C-------"},
   {"category":"BREAKDOWNS","name":"Tight Chug Breakdown","kick":"K-------KKKK----","snare":"--------S-------","cymbal":"X-------C--X----"},
   {"category":"BREAKDOWNS","name":"Gallop Stomp","kick":"K---kkk----kkk--","snare":"--------S-------","cymbal":"X---X---C---X---"},
-  {"category":"BREAKDOWNS","name":"Dead Stop Breakdown","kick":"K---------------K---------------","snare":"--------S-----------------------","cymbal":"X-------C-------X---------------"}
+  {"category":"BREAKDOWNS","name":"Dead Stop Breakdown","kick":"K---------------K---------------","snare":"--------S-----------------------","cymbal":"X-------C-------X---------------"},
+  {"category":"BREAKDOWNS","name":"Caveman Breakdown","kick":"K---K---K---K---","snare":"------------S---","cymbal":"X---X---X---X---"},
+  {"category":"BREAKDOWNS","name":"Caveman Double Kick","kick":"K-K-K-K-K-K-K-K-","snare":"------------S---","cymbal":"X---X---X---X---"}
 ]
