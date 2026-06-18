@@ -9,8 +9,8 @@
 #   bash install.sh
 set -euo pipefail
 
-REPO_URL="https://github.com/wretcher207/reaper-agent-bridge-macos.git"
-DEFAULT_DIR="$HOME/reaper-agent-bridge"
+REPO_URL="https://github.com/wretcher207/reaper-daemon.git"
+DEFAULT_DIR="$HOME/reaper-daemon"
 
 bold() { printf '\033[1m%s\033[0m' "$1"; }
 dim()  { printf '\033[2m%s\033[0m' "$1"; }
@@ -47,12 +47,12 @@ INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
 
 # Phase 3 — clone or pull
 if [[ -d "$INSTALL_DIR" ]]; then
-  if [[ -d "$INSTALL_DIR/.git" ]] && git -C "$INSTALL_DIR" remote -v 2>/dev/null | grep -q "reaper-agent-bridge-macos"; then
+  if [[ -d "$INSTALL_DIR/.git" ]] && git -C "$INSTALL_DIR" remote -v 2>/dev/null | grep -q "reaper-daemon"; then
     printf '%s ' "$(dim 'Updating existing clone…')"
     git -C "$INSTALL_DIR" pull --ff-only >/dev/null 2>&1 || abort "git pull failed in $INSTALL_DIR. Resolve manually and re-run."
     echo "done"
   else
-    abort "$INSTALL_DIR exists and is not a clone of reaper-agent-bridge-macos. Pick a different path or remove it first."
+    abort "$INSTALL_DIR exists and is not a clone of reaper-daemon. Pick a different path or remove it first."
   fi
 else
   printf '%s ' "$(dim "Cloning into $INSTALL_DIR…")"

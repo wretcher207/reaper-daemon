@@ -50,13 +50,13 @@ Checkpoints:
 
 Ask the user:
 
-> Where do you want to install the bridge? Default is `~/reaper-agent-bridge`.
+> Where do you want to install the bridge? Default is `~/reaper-daemon`.
 > Press enter to accept, or paste a different absolute path.
 
 Expand `~` to `$HOME`. Call the result `$REPO` from here on.
 
 - If `$REPO` does not exist: continue to Phase 3.
-- If `$REPO` exists and is already a clone of `reaper-agent-bridge-macos`
+- If `$REPO` exists and is already a clone of `reaper-daemon`
   (`git -C $REPO remote -v` includes that name): offer to `git -C $REPO pull`
   and skip Phase 3. If pull fails, surface the error and stop.
 - If `$REPO` exists and is **not** a clone of this repo: stop and ask for a
@@ -65,7 +65,7 @@ Expand `~` to `$HOME`. Call the result `$REPO` from here on.
 ## Phase 3 — Clone
 
 ```bash
-git clone https://github.com/wretcher207/reaper-agent-bridge-macos.git "$REPO"
+git clone https://github.com/wretcher207/reaper-daemon.git "$REPO"
 ```
 
 If clone fails (network, auth, disk), surface the exact error to the user and
