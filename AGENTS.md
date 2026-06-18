@@ -106,6 +106,30 @@ by `param_index` or `param_name_contains`. Ambiguous matches throw
 they shift between plugin versions. Query with `scan_fx` or
 `get_fx_parameters` first, then act.
 
+## FX parameter workflow (read this before setting params)
+
+1. **Scan first.** Send `get_fx_parameters` with `fx_name_contains` and a
+   `page_size` (default 50, bump to 100+ for FabFilter or other deep plugins).
+   Read the full param list: `index`, `name`, `normalized_value`,
+   `formatted_value`. The `formatted_value` tells you what the knob actually
+   reads (e.g. "-16.00 dB", "Punch", "4.00:1") — more useful than the
+   normalized float.
+2. **Prefer `param_index` over `param_name_contains`.** Many plugins have
+   params whose names share a word: FabFilter Pro-C 3 has "Threshold", "Auto
+   Threshold", and "Lock Auto Threshold". `param_name_contains: "Threshold"`
+   throws `AMBIGUOUS_PARAM`. Use the `index` from step 1 instead — it's
+   unambiguous. Reserve `param_name_contains` for names you confirmed are
+   unique in the scan (e.g. "Auto Gain", "Oversampling").
+3. **Batch the sets.** Wrap multiple `set_fx_param` calls in a `batch`
+   command with `stop_on_error: true`. One undo block, one round-trip, and a
+   failure stops cleanly instead of half-applying.
+4. **Verify.** Re-scan with `get_fx_parameters` after the batch to confirm
+   the `formatted_value` on each param matches what you intended.
+5. **Normalized values are 0.0-1.0, not the displayed value.** A threshold
+   of -24 dB on Pro-C 3 is `normalized_value: 0.6`, not `-24`. The scan tells
+   you the current normalized value; interpolate from there. When unsure, set
+   a value, re-scan, read the `formatted_value`, and adjust.
+
 ## Generating MIDI (macOS)
 
 On macOS you generally run your own shell, so the Windows "job worker" is not
