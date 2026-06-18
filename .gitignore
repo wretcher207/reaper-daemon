@@ -30,3 +30,9 @@ __pycache__/
 
 # Local Netlify folder
 .netlify
+
+# Internal dev notes — kept locally, not shipped in the public repo
+MEMORY.md
+HANDOFF.md
+ERRORS.md
+docs/superpowers/

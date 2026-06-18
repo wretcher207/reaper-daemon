@@ -1,4 +1,4 @@
-# REAPER Agent Bridge (macOS)
+# Reaper Daemon (macOS)
 
 A local file bridge for controlling REAPER from an AI agent — Claude Code,
 Codex, anything that can read and write files. No network, no socket, no MCP
@@ -104,3 +104,7 @@ inbox/ outbox/ processing/ ...   runtime folders
 - The optional PowerShell **job worker** was not ported. On macOS the agent
   runs its own shell, so it generates MIDI/audio directly and feeds the file to
   `insert_midi_file` — no external-tool runner needed.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

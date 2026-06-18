@@ -1,4 +1,4 @@
-# REAPER Agent Bridge — Agent Instructions (macOS)
+# Reaper Daemon: Agent Instructions (macOS)
 
 You can control REAPER through this local file bridge. No network, no socket:
 you read and write JSON files in shared folders, and a Lua script running

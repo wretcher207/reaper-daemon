@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# macos-uninstall.sh — remove the Agent Bridge auto-start block from REAPER.
+# macos-uninstall.sh: remove the Reaper Daemon auto-start block from REAPER.
 #
 # Idempotent: strips the marker-delimited block written by macos-install.sh
 # out of REAPER's Scripts/__startup.lua. Leaves the rest of the file alone.

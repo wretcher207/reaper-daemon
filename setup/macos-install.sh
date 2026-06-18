@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# macos-install.sh — wire the Agent Bridge into REAPER's startup on macOS.
+# macos-install.sh: wire Reaper Daemon into REAPER's startup on macOS.
 #
 # Idempotent: writes (or refreshes) a marker-delimited block in REAPER's
 # Scripts/__startup.lua that auto-loads the bridge on every launch, pointing it
@@ -37,7 +37,7 @@ block() {
   esc="${esc//\"/\\\"}"
   cat <<LUA
 $BEGIN
--- Auto-load the REAPER Agent Bridge watcher. Managed by setup/macos-install.sh.
+-- Auto-load the Reaper Daemon watcher. Managed by setup/macos-install.sh.
 do
   local BRIDGE_DIR = "$esc"
   local bridge_file = BRIDGE_DIR .. "/reaper_agent_bridge.lua"

@@ -1,4 +1,4 @@
-# Install Prompt — REAPER Agent Bridge (macOS)
+# Install Prompt: Reaper Daemon (macOS)
 
 **For humans:** paste this entire file into a coding agent that runs on your
 Mac with shell access (Claude Code, Codex CLI, Cursor's terminal agent, etc.).

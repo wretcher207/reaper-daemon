@@ -1,4 +1,4 @@
--- REAPER Agent Bridge v3
+-- Reaper Daemon v3 (REAPER agent file bridge)
 -- Load this once in REAPER's Action List. It runs as a deferred script and
 -- watches <bridge_root>\inbox for JSON commands. The bridge root is the folder
 -- one level up from this script, so it works wherever the repo is cloned.
