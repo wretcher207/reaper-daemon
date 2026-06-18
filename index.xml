@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="reaper-daemon" commit="efaafc075b0143579010cfb507f1b131fd29eb79">
+<index version="1" name="reaper-daemon" commit="1aff2dd4f25f00e8f4aa7276cc6dd271070b5c55">
   <category name="bridge">
     <reapack name="reaper_agent_bridge.lua" type="script" desc="Reaper Daemon (REAPER agent file bridge)">
       <metadata>
         <link rel="website" href="https://github.com/wretcher207/reaper-daemon">Reaper Daemon on GitHub</link>
       </metadata>
       <version name="3.0.0" author="Dead Pixel Design" time="2026-06-18T12:56:47Z">
-        <changelog><![CDATA[First ReaPack release. Same v3 file-bridge protocol as the manual install.]]></changelog>
-        <source main="main">https://github.com/wretcher207/reaper-daemon/raw/efaafc075b0143579010cfb507f1b131fd29eb79/bridge/reaper_agent_bridge.lua</source>
-        <source file="json.lua">https://github.com/wretcher207/reaper-daemon/raw/efaafc075b0143579010cfb507f1b131fd29eb79/bridge/json.lua</source>
+        <changelog><![CDATA[Reaper Daemon v3, packaged for ReaPack. Same file-bridge protocol as the git/manual install.]]></changelog>
+        <source main="main">https://github.com/wretcher207/reaper-daemon/raw/1aff2dd4f25f00e8f4aa7276cc6dd271070b5c55/bridge/reaper_agent_bridge.lua</source>
+        <source file="json.lua">https://github.com/wretcher207/reaper-daemon/raw/1aff2dd4f25f00e8f4aa7276cc6dd271070b5c55/bridge/json.lua</source>
       </version>
     </reapack>
   </category>
