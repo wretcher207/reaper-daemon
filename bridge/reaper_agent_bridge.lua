@@ -425,11 +425,28 @@ local function find_track(payload)
     if found then return found, found_index end
     error("NO_TARGET_TRACK: No track named " .. payload.target_track_name)
   end
-  local selected = reaper.GetSelectedTrack(0, 0)
-  if selected then
-    return selected, math.floor(reaper.GetMediaTrackInfo_Value(selected, "IP_TRACKNUMBER"))
+  if payload.track_name_contains then
+    local found, found_index = nil, nil
+    local needle = payload.track_name_contains:lower()
+    for i = 0, reaper.CountTracks(0) - 1 do
+      local track = reaper.GetTrack(0, i)
+      local _, name = reaper.GetTrackName(track, "")
+      if name:lower():find(needle, 1, true) then
+        if found then error("AMBIGUOUS_TARGET_TRACK: Multiple tracks match '" .. payload.track_name_contains .. "'") end
+        found, found_index = track, i + 1
+      end
+    end
+    if found then return found, found_index end
+    error("NO_TARGET_TRACK: No track containing '" .. payload.track_name_contains .. "'")
   end
-  error("NO_TARGET_TRACK: Select a track or provide target_track_name")
+  if payload.use_selected_track then
+    local selected = reaper.GetSelectedTrack(0, 0)
+    if selected then
+      return selected, math.floor(reaper.GetMediaTrackInfo_Value(selected, "IP_TRACKNUMBER"))
+    end
+    error("NO_TARGET_TRACK: use_selected_track=true but nothing is selected")
+  end
+  error("NO_TARGET_TRACK: Provide target_track_name, target_track_guid, or track_name_contains")
 end
 
 local function contains_ci(haystack, needle)
