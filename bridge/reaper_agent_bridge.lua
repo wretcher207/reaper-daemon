@@ -863,9 +863,59 @@ local function command_set_fx_param(command)
     if value > 1 then value = 1 end
     ok = reaper.TrackFX_SetParamNormalized(track, api_index, param_index, value)
   elseif payload.formatted_value ~= nil then
-    local call_ok, retval = pcall(reaper.TrackFX_SetFormattedParamValue, track, api_index, param_index, tostring(payload.formatted_value))
-    if not call_ok then error("FORMATTED_VALUE_UNSUPPORTED: " .. tostring(retval)) end
-    ok = retval
+    -- REAPER has no "set by formatted string" API, and many plugins (FabFilter,
+    -- most VST3) expose params as normalized 0..1 with no real-world range, so
+    -- min/max can't convert "80 Hz" to normalized. Instead, binary-search the
+    -- normalized value whose formatted display matches the target number. Works
+    -- for any monotonic numeric param (Hz, dB, %, Q, gain, ratio). Enum/string
+    -- params ("Bell", "Off") have no parseable number and are rejected — use
+    -- normalized_value for those (scan to find the value that formats right).
+    local fv = tostring(payload.formatted_value)
+    local target = tonumber(fv:match("[-+]?%d*%.?%d+"))
+    if not target then
+      error("FORMATTED_VALUE_UNSUPPORTED: could not parse a number from '" .. fv
+            .. "' (use normalized_value 0..1, or relative)")
+    end
+    local function fmt_num(norm)
+      reaper.TrackFX_SetParamNormalized(track, api_index, param_index, norm)
+      local pok, retval, text = pcall(reaper.TrackFX_GetFormattedParamValue, track, api_index, param_index, "")
+      local s = ""
+      if pok then
+        if type(text) == "string" then s = text
+        elseif type(retval) == "string" then s = retval end
+      end
+      return tonumber(s:match("[-+]?%d*%.?%d+"))
+    end
+    local lo, hi = 0.0, 1.0
+    local lo_num = fmt_num(lo)
+    local hi_num = fmt_num(hi)
+    if lo_num == nil or hi_num == nil then
+      error("FORMATTED_VALUE_UNSUPPORTED: parameter is not numeric (use normalized_value)")
+    end
+    local ascending = hi_num >= lo_num
+    if (ascending and (target < lo_num or target > hi_num))
+       or (not ascending and (target > lo_num or target < hi_num)) then
+      error("FORMATTED_VALUE_UNSUPPORTED: " .. fv .. " outside param range ("
+            .. tostring(lo_num) .. " .. " .. tostring(hi_num) .. "); use normalized_value")
+    end
+    local norm = (lo + hi) / 2
+    for _ = 1, 24 do
+      local num = fmt_num(norm)
+      if num == nil then break end
+      if (ascending and num < target) or (not ascending and num > target) then
+        lo = norm
+      else
+        hi = norm
+      end
+      norm = (lo + hi) / 2
+    end
+    local best, d_best = lo, math.abs((fmt_num(lo) or target) - target)
+    local n_hi = fmt_num(hi)
+    if n_hi then
+      local d_hi = math.abs(n_hi - target)
+      if d_hi < d_best then best, d_best = hi, d_hi end
+    end
+    ok = reaper.TrackFX_SetParamNormalized(track, api_index, param_index, best)
   else
     error("BAD_PARAM_VALUE: Provide normalized_value, relative, or formatted_value")
   end
@@ -1517,6 +1567,26 @@ local function command_get_recipe(command)
   return { recipe = load_recipe(name) }
 end
 
+-- Enumerate plugins INSTALLED in REAPER (not just FX already on tracks).
+-- add_fx fails when fx_name doesn't match REAPER's exact listing; this lets an
+-- agent discover the precise name (incl. "VST3:" prefix and vendor suffix)
+-- before adding. Optional payload.query filters case-insensitively by substring.
+local function command_enum_installed_fx(command)
+  local payload = command.payload or {}
+  local query = payload.query and tostring(payload.query):lower() or nil
+  local matches = {}
+  local i = 0
+  while true do
+    local ok_, name = reaper.EnumInstalledFX(i)
+    if not ok_ or not name or name == "" then break end
+    if not query or name:lower():find(query, 1, true) then
+      matches[#matches + 1] = name
+    end
+    i = i + 1
+  end
+  return { query = payload.query or nil, count = #matches, fx = matches }
+end
+
 local handlers = {}
 
 -- Commands that don't need an undo block. `save_recipe` writes a file, not
@@ -1525,6 +1595,7 @@ local handlers = {}
 local NO_UNDO_BLOCK = {
   get_context = true, get_fx_parameters = true, scan_fx = true,
   list_recipes = true, get_recipe = true, save_recipe = true,
+  enum_installed_fx = true,
 }
 
 local function is_mutating(command_type)
@@ -1600,10 +1671,19 @@ local function command_apply_recipe(command)
   return { recipe = name, results = results }
 end
 
+local function command_get_selected_track()
+  local track = reaper.GetSelectedTrack(0, 0)
+  if not track then error("NO_TARGET_TRACK: No track selected") end
+  local _, name = reaper.GetTrackName(track)
+  return { name = name, guid = reaper.GetTrackGUID(track) }
+end
+
 -- Read / context
+handlers.get_selected_track = command_get_selected_track
 handlers.get_context = command_get_context
 handlers.get_fx_parameters = command_get_fx_parameters
 handlers.scan_fx = command_scan_fx
+handlers.enum_installed_fx = command_enum_installed_fx
 
 -- Transport / project
 handlers.play = command_play

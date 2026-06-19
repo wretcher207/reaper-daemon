@@ -160,7 +160,14 @@ may also be a native REAPER color integer.
   "param_name_contains": "Gain", "normalized_value": 0.65 }
 ```
 Instead of `normalized_value` (0.0–1.0): `relative` (`"+0.1"`) or
-`formatted_value` (`"65 %"`).
+`formatted_value` (`"65 %"`, `"80 Hz"`, `"-16.00 dB"`). The bridge binary-searches
+the normalized value whose formatted display matches the target number, so it
+works on plugins that hide their real range (FabFilter, most VST3) as well as
+those that expose it. Numeric display values only — enum/string params like
+"Bell", "Punch", or "Off" are rejected with `FORMATTED_VALUE_UNSUPPORTED` (use
+`normalized_value` for those: scan to find the value that formats right). When
+precision matters, scan with `get_fx_parameters` and send `normalized_value`
+directly.
 
 ### write_fx_param_automation
 ```json
