@@ -23,7 +23,7 @@ if [[ ! -f "$DSL" ]]; then
 fi
 
 TRACK=""
-POSITION=0
+POSITION=""        # empty = land at the REAPER edit cursor (DAW default); a value forces that time in seconds
 TEMPO=""
 SEED=""
 
@@ -37,10 +37,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$TRACK" ]]; then
-  echo "[groove] ERROR: --track <NAME> is required" >&2
-  exit 1
+# Position object: no --position => place at the edit cursor (so a second groove
+# lands where the cursor is, NOT slammed onto bar 1 stacking the first one).
+# Pass --position SEC only when an exact time is wanted.
+if [[ -n "$POSITION" ]]; then
+  POS_OBJ=$(jq -n --argjson s "$POSITION" '{type:"time", seconds:$s}')
+else
+  POS_OBJ='{"type":"cursor"}'
 fi
+
+# TRACK stays empty — payload will use use_selected_track if unset
 
 MIDI="/tmp/groove_$(date +%s%3N).mid"
 
@@ -49,8 +55,13 @@ GEN_ARGS=(--dsl "$DSL" --out "$MIDI")
 [[ -n "$SEED" ]] && GEN_ARGS+=(--seed "$SEED")
 python3 "$GROOVEGEN" "${GEN_ARGS[@]}"
 
-PAYLOAD=$(jq -n --arg t "$TRACK" --arg path "$MIDI" --argjson pos "$POSITION" \
-  '{target_track_name:$t, midi_path:$path, position:{type:"time", seconds:$pos}}')
+if [[ -n "$TRACK" ]]; then
+  PAYLOAD=$(jq -n --arg t "$TRACK" --arg path "$MIDI" --argjson pos "$POS_OBJ" \
+    '{target_track_name:$t, midi_path:$path, position:$pos}')
+else
+  PAYLOAD=$(jq -n --arg path "$MIDI" --argjson pos "$POS_OBJ" \
+    '{use_selected_track:true, midi_path:$path, position:$pos}')
+fi
 RESULT=$("$SEND" insert_midi_file "$PAYLOAD")
 
 OK=$(echo "$RESULT" | jq -r '.ok')

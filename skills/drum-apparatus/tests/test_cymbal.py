@@ -68,3 +68,24 @@ def test_cymbal_density_doubles_hits():
     assert len(chinas) == 2   # steps 8 and 10
     assert crashes[1] - crashes[0] == 2 * 120  # 8th note = 2 steps * 120 ticks
     assert chinas[1] - chinas[0] == 2 * 120
+
+
+def test_cymbal_density_decay_reduces_repeat_velocity():
+    # Power hit should be louder than the ring/choke repeat.
+    g = find_groove("Chug Breakdown")
+    dm = load_maps()["RS Monarch"]
+    evs = render_section(g, dm, 1, _params(cymbal_density=2, cymbal_decay=0.72), random.Random(1))
+    crashes = sorted((e["tick"], e["vel"]) for e in evs if e["pitch"] == dm["CRASH_R"])
+    power_vel = crashes[0][1]
+    repeat_vel = crashes[1][1]
+    assert power_vel > repeat_vel, f"power {power_vel} should exceed repeat {repeat_vel}"
+
+
+def test_china_breakdown_groove_exists_and_china_dominant():
+    g = find_groove("China Breakdown")
+    dm = load_maps()["RS Monarch"]
+    evs = render_section(g, dm, 4, _params(), random.Random(1))
+    pitches = Counter(e["pitch"] for e in evs)
+    # 4 bars * 2 china hits per bar = 8; no crash should appear
+    assert pitches[dm["CHINA_R"]] == 8
+    assert pitches[dm["CRASH_R"]] == 0

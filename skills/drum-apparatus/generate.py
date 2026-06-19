@@ -8,7 +8,8 @@ DEFAULTS = dict(humanize=45, push_pull=0, velocity_mode=1, power_hand="hh_open",
                 ph_velocity=90, ph_variance=40, fills=True, fill_velocity=115,
                 tempo=120, ppq=480, map_name="RS Monarch",
                 bar_length_qn=4.0, step_qn=0.25, ph_spacing_qn=0.5, seed=1,
-                accent_cymbal="CRASH_R", accent_every_bars=1, cymbal_density=1)
+                accent_cymbal="CRASH_R", accent_every_bars=1, cymbal_density=1,
+                cymbal_decay=0.72)
 
 
 def build_params(args, overrides):
@@ -23,6 +24,7 @@ def build_params(args, overrides):
     if args.accent_cymbal is not None: p["accent_cymbal"] = args.accent_cymbal
     if args.accent_every_bars is not None: p["accent_every_bars"] = args.accent_every_bars
     if args.cymbal_density is not None: p["cymbal_density"] = args.cymbal_density
+    if args.cymbal_decay is not None: p["cymbal_decay"] = args.cymbal_decay
     return p
 
 
@@ -37,6 +39,7 @@ def main():
     ap.add_argument("--accent-cymbal", dest="accent_cymbal")
     ap.add_argument("--accent-every-bars", dest="accent_every_bars", type=int)
     ap.add_argument("--cymbal-density", dest="cymbal_density", type=int)
+    ap.add_argument("--cymbal-decay", dest="cymbal_decay", type=float)
     ap.add_argument("--list-maps", dest="list_maps", action="store_true")
     args = ap.parse_args()
 

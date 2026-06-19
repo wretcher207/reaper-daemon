@@ -14,6 +14,44 @@ POWER_HAND = {
     "none":      (None, []),
 }
 
+# Which limb plays each role. Used for anatomical conflict detection.
+ROLE_LIMB = {
+    "KICK_R":        "right_foot",
+    "KICK_L":        "left_foot",
+    "HH_PEDAL":      "left_foot",
+    "SNARE":         "left_hand",
+    "SNARE_GHOST":   "left_hand",
+    "SNARE_FLAM":    "left_hand",
+    "SNARE_RIM":     "left_hand",
+    "HH_CLOSED_TIP": "right_hand",
+    "HH_CLOSED_EDGE":"right_hand",
+    "HH_OPEN_1":     "right_hand",
+    "HH_OPEN_2":     "right_hand",
+    "HH_OPEN_3":     "right_hand",
+    "RIDE_TIP":      "right_hand",
+    "RIDE_BELL":     "right_hand",
+    "RIDE_CRASH":    "right_hand",
+    "CRASH_R":       "right_hand",
+    "CRASH_L":       "left_hand",
+    "CHINA_R":       "right_hand",
+    "CHINA_L":       "left_hand",
+    "STACK":         "right_hand",
+    "SPLASH_R":      "right_hand",
+    "SPLASH_L":      "left_hand",
+    "BELL":          "right_hand",
+    "TOM_1":         "right_hand",
+    "TOM_2":         "left_hand",
+    "TOM_3":         "left_hand",
+    "TOM_4":         "left_hand",
+}
+
+# Closed hihat requires the left foot holding the pedal.
+# When left_foot is on KICK_L, the pedal is up: hat falls open.
+CLOSED_TO_OPEN = {
+    "HH_CLOSED_TIP":  "HH_OPEN_1",
+    "HH_CLOSED_EDGE": "HH_OPEN_1",
+}
+
 # Authored cymbal/accent lane: char -> (map role, base velocity). Used by
 # breakdown grooves to place a cymbal on specific accents (the big stab, the
 # snare smash) instead of running a grid ostinato. Char map mirrors the
@@ -55,7 +93,7 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
 
     for bar in range(bars):
         bar_base_qn = bar_offset_qn + bar * blq
-        limb = [0] * (steps_in_bar + 1)
+        limb = [set() for _ in range(steps_in_bar + 1)]
         is_final = (bar == bars - 1)
         apply_fill = p["fills"] and is_final and groove.get("_fill", True)
         turnaround = steps_in_bar - steps_per_beat
@@ -76,7 +114,7 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
                 vel = humanize_velocity(base, p["velocity_mode"], p["humanize"],
                                         foot == "KICK_L", rng)
                 _emit(events, pos_qn, drum_map[foot], vel, p, rng, bar, si, offset_cache)
-                limb[si] += 1
+                limb[si].add(ROLE_LIMB.get(foot, foot))
             if s != "-":
                 if s == "S": role, base = "SNARE", 127
                 elif s == "s": role, base = "SNARE", 110
@@ -86,17 +124,20 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
                 if role:
                     vel = humanize_velocity(base, p["velocity_mode"], p["humanize"], False, rng)
                     _emit(events, pos_qn, drum_map[role], vel, p, rng, bar, si, offset_cache)
-                    limb[si] += 1
+                    limb[si].add(ROLE_LIMB.get(role, role))
             if has_cymbal and cym != "-" and cym in CYMBAL_CHARS:
                 role, base = CYMBAL_CHARS[cym]
                 vel = humanize_velocity(base, p["velocity_mode"], p["humanize"], False, rng)
                 _emit(events, pos_qn, drum_map[role], vel, p, rng, bar, si, offset_cache)
-                limb[si] += 1
+                limb[si].add(ROLE_LIMB.get(role, role))
                 density = p.get("cymbal_density", 1)
+                # Decay multiplier: first hit is the power slam, repeats are the ring/choke.
+                decay = p.get("cymbal_decay", 0.72)
                 for d in range(1, density):
                     rep_si = si + d * 2  # 8th-note spacing
                     if rep_si < steps_in_bar:
-                        _emit(events, bar_base_qn + rep_si * sq, drum_map[role], vel, p, rng, bar, rep_si, offset_cache)
+                        rep_vel = max(50, int(vel * (decay ** d)))
+                        _emit(events, bar_base_qn + rep_si * sq, drum_map[role], rep_vel, p, rng, bar, rep_si, offset_cache)
 
         accent_role = p.get("accent_cymbal", "CRASH_R")
         accent_every = p.get("accent_every_bars", 1)
@@ -112,17 +153,31 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
                 _emit(events, bar_base_qn + step * sq, drum_map[tom], vel, p, rng, bar, step, offset_cache)
             _emit(events, bar_base_qn + steps_in_bar * sq, drum_map["CRASH_R"], 127, p, rng, bar, steps_in_bar, offset_cache)
 
+        # Anatomical check: if left foot kicks at all in this bar, the hihat
+        # pedal cannot be held closed. Left foot alternates every 16th in
+        # double-kick runs so its steps are always adjacent to the power hand
+        # grid, not coincident. Checking the whole bar is the correct model.
+        bar_has_left_kick = any("left_foot" in l for l in limb)
+
         if ph_pitch_role:
             spacing = p["ph_spacing_qn"]
             ph_steps = int(round(blq / spacing))
             for j in range(ph_steps):
                 pos_qn = j * spacing
                 nearest = int(round(pos_qn / sq))
-                if nearest in fill_zone or (ph_is_hat and limb[min(nearest, steps_in_bar)] >= 2):
+                step_limbs = limb[min(nearest, steps_in_bar)]
+                if nearest in fill_zone or (ph_is_hat and len(step_limbs) >= 2):
                     continue
-                pitch = drum_map[ph_pitch_role]
+                # Closed hihat requires left foot on pedal.
+                # If left foot kicks anywhere in this bar, hat falls open.
+                ph_role = ph_pitch_role
+                if ph_role in CLOSED_TO_OPEN and bar_has_left_kick:
+                    ph_role = CLOSED_TO_OPEN[ph_role]
+                pitch = drum_map[ph_role]
                 if ph_var_roles and rng.randint(1, 100) < p["ph_variance"]:
-                    pitch = drum_map[ph_var_roles[rng.randint(0, len(ph_var_roles) - 1)]]
+                    var_role = ph_var_roles[rng.randint(0, len(ph_var_roles) - 1)]
+                    var_role = CLOSED_TO_OPEN.get(var_role, var_role) if bar_has_left_kick else var_role
+                    pitch = drum_map[var_role]
                 _emit(events, bar_base_qn + pos_qn, pitch, p["ph_velocity"], p, rng, bar, 0, offset_cache)
 
     return events
