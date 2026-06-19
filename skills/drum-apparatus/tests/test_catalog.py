@@ -20,7 +20,7 @@ def test_rs_monarch_known_notes():
 
 def test_grooves_count_and_validity():
     grooves = load_grooves()
-    assert len(grooves) == 49  # 36 base + 11 breakdown grooves (cymbal lane) + 8 new gap-fillers
+    assert len(grooves) == 50  # 38 non-breakdown + 12 breakdown grooves (cymbal lane), 10 categories
     cats = {g["category"] for g in grooves}
     assert len(cats) == 10
     legal_kick, legal_snare = set("KkS-"), set("Ssgf-")  # 'S'-in-kick = ghost kick (Linear Precision)
