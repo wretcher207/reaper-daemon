@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="reaper-daemon" commit="8421ef66e3779e0f47a8e08c5243a2b3e5bdcfdb">
+<index version="1" name="reaper-daemon" commit="c8ebd99">
   <category name="bridge">
     <reapack name="reaper_agent_bridge.lua" type="script" desc="Reaper Daemon (REAPER agent file bridge)">
       <metadata>
         <link rel="website" href="https://github.com/wretcher207/reaper-daemon">Reaper Daemon on GitHub</link>
       </metadata>
-      <version name="3.1.0" author="Dead Pixel Design" time="2026-06-20T10:00:00Z">
+      <version name="3.1.1" author="Dead Pixel Design" time="2026-06-20T16:00:00Z">
         <changelog><![CDATA[Repin to current bridge: master-track scan, set_fx_param formatted-value binary search, singleton lock with render-busy guard, retention sweep, meter-correct bar math, undo-block closed on handler errors.]]></changelog>
-        <source main="main">https://github.com/wretcher207/reaper-daemon/raw/8421ef66e3779e0f47a8e08c5243a2b3e5bdcfdb/bridge/reaper_agent_bridge.lua</source>
-        <source file="json.lua">https://github.com/wretcher207/reaper-daemon/raw/8421ef66e3779e0f47a8e08c5243a2b3e5bdcfdb/bridge/json.lua</source>
+        <source main="main">https://github.com/wretcher207/reaper-daemon/raw/c8ebd99/bridge/reaper_agent_bridge.lua</source>
+        <source file="json.lua">https://github.com/wretcher207/reaper-daemon/raw/c8ebd99/bridge/json.lua</source>
       </version>
     </reapack>
   </category>
