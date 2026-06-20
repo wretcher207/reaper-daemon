@@ -27,6 +27,8 @@ def main(argv=None):
     ap.add_argument("--out", required=True, help="output MIDI path")
     ap.add_argument("--seed", type=int, default=None,
                     help="optional RNG seed (overrides @seed in the DSL)")
+    ap.add_argument("--map", default=None,
+                    help="default kit map when the DSL omits @map (DSL @map wins)")
     args = ap.parse_args(argv)
 
     try:
@@ -34,7 +36,8 @@ def main(argv=None):
             text = Path(args.dsl).read_text()
         else:
             text = args.spec
-        data, info = build_midi(text, seed=args.seed)
+        data, info = build_midi(text, seed=args.seed,
+                                default_map=args.map or "GM Standard")
     except (DSLError, KeyError, ValueError) as exc:
         # clean, human-readable failure — no raw traceback leaks to stderr.
         msg = str(exc).strip().strip('"').strip("'")
@@ -51,6 +54,8 @@ def main(argv=None):
     print(f"groovekit: {info['notes']} notes | {info['bars']} bars | "
           f"map={info['map']} | tempo={info['tempo']} | seed={info['seed']} | "
           f"-> {out}")
+    for w in info.get("warnings", []):
+        print(f"  warn: {w}")
     return 0
 
 

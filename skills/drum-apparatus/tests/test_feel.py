@@ -1,5 +1,25 @@
 import random
-from drumgen.feel import humanize_velocity, timing_offset_seconds, offset_to_ticks
+from drumgen.feel import humanize_velocity, timing_offset_seconds, offset_to_ticks, unique_velocity
+
+
+def test_unique_velocity_breaks_ties():
+    rng = random.Random(3)
+    last = {}
+    # same pitch, same incoming vel every time -> output must never repeat consecutively
+    out = [unique_velocity(38, 100, last, rng) for _ in range(200)]
+    assert all(a != b for a, b in zip(out, out[1:]))
+
+
+def test_unique_velocity_respects_ceiling_floor():
+    rng = random.Random(3)
+    assert unique_velocity(36, 127, {36: 127}, rng) == 126  # can't go above 127
+    assert unique_velocity(36, 1, {36: 1}, rng) == 2        # can't go below 1
+
+
+def test_unique_velocity_leaves_distinct_alone():
+    rng = random.Random(3)
+    last = {38: 90}
+    assert unique_velocity(38, 100, last, rng) == 100  # already differs, untouched
 
 
 def test_velocity_clamped_and_centered():
@@ -15,7 +35,7 @@ def test_left_foot_quieter():
     base = [humanize_velocity(110, 1, 0, False, rng) for _ in range(50)]
     rng = random.Random(1)
     left = [humanize_velocity(110, 1, 0, True, rng) for _ in range(50)]
-    assert sum(left) < sum(base)  # x0.92
+    assert sum(left) < sum(base)  # weak foot: -7..-9
 
 
 def test_humanize_zero_is_deterministic():

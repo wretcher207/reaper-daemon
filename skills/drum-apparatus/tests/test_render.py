@@ -54,7 +54,17 @@ def test_fill_on_last_bar_adds_toms_and_crash():
     assert any(e["pitch"] == dm["CRASH_R"] for e in evs)
 
 
-def test_arrangement_concatenates_bars():
+def test_fill_ramps_low_to_high_and_rolls_across_kit():
+    g = find_groove("Standard 16th Stream")
+    dm = load_maps()["RS Monarch"]
+    evs = render_section(g, dm, 2, _params(fills=True, fill_velocity=115), random.Random(1))
+    # fill lives in the last beat of the last bar: qn >= 7.0 (bar2 start 4.0 + 3.0)
+    fill = sorted((e["tick"], e["pitch"], e["vel"]) for e in evs if e["tick"] >= int(7.0 * 480))
+    voices = {dm[v] for v in ("SNARE", "TOM_1", "TOM_2", "TOM_3", "TOM_4") if v in dm}
+    rolled = [e for e in fill if e[1] in voices]
+    assert len({e[1] for e in rolled}) >= 2          # rolls across >1 voice
+    assert rolled[0][2] < rolled[-1][2]               # velocity ramps up
+    assert any(e[1] == dm["CRASH_R"] for e in fill)   # lands on a crash
     secs = [{"groove": "Tech Death Pulse", "bars": 2},
             {"groove": "The Pit Opener", "bars": 2}]
     evs = render_arrangement(secs, _params(fills=False))

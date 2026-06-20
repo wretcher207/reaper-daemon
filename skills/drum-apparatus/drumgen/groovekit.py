@@ -94,6 +94,35 @@ FEEL_CENTER = {
     "mf": 88, "f": 104, "ff": 117, "fff": 125,
 }
 
+# David keeps kicks punchy, not maxed — under ~114. General default, overridable
+# per render with params["kick_vel_max"].
+KICK_VEL_MAX = 114
+
+# Per-kit voice preferences, keyed by map name. A kit can say "the snare I reach
+# for is the rimshot, held in this band." Unset -> plain role, full 1-127 range.
+VOICE_PROFILE = {
+    # Monarch: David plays the rimshot snare (fuller, louder), 90-110. He played
+    # 91/99/108/110 here and confirmed loud-as-fuck is the intent.
+    "RS Monarch": {"snare_role": "SNARE_RIM", "snare_vel": (90, 110)},
+}
+
+# Hi-hat velocity curve: closed is played softer, open is louder. Multiplies the
+# resolved hat velocity by role.
+HAT_CURVE = {
+    "HH_CLOSED_TIP": 0.8, "HH_CLOSED_EDGE": 0.8, "HH_PEDAL": 0.8,
+    "HH_OPEN_1": 1.0, "HH_OPEN_2": 1.0, "HH_OPEN_3": 1.0,
+}
+# A cymbal struck together with a shell (kick/snare/tom) lands harder — a human
+# pushes more force on the cymbal while also hitting the shell. Verified from
+# David's own part (every crash/china landed on a kick, louder than the body).
+CYMBAL_SHELL_BOOST = 1.12
+_CYMBAL_PREFIXES = ("CRASH", "CHINA", "RIDE", "SPLASH", "STACK")
+_SHELL_PREFIXES = ("KICK", "SNARE", "TOM")
+
+
+def _is_cymbal(role):
+    return role.startswith(_CYMBAL_PREFIXES) or role == "BELL"
+
 # lane name -> (role, kind). kind drives special handling.
 #   "kick"     -> alternating KICK_R/KICK_L
 #   "kick_l"   -> always KICK_L
@@ -247,7 +276,7 @@ def parse_dsl(text, default_map="GM Standard"):
     if tempo is None:
         raise DSLError("missing @tempo")
     if map_name is None:
-        raise DSLError("missing @map")
+        map_name = default_map  # @map is optional; fall back to the default kit
     # validate the map name against the catalog so a bad kit fails like every
     # other directive (clean DSLError) instead of leaking a bare KeyError out
     # of render().
@@ -316,6 +345,8 @@ def render(sections, params, rng):
     ppq = params["ppq"]
     humanize = params.get("humanize", 20)
     drum_map = load_maps()[params["map"]]
+    profile = VOICE_PROFILE.get(params["map"], {})
+    kick_max = params.get("kick_vel_max", KICK_VEL_MAX)
 
     def pitch_for(role):
         r = role
@@ -329,6 +360,22 @@ def render(sections, params, rng):
             # partial map and the caller's report flags what's missing.
             return None
         return drum_map[r]
+
+    # Per-pitch velocity bounds: David's kick ceiling + the kit's snare band.
+    # Keyed by resolved MIDI pitch so the golden-rule + final clamps respect them.
+    bounds = {}
+    for _kr in ("KICK_R", "KICK_L"):
+        _kp = pitch_for(_kr)
+        if _kp is not None:
+            bounds[_kp] = (1, kick_max)
+    if profile.get("snare_vel"):
+        _sp = pitch_for(profile.get("snare_role", "SNARE"))
+        if _sp is not None:
+            bounds[_sp] = tuple(profile["snare_vel"])
+
+    def clamp_v(pitch, v):
+        lo, hi = bounds.get(pitch, (1, 127))
+        return max(lo, min(hi, v))
 
     ticks_per_16th = ppq / 4.0
     dur_ticks = int(round(NOTE_DUR_QN * ppq))
@@ -414,6 +461,13 @@ def render(sections, params, rng):
                     if c != CELL_REST:
                         bar_has_left[gstep // grid] = True
 
+        # Steps where a shell (kick/snare/tom) fires — a cymbal landing on one of
+        # these gets the with-shell velocity boost (#2).
+        shell_steps = set()
+        for lane, full in lane_cells:
+            if lane["role"].startswith(_SHELL_PREFIXES):
+                shell_steps.update(g for g, c in enumerate(full) if c != CELL_REST)
+
         # Build per-lane intent lists.
         for lane, full in lane_cells:
             kind = lane["kind"]
@@ -465,7 +519,8 @@ def render(sections, params, rng):
                     elif c == CELL_FLAM:
                         role = "SNARE_FLAM"
                     else:
-                        role = "SNARE"
+                        # kit's preferred main snare (Monarch -> rimshot)
+                        role = profile.get("snare_role", "SNARE")
                 elif kind == "hat_closed":
                     role = "HH_CLOSED_TIP"
                     if bar_has_left[bar_idx] and role in CLOSED_TO_OPEN:
@@ -492,9 +547,20 @@ def render(sections, params, rng):
                     if step_in_bar == 0:
                         vel += 10
 
-                # ----- (4) left-foot kick scaling -----
+                # ----- (4) weak-foot kick drop (fast double-kick only) -----
+                # The off (left) foot lands 7-9 lower than the right, but ONLY in
+                # a genuine fast run (consecutive kicks = both feet truly used). An
+                # isolated kick the alternation happened to label left stays full.
                 if is_left:
-                    vel *= (LEFT_FOOT_STRENGTH / 100.0)
+                    _, _rlen = run_meta.get(gstep, (0, 1))
+                    if _rlen >= 2:
+                        vel -= rng.randint(7, 9)
+
+                # ----- (4b) cymbal physics -----
+                if role in HAT_CURVE:                          # hi-hat curve (#3)
+                    vel *= HAT_CURVE[role]
+                elif _is_cymbal(role) and gstep in shell_steps:  # cymbal+shell (#2)
+                    vel *= CYMBAL_SHELL_BOOST
 
                 intents.append({
                     "gstep": gstep, "bar": bar_idx, "step_in_bar": step_in_bar,
@@ -549,23 +615,19 @@ def render(sections, params, rng):
                 pitch = it["_pitch"]
                 if pitch is None:
                     continue  # unmapped role on a sparse/discovered map
+                lo, hi = bounds.get(pitch, (1, 127))
                 prev_v = prev_v_by_pitch.get(pitch)
                 v = it["vel"]
                 if prev_v is not None and abs(v - prev_v) < 4:
-                    if v >= prev_v:
-                        v = prev_v + 4
-                    else:
-                        v = prev_v - 4
-                # clamp here too so the neighbor relationship is on clamped vals
-                v = max(1.0, min(127.0, v))
-                # if clamping collapsed the gap (e.g. both at 127), push the
-                # other way.
+                    v = prev_v + 4 if v >= prev_v else prev_v - 4
+                # clamp to this pitch's band so the neighbor relationship holds
+                # on bounded values (kick ceiling, snare band).
+                v = max(lo, min(hi, v))
+                # if clamping collapsed the gap (e.g. both pinned at the ceiling),
+                # push the other way, still within the band.
                 if prev_v is not None and abs(v - prev_v) < 4:
-                    if prev_v >= 124:
-                        v = prev_v - 4
-                    else:
-                        v = prev_v + 4
-                    v = max(1.0, min(127.0, v))
+                    v = prev_v - 4 if prev_v >= hi - 3 else prev_v + 4
+                    v = max(lo, min(hi, v))
                 it["vel"] = v
                 prev_v_by_pitch[pitch] = v
 
@@ -582,7 +644,7 @@ def render(sections, params, rng):
                 events.append({
                     "tick": max(0, tick),
                     "pitch": pitch,
-                    "vel": int(round(max(1, min(127, it["vel"])))),
+                    "vel": int(round(clamp_v(pitch, it["vel"]))),
                     "dur": dur_ticks,
                 })
 
@@ -596,12 +658,51 @@ def render(sections, params, rng):
 # Top-level convenience
 # ---------------------------------------------------------------------------
 
-def build(text, seed=None):
+# Focal voices that should land WITH something (a shell or another cymbal). A
+# bare one is usually the bug David flags (#7: "you don't hear one snare hit
+# alone"). Ostinato voices (hats, ride) play alone legitimately -> excluded.
+FOCAL_LANES = ("snare", "crash", "crash_r", "crash_l", "china", "splash", "stack")
+
+
+def exposed_focal_hits(parsed, limit=8):
+    """Warnings for focal snare/cymbal hits that fire with nothing else on the
+    same step. A flag for review, not an error."""
+    warnings = []
+    for sec in parsed["sections"]:
+        grid, bars = sec["grid"], sec["bars"]
+        total = grid * bars
+        per_beat = max(1, grid // 4)
+        step_pop = {}                       # gstep -> how many lanes fire there
+        lanes_full = []
+        for lane in sec["lanes"]:
+            cells = lane["cells"]
+            full = cells if len(cells) == total else cells * (total // len(cells))
+            steps = [g for g, c in enumerate(full) if c != CELL_REST]
+            lanes_full.append((lane["lane"], steps))
+            for g in steps:
+                step_pop[g] = step_pop.get(g, 0) + 1
+        for name, steps in lanes_full:
+            if name not in FOCAL_LANES:
+                continue
+            for g in steps:
+                if step_pop.get(g, 0) < 2:  # this focal hit is alone at its step
+                    warnings.append(
+                        f"[{sec['name']}] bare {name} at bar {g // grid + 1} "
+                        f"beat {g % grid // per_beat + 1}.{g % per_beat + 1} "
+                        f"— nothing struck with it (#7)")
+    if len(warnings) > limit:
+        warnings = warnings[:limit] + [f"... and {len(warnings) - limit} more bare focal hits"]
+    return warnings
+
+
+def build(text, seed=None, default_map="GM Standard"):
     """Parse DSL text and render events. Returns (events, info_dict).
 
     Seed precedence: explicit `seed` arg > @seed in DSL > random.
+    default_map is the kit used when the DSL omits `@map` (an explicit `@map`
+    in the DSL always wins).
     """
-    parsed = parse_dsl(text)
+    parsed = parse_dsl(text, default_map=default_map or "GM Standard")
     if seed is None:
         seed = parsed["seed"]
     if seed is None:
@@ -623,12 +724,13 @@ def build(text, seed=None):
         "bars": total_bars,
         "notes": len(events),
         "sections": [s["name"] for s in parsed["sections"]],
+        "warnings": exposed_focal_hits(parsed),
     }
     return events, info
 
 
-def build_midi(text, seed=None):
+def build_midi(text, seed=None, default_map="GM Standard"):
     """Parse + render + serialize to MIDI bytes. Returns (bytes, info)."""
-    events, info = build(text, seed=seed)
+    events, info = build(text, seed=seed, default_map=default_map)
     data = write_smf(events, ppq=info["ppq"], tempo=info["tempo"])
     return data, info

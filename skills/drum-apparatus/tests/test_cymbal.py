@@ -81,6 +81,29 @@ def test_cymbal_density_decay_reduces_repeat_velocity():
     assert power_vel > repeat_vel, f"power {power_vel} should exceed repeat {repeat_vel}"
 
 
+def test_cymbal_louder_when_landing_with_a_shell():
+    # Crash at step 0 lands with a kick; crash at step 8 lands alone. The
+    # with-shell strike must be louder (CYMBAL_SHELL_BOOST).
+    g = {"kick": "x" + "-" * 15, "snare": "-" * 16, "cymbal": "X" + "-" * 7 + "X" + "-" * 7}
+    dm = load_maps()["RS Monarch"]
+    evs = render_section(g, dm, 1, _params(), random.Random(1))
+    crashes = sorted((e["tick"], e["vel"]) for e in evs if e["pitch"] == dm["CRASH_R"])
+    with_shell, alone = crashes[0][1], crashes[1][1]
+    assert with_shell > alone
+
+
+def test_hihat_closed_is_softer_than_open():
+    # Same groove, closed vs open power hand. Closed hats play softer than open.
+    g = {"kick": "x" + "-" * 7 + "x" + "-" * 7, "snare": "-" * 4 + "x" + "-" * 7 + "x" + "-" * 3}
+    dm = load_maps()["RS Monarch"]
+    closed = render_section(g, dm, 1, _params(power_hand="hh_closed"), random.Random(1))
+    opn = render_section(g, dm, 1, _params(power_hand="hh_open"), random.Random(1))
+    c = [e["vel"] for e in closed if e["pitch"] in (dm["HH_CLOSED_TIP"], dm["HH_CLOSED_EDGE"])]
+    o = [e["vel"] for e in opn if e["pitch"] in (dm["HH_OPEN_1"], dm["HH_OPEN_2"], dm["HH_OPEN_3"])]
+    assert c and o
+    assert max(c) < min(o)  # closed ~0.8*90 well below open ~90
+
+
 def test_china_breakdown_groove_exists_and_china_dominant():
     g = find_groove("China Breakdown")
     dm = load_maps()["RS Monarch"]

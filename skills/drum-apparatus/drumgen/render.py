@@ -1,5 +1,5 @@
 import random
-from .feel import humanize_velocity, timing_offset_seconds, offset_to_ticks
+from .feel import humanize_velocity, timing_offset_seconds, offset_to_ticks, unique_velocity
 from .catalog import load_maps, find_groove
 
 NOTE_DUR_QN = 0.12
@@ -65,6 +65,43 @@ CYMBAL_CHARS = {
 }
 
 
+# Hi-hat velocity curve: closed is played softer, open is louder. Multiplies the
+# power-hand velocity by role. Non-hat power hands (ride/crash) -> 1.0 (unchanged).
+HAT_CURVE = {
+    "HH_CLOSED_TIP": 0.8, "HH_CLOSED_EDGE": 0.8, "HH_PEDAL": 0.8,
+    "HH_OPEN_1": 1.0, "HH_OPEN_2": 1.0, "HH_OPEN_3": 1.0,
+}
+# A cymbal struck together with a shell (kick/snare/tom) lands harder, because a
+# human pushes more force on the cymbal while also hitting the shell.
+CYMBAL_SHELL_BOOST = 1.12
+
+
+# Fill voices, high -> low across the kit. A fill rolls down through whichever
+# of these the current map actually has.
+FILL_VOICES = ["SNARE", "TOM_1", "TOM_2", "TOM_3", "TOM_4"]
+
+
+def _render_fill(events, bar_base_qn, turnaround, steps_in_bar, sq, drum_map, p, rng, bar, offset_cache):
+    """A fill that rolls down the kit with a low->high velocity ramp (the rolling
+    sound), landing on a crash. Density varies per fill for spice.
+    ponytail: procedural roll. Spicier moves (flams, kick under the roll, crash
+    choke, longer pre-fills) can layer on here later — this is the musical floor,
+    not the ceiling."""
+    voices = [v for v in FILL_VOICES if v in drum_map] or ["SNARE"]
+    start_qn, end_qn = turnaround * sq, steps_in_bar * sq
+    span = end_qn - start_qn
+    n_notes = rng.choice([4, 6, 8])          # 16ths, sextuplet, or 32nds — the spice
+    lo, hi = int(p["fill_velocity"] * 0.55), min(127, p["fill_velocity"])
+    for i in range(n_notes):
+        frac = i / n_notes
+        voice = voices[min(int(frac * len(voices)), len(voices) - 1)]  # walk down the kit
+        ramp = lo + (hi - lo) * (i / max(1, n_notes - 1))              # ramp up across it
+        vel = max(1, min(127, int(ramp) + rng.randint(-2, 2)))
+        _emit(events, bar_base_qn + start_qn + frac * span, drum_map[voice], vel,
+              p, rng, bar, turnaround + i, offset_cache)
+    _emit(events, bar_base_qn + end_qn, drum_map["CRASH_R"], 127, p, rng, bar, steps_in_bar, offset_cache)
+
+
 def _emit(events, abs_qn, pitch, vel, p, rng, bar_idx, step_idx, offset_cache):
     key = (bar_idx, step_idx)
     if key not in offset_cache:
@@ -72,11 +109,13 @@ def _emit(events, abs_qn, pitch, vel, p, rng, bar_idx, step_idx, offset_cache):
     off_ticks = offset_to_ticks(offset_cache[key], p["tempo"], p["ppq"])
     tick = int(round(abs_qn * p["ppq"])) + off_ticks
     dur = int(round(NOTE_DUR_QN * p["ppq"]))
+    vel = unique_velocity(pitch, vel, p["_last_vel"], rng)
     events.append({"tick": max(0, tick), "pitch": pitch, "vel": vel, "dur": dur})
 
 
 def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
     p = params
+    p.setdefault("_last_vel", {})  # per-lane last velocity; golden-rule guard in _emit
     events = []
     offset_cache = {}
     blq = p["bar_length_qn"]; sq = p["step_qn"]
@@ -109,7 +148,14 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
             cym = cymbal_lane[sidx] if has_cymbal else "-"
             pos_qn = bar_base_qn + si * sq
             if k != "-":
-                foot = "KICK_L" if i % 2 == 0 else "KICK_R"
+                # Left foot only in a FAST run (an adjacent 16th also kicks);
+                # isolated kicks are the right foot at full power. This is what
+                # scopes the -7..-9 weak-foot drop to real double-kick parts.
+                # ponytail: 16th-adjacency heuristic, not true foot-tracking;
+                # good enough for grid grooves, revisit if 32nd runs need it.
+                in_run = groove["kick"][(sidx - 1) % pat_len] != "-" or \
+                         groove["kick"][(sidx + 1) % pat_len] != "-"
+                foot = "KICK_L" if (in_run and i % 2 == 0) else "KICK_R"
                 base = 127 if k == "K" else 110
                 vel = humanize_velocity(base, p["velocity_mode"], p["humanize"],
                                         foot == "KICK_L", rng)
@@ -127,6 +173,8 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
                     limb[si].add(ROLE_LIMB.get(role, role))
             if has_cymbal and cym != "-" and cym in CYMBAL_CHARS:
                 role, base = CYMBAL_CHARS[cym]
+                if k != "-" or s != "-":  # cymbal lands with a shell -> louder
+                    base = min(127, int(base * CYMBAL_SHELL_BOOST))
                 vel = humanize_velocity(base, p["velocity_mode"], p["humanize"], False, rng)
                 _emit(events, pos_qn, drum_map[role], vel, p, rng, bar, si, offset_cache)
                 limb[si].add(ROLE_LIMB.get(role, role))
@@ -147,11 +195,7 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
                 _emit(events, bar_base_qn, drum_map[accent_role], vel, p, rng, bar, 0, offset_cache)
 
         if apply_fill:
-            for step in range(turnaround, steps_in_bar):
-                tom = "TOM_1" if step % 2 == 0 else "TOM_2"
-                vel = humanize_velocity(p["fill_velocity"], p["velocity_mode"], p["humanize"], False, rng)
-                _emit(events, bar_base_qn + step * sq, drum_map[tom], vel, p, rng, bar, step, offset_cache)
-            _emit(events, bar_base_qn + steps_in_bar * sq, drum_map["CRASH_R"], 127, p, rng, bar, steps_in_bar, offset_cache)
+            _render_fill(events, bar_base_qn, turnaround, steps_in_bar, sq, drum_map, p, rng, bar, offset_cache)
 
         # Anatomical check: if left foot kicks at all in this bar, the hihat
         # pedal cannot be held closed. Left foot alternates every 16th in
@@ -170,15 +214,18 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
                     continue
                 # Closed hihat requires left foot on pedal.
                 # If left foot kicks anywhere in this bar, hat falls open.
-                ph_role = ph_pitch_role
-                if ph_role in CLOSED_TO_OPEN and bar_has_left_kick:
-                    ph_role = CLOSED_TO_OPEN[ph_role]
-                pitch = drum_map[ph_role]
+                role = ph_pitch_role
+                if role in CLOSED_TO_OPEN and bar_has_left_kick:
+                    role = CLOSED_TO_OPEN[role]
                 if ph_var_roles and rng.randint(1, 100) < p["ph_variance"]:
                     var_role = ph_var_roles[rng.randint(0, len(ph_var_roles) - 1)]
-                    var_role = CLOSED_TO_OPEN.get(var_role, var_role) if bar_has_left_kick else var_role
-                    pitch = drum_map[var_role]
-                _emit(events, bar_base_qn + pos_qn, pitch, p["ph_velocity"], p, rng, bar, 0, offset_cache)
+                    role = CLOSED_TO_OPEN.get(var_role, var_role) if bar_has_left_kick else var_role
+                pitch = drum_map[role]
+                ph_vel = p["ph_velocity"] * HAT_CURVE.get(role, 1.0)  # closed soft / open loud
+                if not ph_is_hat and len(step_limbs) >= 1:  # cymbal power hand landing with a shell
+                    ph_vel *= CYMBAL_SHELL_BOOST
+                ph_vel = max(1, min(127, int(ph_vel)))
+                _emit(events, bar_base_qn + pos_qn, pitch, ph_vel, p, rng, bar, 0, offset_cache)
 
     return events
 
@@ -186,6 +233,7 @@ def render_section(groove, drum_map, bars, params, rng, bar_offset_qn=0.0):
 def render_arrangement(sections, params):
     rng = random.Random(params["seed"])
     drum_map = load_maps()[params["map_name"]]
+    params["_last_vel"] = {}  # persists across sections so the boundary differs too
     events = []
     cursor_qn = 0.0
     for sec in sections:
