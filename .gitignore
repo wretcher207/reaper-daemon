@@ -35,7 +35,11 @@ __pycache__/
 MEMORY.md
 HANDOFF.md
 ERRORS.md
+CLAUDE.md
 docs/superpowers/
+
+# Personal kit defaults (user creates their own; do not ship my kit)
+drum-config.json
 
 # User drum-kit map overlay (discovered/added maps; not shipped with the repo)
 skills/drum-apparatus/maps/*

@@ -7,7 +7,7 @@
   "dry_run": false,
   "undo_label": "Agent: add FX chain",
   "payload": {
-    "target_track_name": "GTR_Buss",
-    "chain_name": "rhythm_gtr_mix"
+    "target_track_name": "Guitar Bus",
+    "chain_name": "my-guitar-chain"
   }
 }

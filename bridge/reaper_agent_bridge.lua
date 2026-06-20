@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.0.0
+-- @version 3.1.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -13,8 +13,9 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
---   Reaper Daemon v3, packaged for ReaPack. Same file-bridge protocol as the
---   git/manual install.
+--   Repin to current bridge: master-track scan, set_fx_param formatted-value
+--   binary search, singleton lock with render-busy guard, retention sweep,
+--   meter-correct bar math, undo-block closed on handler errors.
 
 -- Runs as a deferred script. The bridge root is the folder one level up from
 -- this script, so it works wherever the repo is cloned or ReaPack installs it.
@@ -119,19 +120,42 @@ end
 -- Singleton guard: refuse to start a second defer loop pointed at the same
 -- root. Two bridges on one inbox race on os.rename (non-deterministic which
 -- one grabs a file) and write competing heartbeats. The lock holds the
--- startup time and is refreshed every heartbeat (~5s); a dead bridge's lock
--- goes stale, so on startup we reclaim one older than 60s (no bridge tick
--- is that long).
+-- startup time and a `busy` state, refreshed every heartbeat (~5s); a dead
+-- bridge's lock goes stale, so on startup we reclaim one older than 60s (no
+-- bridge tick is that long). EXCEPT a `busy=render` lock: render blocks the
+-- defer loop synchronously for the whole render duration (no ticks, no
+-- heartbeats), which can exceed 60s. We never reclaim a render-busy lock no
+-- matter how old — a second bridge would race the first on the same inbox.
 local lockfile = join(paths.logs, "bridge.lock")
+
+local function write_lock(busy)
+  write_file(lockfile, json.encode({ started = os.time(), busy = busy or "none" }))
+end
+
+local function read_lock()
+  local text = read_file(lockfile)
+  if not text then return nil end
+  -- Backward-compat: pre-3.1 locks were a bare epoch timestamp.
+  local started_only = tonumber(text:match("^%d+$"))
+  if started_only then return { started = started_only, busy = "none" } end
+  local ok, parsed = pcall(json.decode, text)
+  if ok and type(parsed) == "table" then return parsed end
+  return nil
+end
+
 do
-  local existing = read_file(lockfile)
+  local existing = read_lock()
   if existing then
-    local started = tonumber(existing:match("^%d+"))
+    local started = tonumber(existing.started)
+    local busy = existing.busy or "none"
+    if busy == "render" then
+      error("BRIDGE_ALREADY_RUNNING: lock held by a bridge that is rendering (started at " .. tostring(started) .. ")")
+    end
     if started and (os.time() - started) < 60 then
-      error("BRIDGE_ALREADY_RUNNING: lock held by a bridge started at " .. existing)
+      error("BRIDGE_ALREADY_RUNNING: lock held by a bridge started at " .. tostring(started))
     end
   end
-  write_file(lockfile, tostring(os.time()))
+  write_lock("none")
 end
 
 local in_flight_command = nil
@@ -1414,8 +1438,9 @@ local function command_render(command)
   atomic_write_json(paths.heartbeat, heartbeat_payload({ busy = "render" }))
   -- Refresh the lock too: render blocks the loop, so without this a long render
   -- lets the lock age past the 60s stale-reclaim window and a second bridge could
-  -- grab the inbox.
-  write_file(lockfile, tostring(os.time()))
+  -- grab the inbox. Mark the lock busy=render so a startup bridge NEVER reclaims
+  -- it mid-render (the age check is bypassed for render-busy locks).
+  write_lock("render")
   -- Render with the project's most recent render settings (format, sample rate,
   -- etc. must be configured once in REAPER's Render dialog).
   reaper.Main_OnCommand(42230, 0) -- 42230 = File: Render project
@@ -1672,10 +1697,17 @@ local function run_command(command, in_batch)
     reaper.Undo_BeginBlock()
     undo_started = true
   end
-  local data = handler(command)
+  -- Run the handler under pcall so a thrown error (AMBIGUOUS_FX,
+  -- SET_PARAM_FAILED, RANGE_OCCUPIED, ...) still closes the Undo block.
+  -- REAPER does NOT auto-close an open Undo_BeginBlock, so without this the
+  -- block would stay open and fold the user's subsequent manual edits into one
+  -- giant undo step for the rest of the session. Any partial mutation the
+  -- handler made before throwing stays inside the now-closed block (Cmd+Z safe).
+  local ok, data = pcall(handler, command)
   if undo_started then
     reaper.Undo_EndBlock(command.undo_label or ("Agent: " .. command.type), -1)
   end
+  if not ok then error(data) end
   return data
 end
 
@@ -1846,7 +1878,7 @@ end
 
 local function write_heartbeat()
   atomic_write_json(paths.heartbeat, heartbeat_payload())
-  write_file(lockfile, tostring(os.time()))
+  write_lock("none")
 end
 
 -- Write the heartbeat at most every `heartbeat_interval` seconds, or

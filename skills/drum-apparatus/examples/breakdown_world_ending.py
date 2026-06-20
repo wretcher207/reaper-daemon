@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hand-authored 'world ending' breakdown — APPROVED BY DAVID 2026-06-16 (by ear).
+"""Hand-authored 'world ending' breakdown — reference example (by ear).
 
 NOT produced by the drumgen engine: it uses a cymbal/accent lane + naked kick
 chug clusters + deliberate space, none of which render.py supports yet. This
@@ -7,7 +7,8 @@ script is the reference for the breakdown vocabulary the engine should learn
 (see the planned cymbal/accent lane). Run it to regenerate the .mid.
 
 Feel: spaced stabs (kick+crash), snare smash on cymbal, bare palm-mute kick
-chug bursts between accents, big ring-out ender. RS Monarch, channel 1.
+chug bursts between accents, big ring-out ender. Uses the RS Monarch example
+map, channel 1.
 """
 import random
 from drumgen.smf import write_smf

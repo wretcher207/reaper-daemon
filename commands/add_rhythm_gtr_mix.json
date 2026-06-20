@@ -1,9 +1,0 @@
-{
-  "id": "<auto>",
-  "version": 3,
-  "type": "add_fx_chain",
-  "payload": {
-    "target_track_name": "GTR_Buss",
-    "chain_name": "rhythm_gtr_mix"
-  }
-}

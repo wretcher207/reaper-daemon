@@ -4,7 +4,7 @@ from drumgen.catalog import load_maps, load_grooves, ROLE_KEYS
 
 def test_four_maps_with_required_roles():
     maps = load_maps()
-    assert set(maps) >= {"RS Monarch", "Odeholm Default (Wretcher Fix)",
+    assert set(maps) >= {"RS Monarch", "Odeholm Default",
                          "Ultimate Heavy Drums (MDL Tone)", "Sleep Token II by MixWave"}
     for name, m in maps.items():
         for role in ROLE_KEYS:

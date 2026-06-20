@@ -79,13 +79,20 @@ Prefer REAPER's own package manager? Add this repo to ReaPack:
 2. Paste: `https://github.com/wretcher207/reaper-daemon/raw/main/index.xml`
 3. `Extensions > ReaPack > Browse packages`, find **Reaper Daemon**, install.
 
-Two things to know, because ReaPack delivers the script but not the rest of
-the setup the clone install handles for you:
+Two things to know, because ReaPack delivers only the two Lua files
+(`reaper_agent_bridge.lua` + `json.lua`) — not the agent CLI, the command
+examples, or the drum engine:
 
 - **It does not auto-start.** ReaPack installs the bridge as an Action but does
   not run it on launch. Run the action once per session, or add it to your
   `Scripts/__startup.lua` (`python3 setup/install.py` from a clone does this
   for you).
+- **You still need the rest of the package.** `reaperd.py` (the agent CLI),
+  `commands/examples/`, and `skills/drum-apparatus/` (the drum DSL engine) are
+  NOT installed by ReaPack. For those, also clone the repo:
+  `git clone https://github.com/wretcher207/reaper-daemon.git` and point your
+  agent at the clone (or run `python3 setup/install.py` from the clone, which
+  handles auto-start too). ReaPack then just keeps the bridge script updated.
 - **Point your agent at the install folder.** ReaPack installs to
   `<REAPER resource>/Scripts/reaper-daemon/`. Right-click the package in
   ReaPack and "Show in explorer/finder" to get the exact path, then aim your

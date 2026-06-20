@@ -1,5 +1,5 @@
 @tempo 145
-@map RS Monarch
+@map GM Standard
 @seed 42
 
 [dbeat] bars=2 feel=ff

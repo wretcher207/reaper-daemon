@@ -55,7 +55,7 @@ CLOSED_TO_OPEN = {
 # Authored cymbal/accent lane: char -> (map role, base velocity). Used by
 # breakdown grooves to place a cymbal on specific accents (the big stab, the
 # snare smash) instead of running a grid ostinato. Char map mirrors the
-# breakdown vocabulary David approved 2026-06-16.
+# breakdown vocabulary (cymbal/accent lane).
 CYMBAL_CHARS = {
     "X": ("CRASH_R", 125),
     "C": ("CHINA_R", 118),

@@ -1,6 +1,6 @@
 ---
 name: drum-apparatus
-description: Generate death-metal / heavy drum MIDI on command and insert it into David's live REAPER session via the agent bridge. Use when David asks for a drum groove, beat, blast, breakdown, fill, or a multi-section drum arrangement, or says "give me a <subgenre> groove". Ports the Dead Pixel Drum Apparatus vocabulary (36 grooves, RS Monarch map, humanization, fills).
+description: Generate death-metal / heavy drum MIDI on command and insert it into the user's live REAPER session via the agent bridge. Use when the user asks for a drum groove, beat, blast, breakdown, fill, or a multi-section drum arrangement, or says "give me a <subgenre> groove". Ports the Dead Pixel Drum Apparatus vocabulary (36 grooves, humanization, fills).
 ---
 
 # Drum Apparatus
@@ -8,25 +8,26 @@ description: Generate death-metal / heavy drum MIDI on command and insert it int
 Generate humanized heavy-music drum MIDI and drop it into REAPER.
 
 ## When to use
-David asks for drums: a groove, a blast, a breakdown, a fill, or a full
-section arrangement. Default kit: **RS Monarch (Kontakt 8), MIDI channel 1.**
+The user asks for drums: a groove, a blast, a breakdown, a fill, or a full
+section arrangement. Default kit: **GM Standard** (or a map you discover with
+`reaperd.py discover-map` — see below).
 
 ## Workflow (always)
-1. **Pick grooves** from `catalog/grooves.json` by name. Translate David's words
+1. **Pick grooves** from `catalog/grooves.json` by name. Translate the user's words
    to real groove names (e.g. "tech death blast into a breakdown" →
    `Tech Death Pulse` / `Hammer Blast` → `The Pit Opener`).
 2. **Compose** a single groove or an arrangement spec (sections with bars, and
    optional per-section `power_hand` / `fill`).
 3. **Generate**:
    `python generate.py --spec spec.json --out /tmp/drums.mid` (or `--groove`).
-4. **Insert** via the bridge `insert_midi_file` (target track "Kontakt 8",
-   position = David's requested bar; default channel 1). Use the verified
+4. **Insert** via the bridge `insert_midi_file` (target track = the user's
+   drum track; position = the user's requested bar). Use the verified
    `python3 reaperd.py groove <dsl> --track <name>` (render + insert + verify
    in one round trip), or `reaperd.py cmd insert_midi_file '<payload>'`.
-5. **VERIFY AUDIBLY (hard gate):** set cursor to the clip, `play`, and ask David
-   if it sounds right. NEVER claim a groove is good without his ear — this is
-   the audio-must-be-audible rule. Parse-back proves notes exist, not that it
-   slaps.
+5. **VERIFY AUDIBLY (hard gate):** set cursor to the clip, `play`, and ask the
+   user if it sounds right. NEVER claim a groove is good without their ear —
+   this is the audio-must-be-audible rule. Parse-back proves notes exist, not
+   that it slaps.
 
 ## Params that matter
 `humanize` (0-100, default 45), `push_pull` (-100..100; negative = laid back /
@@ -59,10 +60,19 @@ Read `catalog/grooves.json` for exact names.
 
 ## Drum kit maps (MIDI note assignments)
 `catalog/maps.json` holds named maps of drum roles (KICK_R, SNARE, etc.) to MIDI
-note numbers. `--map <name>` selects one at render time. Ships with: RS Monarch,
-Odeholm Default (Wretcher Fix), Ultimate Heavy Drums (MDL Tone), Sleep Token II
-by MixWave. `python generate.py --list-maps` prints them.
+note numbers. `--map <name>` selects one at render time. Ships with: GM Standard,
+plus a few example library maps (RS Monarch, Odeholm Default, MDL Tone, Sleep
+Token II by MixWave) as references. `python generate.py --list-maps` prints them.
 
-If the user's kit isn't in `maps.json`, ask for their note assignments and add
-an entry to `catalog/maps.json`. The bridge can't see this — `scan_fx` exposes
-VST parameters, not drum note maps. The agent is the setup feature.
+If the user's kit isn't in `maps.json`, **auto-discover** it from the library's
+own `.midnam`:
+```bash
+python3 reaperd.py discover-map Drums --save MyKit
+```
+For kits with no `.midnam` (some Kontakt libraries), ask the user for the note
+assignments and add a map:
+```bash
+python3 reaperd.py add-map MyKit --roles '{"KICK_R":36,"SNARE":38,...}'
+```
+Discovered/added maps save to the user overlay (`maps/<name>.json`, gitignored),
+so a `git pull` never clobbers them.

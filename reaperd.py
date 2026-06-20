@@ -60,8 +60,9 @@ def find_resource_dir():
     if system == "Windows":
         appdata = os.environ.get("APPDATA") or os.path.expanduser("~/AppData/Roaming")
         return os.path.join(appdata, "REAPER")
-    # Linux / other Unix
-    return os.path.expanduser("~/.REAPER")
+    # Linux / other Unix: REAPER uses XDG_CONFIG_HOME/REAPER (default ~/.config/REAPER).
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(xdg, "REAPER")
 
 
 def reaper_running():
