@@ -5,9 +5,10 @@ Two layers:
   2. The engine applies HUMANITY (velocity model + fatigue envelope + timing
      jitter with unison lock) automatically in render().
 
-This is a NEW parallel path. It does NOT use grooves.json / find_groove /
-render.py / generate.py. It only reuses smf.write_smf / smf.parse_smf and
-catalog.load_maps, plus a handful of behaviours ported from feel.py/render.py:
+It authors via the step-grid DSL, not a named-groove catalog: it does NOT use
+grooves.json / find_groove. It reuses smf.write_smf / smf.parse_smf and
+catalog.load_maps, plus a handful of behaviours (originally ported from the
+now-removed feel/render modules):
   - ROLE_LIMB map
   - CLOSED_TO_OPEN (hat falls open when the left foot kicks anywhere in the bar)
   - LEFT_FOOT_STRENGTH = 92 (left-foot kick velocity * 0.92)
@@ -47,7 +48,7 @@ LEFT_FOOT_STRENGTH = 92  # percent; left-foot kick velocity * 0.92
 
 NOTE_DUR_QN = 0.12  # like the old NOTE_DUR_QN
 
-# Which limb plays each role (ported from render.py ROLE_LIMB).
+# Which limb plays each role.
 ROLE_LIMB = {
     "KICK_R": "right_foot",
     "KICK_L": "left_foot",
@@ -79,7 +80,7 @@ ROLE_LIMB = {
 }
 
 # Closed hihat needs the left foot on the pedal. If the left foot kicks anywhere
-# in the bar, the pedal lifts and the hat rings open (ported from render.py).
+# in the bar, the pedal lifts and the hat rings open.
 CLOSED_TO_OPEN = {
     "HH_CLOSED_TIP": "HH_OPEN_1",
     "HH_CLOSED_EDGE": "HH_OPEN_1",

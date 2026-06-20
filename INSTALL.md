@@ -157,7 +157,6 @@ the user verbatim, filling in the values:
 > - "set the tempo to 180 bpm"
 > - "scan every FX in this project"
 > - "discover the drum map on my Drums track and save it as MyKit"
-> - "save this control setup as a recipe called 'live-mix'"
 >
 > Full command surface: `$REPO/AGENTS.md`. The agent CLI: `python3 reaperd.py --help`.
 > Working JSON examples for every command: `$REPO/commands/examples/`. If you

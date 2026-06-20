@@ -1,14 +1,14 @@
 # drum-apparatus
 
-A stdlib-only Python generator that ports the Dead Pixel Drum Apparatus groove
-vocabulary (36 grooves across 10 metal subgenres, 4 drum-VST MIDI maps,
-velocity/timing humanization, power-hand layering, auto tom fills) into an
-agent-callable form. `drumgen/` loads a JSON catalog and renders a single groove
-or a multi-section arrangement into a channel-1 Standard MIDI File; `generate.py`
-is the CLI. The MIDI is inserted into a live REAPER session via the
-`reaper-daemon` `insert_midi_file` command and verified by ear (see
-`SKILL.md`). `catalog/` is data; `tests/` pin the catalog, SMF I/O, feel math,
-render, and CLI.
+A stdlib-only Python drum-MIDI engine encoding David's heavy-metal programming
+SOP (kicks-from-the-riff first, then humanized velocity/timing/fatigue baked in
+at placement time). `drumgen/groovekit.py` renders a hand-authored step-grid DSL
+into a channel-1 Standard MIDI File; `drumgen/riff.py` reads a guitar stem's
+transients into a kick grid; `catalog/` ships the drum-kit maps plus a reference
+groove vocabulary (`grooves.json`). Drive it through the agent CLI — `python3
+reaperd.py groove <dsl> --track <name>` renders, inserts into the live REAPER
+session, and verifies — then confirm by ear (see `SKILL.md`). `tests/` pin the
+catalog, SMF I/O, and the groove engine.
 
 Run the tests: `python -m pytest -v` (pytest is the only dev dependency; the
-generator itself uses the standard library only).
+engine itself uses the standard library only).

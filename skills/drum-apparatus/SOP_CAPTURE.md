@@ -87,8 +87,8 @@ effect (identical velocities) is the dead giveaway of fake programming.
   ghost notes leading into a rimshot, or to break up a linear section. "Just a
   kiss" of flavor. Not a heavy-part thing so much as a groove-breather thing.
 
-## Check against render.py / existing code
-- [ ] Golden rule (no consecutive equal velocities) — is it enforced in render.py?
+## Check against the engine / existing code
+- [ ] Golden rule (no consecutive equal velocities) — is it enforced in groovekit?
 - [ ] Cymbal-with-shell louder — enforced?
 - [ ] Hi-hat open/closed velocity split — enforced?
 - [ ] Double-kick -7..-9 every 2nd — enforced? (CLAUDE.md mentions crash decay only)
@@ -122,7 +122,7 @@ effect (identical velocities) is the dead giveaway of fake programming.
   "notches" as it's placed. Humanize-as-you-go, per note. NOT a separate final
   pass. He used to humanize the whole song at the end — agonizing. Finishing a
   part with zero velocity issues left to fix is the goal.
-- => render.py should bake the golden rule + curves in AT PLACEMENT time, so the
-  output is already humanized. No "now run the humanize pass" step.
+- => the engine (groovekit) bakes the golden rule + curves in AT PLACEMENT time,
+  so the output is already humanized. No "now run the humanize pass" step.
 
-## CAPTURE COMPLETE — ready to build SKILL.md + check render.py
+## CAPTURE COMPLETE — ready to build SKILL.md + the engine

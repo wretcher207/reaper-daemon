@@ -108,12 +108,11 @@ local paths = {
   failed = join(root, "failed"),
   archive = join(root, "archive"),
   logs = join(root, "logs"),
-  recipes = join(root, "recipes"),
   heartbeat = join(root, "bridge", "heartbeat.json"),
 }
 
 -- Create the working folders if they are missing (fresh install or moved root).
-for _, dir in pairs({ paths.inbox, paths.processing, paths.outbox, paths.failed, paths.archive, paths.logs, paths.recipes }) do
+for _, dir in pairs({ paths.inbox, paths.processing, paths.outbox, paths.failed, paths.archive, paths.logs }) do
   if reaper.RecursiveCreateDirectory then reaper.RecursiveCreateDirectory(dir, 0) end
 end
 
@@ -773,22 +772,6 @@ end
 
 local function command_insert_midi_file(command)
   return insert_midi_payload(command.payload or {})
-end
-
-local function command_audition_groove(command)
-  local payload = command.payload or {}
-  local data = insert_midi_payload(payload)
-  local start_time = data.item.start_seconds
-  local end_time = data.item.end_seconds
-  if payload.solo_track then
-    local track = reaper.GetTrack(0, data.track.index - 1)
-    if track then reaper.SetMediaTrackInfo_Value(track, "I_SOLO", 1) end
-  end
-  reaper.GetSet_LoopTimeRange(true, true, start_time, end_time, false)
-  reaper.SetEditCurPos(start_time, false, false)
-  if payload.play ~= false then reaper.Main_OnCommand(1007, 0) end -- 1007 = Transport: Play/stop
-  data.audition = { loop_start = start_time, loop_end = end_time, playing = payload.play ~= false }
-  return data
 end
 
 local function command_play()
@@ -1524,75 +1507,6 @@ local function command_scan_fx(command)
   }
 end
 
--- ---------------------------------------------------------------------------
--- Recipes — plugin-agnostic, reusable command sets an agent saves and replays
--- ---------------------------------------------------------------------------
-
-local function safe_recipe_name(name)
-  if type(name) ~= "string" or name == "" then error("BAD_RECIPE_NAME: Provide a recipe name") end
-  if not name:match("^[%w%-%. ]+$") then
-    error("BAD_RECIPE_NAME: Use only letters, numbers, space, dash, underscore, dot")
-  end
-  return name
-end
-
-local function recipe_path(name)
-  return join(paths.recipes, name .. ".json")
-end
-
-local function command_save_recipe(command)
-  local payload = command.payload or {}
-  local name = safe_recipe_name(payload.name)
-  local commands = payload.commands
-  if type(commands) ~= "table" or #commands == 0 then
-    error("BAD_RECIPE: Provide a non-empty commands array")
-  end
-  local recipe = {
-    name = name,
-    description = payload.description or "",
-    created_by = command.created_by or "agent",
-    saved_at = now(),
-    commands = commands,
-  }
-  atomic_write_json(recipe_path(name), recipe)
-  return { saved = name, path = recipe_path(name), command_count = #commands }
-end
-
-local function command_list_recipes()
-  local recipes = {}
-  local index = 0
-  while true do
-    local filename = reaper.EnumerateFiles(paths.recipes, index)
-    if not filename then break end
-    if filename:match("%.json$") and not filename:match("%.tmp$") then
-      local text = read_file(join(paths.recipes, filename))
-      local ok, parsed = pcall(json.decode, text or "")
-      recipes[#recipes + 1] = {
-        name = filename:gsub("%.json$", ""),
-        description = (ok and type(parsed) == "table" and parsed.description) or "",
-        command_count = (ok and type(parsed) == "table" and parsed.commands and #parsed.commands) or 0,
-        saved_at = (ok and type(parsed) == "table" and parsed.saved_at) or nil,
-      }
-    end
-    index = index + 1
-  end
-  table.sort(recipes, function(a, b) return a.name < b.name end)
-  return { recipes = recipes, count = #recipes }
-end
-
-local function load_recipe(name)
-  local text = read_file(recipe_path(name))
-  if not text then error("NO_RECIPE: No recipe named " .. tostring(name)) end
-  local ok, parsed = pcall(json.decode, text)
-  if not ok or type(parsed) ~= "table" then error("BAD_RECIPE: Recipe file is not valid JSON") end
-  return parsed
-end
-
-local function command_get_recipe(command)
-  local name = safe_recipe_name((command.payload or {}).name)
-  return { recipe = load_recipe(name) }
-end
-
 -- Enumerate plugins INSTALLED in REAPER (not just FX already on tracks).
 -- add_fx fails when fx_name doesn't match REAPER's exact listing; this lets an
 -- agent discover the precise name (incl. "VST3:" prefix and vendor suffix)
@@ -1662,12 +1576,10 @@ end
 
 local handlers = {}
 
--- Commands that don't need an undo block. `save_recipe` writes a file, not
--- project state — REAPER undo doesn't cover it. Everything else mutates the
--- project and gets wrapped. Named for what it IS, not what it isn't.
+-- Commands that don't need an undo block: they read state, not project state.
+-- Everything else mutates the project and gets wrapped. Named for what it IS.
 local NO_UNDO_BLOCK = {
   get_context = true, get_fx_parameters = true, scan_fx = true,
-  list_recipes = true, get_recipe = true, save_recipe = true,
   enum_installed_fx = true,
   discover_drum_map = true,
 }
@@ -1689,9 +1601,9 @@ local function run_command(command, in_batch)
     return { dry_run = true, would_run = command.type, payload = command.payload or {} }
   end
 
-  -- batch and apply_recipe open their own single Undo block around the whole set,
-  -- so don't double-wrap them here.
-  local self_wraps = command.type == "batch" or command.type == "apply_recipe"
+  -- batch opens its own single Undo block around the whole set, so don't
+  -- double-wrap it here.
+  local self_wraps = command.type == "batch"
   local undo_started = false
   if is_mutating(command.type) and not in_batch and not self_wraps then
     reaper.Undo_BeginBlock()
@@ -1711,8 +1623,8 @@ local function run_command(command, in_batch)
   return data
 end
 
--- batch and apply_recipe replay sub-commands through run_command, so they're
--- defined here (after run_command) and registered with the handlers below.
+-- batch replays sub-commands through run_command, so it's defined here (after
+-- run_command) and registered with the handlers below.
 local function command_batch(command)
   local payload = command.payload or {}
   local commands = payload.commands or {}
@@ -1729,27 +1641,6 @@ local function command_batch(command)
   end
   reaper.Undo_EndBlock(command.undo_label or payload.undo_label or "Agent: batch", -1)
   return { results = results }
-end
-
-local function command_apply_recipe(command)
-  local payload = command.payload or {}
-  local name = safe_recipe_name(payload.name)
-  local recipe = load_recipe(name)
-  local commands = recipe.commands or {}
-  if #commands == 0 then error("EMPTY_RECIPE: Recipe " .. name .. " has no commands") end
-  local results = {}
-  reaper.Undo_BeginBlock()
-  for i, sub in ipairs(commands) do
-    local ok, data = pcall(run_command, sub, true)
-    results[#results + 1] = { index = i, type = sub.type, ok = ok, data = ok and data or nil, error = ok and nil or tostring(data) }
-    if not ok and payload.stop_on_error ~= false then
-      reaper.Undo_EndBlock("Agent: recipe " .. name .. " (failed)", -1)
-      local inner = tostring(data):match("([A-Z_]+):") or "RECIPE_FAILED"
-      error(inner .. ": recipe command " .. i .. " (" .. tostring(sub.type) .. ") failed: " .. tostring(data))
-    end
-  end
-  reaper.Undo_EndBlock(command.undo_label or ("Agent: recipe " .. name), -1)
-  return { recipe = name, results = results }
 end
 
 local function command_get_selected_track()
@@ -1808,13 +1699,8 @@ handlers.delete_items_in_range = command_delete_items_in_range
 
 -- MIDI
 handlers.insert_midi_file = command_insert_midi_file
-handlers.audition_groove = command_audition_groove
 
--- Recipes
-handlers.save_recipe = command_save_recipe
-handlers.list_recipes = command_list_recipes
-handlers.get_recipe = command_get_recipe
-handlers.apply_recipe = command_apply_recipe
+-- Composition
 handlers.batch = command_batch
 
 local function write_result(command, ok, data_or_error)

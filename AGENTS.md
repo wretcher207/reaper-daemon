@@ -8,7 +8,7 @@ CLI is a single Python 3 file (`reaperd.py`) with no third-party deps.
 This bridge is plugin-agnostic. It knows nothing about any specific synth, amp
 sim, or drum tool. You discover what a project contains, then act on it. If a
 human asks you to set up controls for plugins you have never seen, use
-`scan_fx` to learn the project, then build and save a recipe.
+`scan_fx` to learn the project, then act on what you find.
 
 ## Bridge paths
 
@@ -18,7 +18,6 @@ The bridge root is this repository folder. All paths below are relative to it.
 inbox/                  write command JSON here
 outbox/                 read result JSON here (same id)
 bridge/heartbeat.json   liveness check
-recipes/                saved recipes (JSON) — you can save and replay these
 ```
 
 ## Required workflow
@@ -99,13 +98,12 @@ Full payloads and examples: `bridge/command_schema.md` and `commands/examples/`.
 - `add_marker`, `add_region`, `delete_marker`, `delete_items_in_range`
 
 **MIDI**
-- `insert_midi_file`, `audition_groove`
+- `insert_midi_file`
 
 **Composition**
 - `batch` — run several commands as one undo block.
-- `save_recipe`, `list_recipes`, `get_recipe`, `apply_recipe`
 
-For the friendly wrappers around these (fxload, setparam, eq, groove, jam,
+For the friendly wrappers around these (fxload, setparam, eq, groove, jam, riff,
 discover-map, add-map), see `reaperd.py --help`. There are no shell `.sh`
 helpers anymore — `reaperd.py` is the single cross-platform entry point.
 
@@ -161,19 +159,6 @@ For a drum library it doesn't know, auto-discover its map first:
 python3 reaperd.py discover-map Drums --save MyKit
 python3 reaperd.py groove beat.dsl --track Drums --map MyKit
 ```
-
-## Recipes — set up reusable controls
-
-A recipe is a named, saved list of commands. Use recipes to capture a control
-setup once and replay it, on this project or another.
-
-1. Discover: `scan_fx` to see the FX and parameters in the project.
-2. Build: assemble the commands that create the setup.
-3. Save: `save_recipe` with a `name`, `description`, and the `commands` array.
-4. Replay: `apply_recipe` with the `name` runs them as one undo block.
-
-Recipes are plain JSON in `recipes/`. They are plugin-agnostic — a recipe that
-references FX by name works on any project that has those plugins.
 
 ## Safety
 

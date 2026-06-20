@@ -13,8 +13,8 @@ file (`reaperd.py`) with no third-party dependencies.
 The bridge is **plugin-agnostic and drum-library-agnostic**. It ships with no
 knowledge of any specific synth, amp sim, or instrument. An agent discovers
 what a project contains with `scan_fx`, acts on tracks/FX/parameters by name,
-saves reusable setups as **recipes**, and can **auto-discover** a drum kit's
-note map from the library's own `.midnam`.
+and can **auto-discover** a drum kit's note map from the library's own
+`.midnam`.
 
 ## What it does
 
@@ -23,11 +23,10 @@ note map from the library's own `.midnam`.
 - **FX** — add, remove, bypass, reorder, set parameters, write parameter
   automation envelopes. Any plugin (VST2/3, CLAP, AU, JS).
 - **Markers, regions, media items.**
-- **MIDI** — insert and audition MIDI files; a creative drum DSL engine with
-  humanization (velocity model, fatigue, timing jitter).
+- **MIDI** — insert MIDI files; a creative drum DSL engine with humanization
+  (velocity model, fatigue, timing jitter).
 - **Discovery** — `scan_fx` dumps every FX and parameter; `discover_drum_map`
   reads a drum track's note names and builds a kit map for any library.
-- **Recipes** — save command sequences and replay them on any project.
 
 Every mutating command runs inside a REAPER undo block (Cmd+Z / Ctrl+Z to revert).
 
@@ -178,7 +177,6 @@ bridge/command_schema.md         full command reference
 reaperd.py                       cross-platform agent CLI (Python 3)
 setup/install.py                 wire auto-start into REAPER (cross-platform)
 commands/examples/               one JSON example per command
-recipes/                         saved, replayable command sequences
 skills/drum-apparatus/           DSL drum engine + kit-map auto-discovery
 inbox/ outbox/ processing/ ...   runtime folders
 ```

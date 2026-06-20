@@ -25,9 +25,9 @@ audio before drumming.
   him describing a riff in words (which he says is basically impossible).
 - If there's no guitar take yet (drums-first), ask him for the kick rhythm. Don't
   invent one.
-- Transient reading: `python -m drumgen.riff <project.RPP> <track> <bars> <start_bar>`
-  (parses the .RPP for the track's stem, detects onsets, prints the kick grid at
-  100/50/30% attack strength).
+- Transient reading: `python3 reaperd.py riff <project.RPP> <track> [--bars N]
+  [--start-bar N]` (parses the .RPP for the track's stem, detects onsets, prints
+  the kick grid at 100/50/30% attack strength).
 - **Kick density = a real flavor choice (David's words):**
   - **Slam / breakdown (his DEFAULT):** one single kick per transient. Sparse,
     heavy, slamming. Use a LOW keep_pct (~30) so only the strong open hits become
@@ -82,20 +82,20 @@ in a final pass. So the engine bakes these in at render time — the output is
 already humanized, nothing to fix after. These are physics, not taste:
 
 1. **No two consecutive hits in a lane are EVER the same velocity** — differ by at
-   least 1. Identical velocities = the machine-gun tell. *(in code: feel.unique_velocity)*
+   least 1. Identical velocities = the machine-gun tell. *(in code: groovekit velocity model)*
 2. **A cymbal that lands together with a shell (kick/snare/tom) is louder** — a
    human pushes harder on the cymbal because he's also hitting a shell.
-   *(in code: both engines — groovekit + render.py CYMBAL_SHELL_BOOST)*
+   *(in code: groovekit CYMBAL_SHELL_BOOST)*
 3. **Hi-hat has its own curve: closed = softer, open = louder.** Never one flat
    hat velocity, never just two alternating.
-   *(in code: both engines — groovekit + render.py HAT_CURVE)*
+   *(in code: groovekit HAT_CURVE)*
 4. **Double kick: every 2nd kick is −7…−9 lower** (weaker left foot). ONLY on fast
    double-kick parts where both feet are truly used — not slow single-foot kicks.
-   *(in code: both engines — groovekit run-scoped −7…−9 + render.py)*
+   *(in code: groovekit run-scoped −7…−9)*
 5. **Blast-beat snare arcs down over time, then lifts at the end** — blasts
    exhaust the forearms so intensity sags, then he digs deep to finish. *(pending)*
-6. **Fills ramp low→high across the kit.** *(in code: render._render_fill — rolls
-   down the kit, ramps up, varies density; the spicy floor, can layer more later)*
+6. **Fills ramp low→high across the kit.** *(author the fill into the DSL grid —
+   roll across the toms, ramp low→high; the engine humanizes velocity + timing)*
 7. **Don't omit a cymbal where one is obviously called for.** Bare focal snare hits
    are the bug. Passing accents in a flurry can be bare (more is coming right
    after); the focal hits want something with them. *(judgment — apply by ear; the
@@ -130,9 +130,8 @@ as the reference for how his layers actually behave:
 ## Generate & insert
 1. **Compose** the section(s) as a spec or DSL once kicks/snare/cymbals/fills are
    decided (sections with bars, per-section `power_hand` / `fill`).
-2. **Generate**: `python generate.py --spec spec.json --out /tmp/drums.mid`
-   (or `--groove`), or the one-shot `reaperd.py groove <dsl> --track <name>`
-   (render + insert + verify in one round trip).
+2. **Generate + insert**: `python3 reaperd.py groove <dsl> --track <name>`
+   renders humanized MIDI and inserts it in one round trip.
 3. **Insert** on the track David SELECTED (or `--track <name>` if he names one).
    NEVER guess a track.
 4. **VERIFY AUDIBLY (hard gate):** set the cursor to the clip, `play`, and ask if
@@ -152,9 +151,9 @@ A breakdown is spaced stabs + silence + naked kick chug, with a cymbal on the BI
 accents only (the stab, the snare smash) — not a steady groove with a hat. Use the
 breakdown grooves that carry a `cymbal` accent lane: **"World Ending Stomp"**
 (2-bar) and **"Chug Breakdown"** (1-bar). The cymbal lane auto-suppresses the
-power-hand grid. Generate with `--no-fills` and low `--humanize` (~15) so the
-stabs stay tight, e.g.
-`python generate.py --groove "World Ending Stomp" --bars 8 --no-fills --humanize 15`.
+power-hand grid. Keep the stabs tight (low `@feel`, no fills) and render with
+`reaperd.py groove`. The named patterns ("World Ending Stomp", "Tight Chug
+Breakdown") live in `catalog/grooves.json` — reach in and transcribe.
 Authoring your own: add a `cymbal` step-string (`X`=crash, `C`=china, `p`=splash,
 `r`=ride, `b`=bell, `-`=rest) same length as `kick`; 2-bar (32-step) patterns work,
 cross-bar indexing handles it.
@@ -168,7 +167,7 @@ built from the riff (step 1), not selected from this list.
 ## Drum kit maps (MIDI note assignments)
 `catalog/maps.json` maps drum roles (KICK_R, SNARE, etc.) to MIDI notes. `--map
 <name>` selects one. Ships with GM Standard plus example library maps (RS Monarch,
-Odeholm Default, MDL Tone, Sleep Token II). `python generate.py --list-maps` lists
+Odeholm Default, MDL Tone, Sleep Token II). `python3 reaperd.py list-maps` lists
 them. If the kit isn't there, auto-discover from its `.midnam`:
 `python3 reaperd.py discover-map Drums --save MyKit`. For kits with no `.midnam`
 (some Kontakt libs), ask for the notes: `reaperd.py add-map MyKit --roles

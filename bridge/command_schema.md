@@ -225,9 +225,6 @@ deletes across every track.
 ```
 `length.type`: `bars`, `region`, `time_selection`, `seconds`, `as_generated`.
 
-### audition_groove
-Same payload as `insert_midi_file`, plus `"solo_track": true`, `"play": true`.
-
 ---
 
 ## Composition
@@ -241,15 +238,3 @@ Same payload as `insert_midi_file`, plus `"solo_track": true`, `"play": true`.
   ] }
 ```
 The whole batch is one undo block.
-
-### save_recipe / list_recipes / get_recipe / apply_recipe
-```json
-{ "name": "lead-synth-setup", "description": "Adds a lead synth track + FX",
-  "commands": [ { "type": "...", "payload": { ... } }, ... ] }
-{}
-{ "name": "lead-synth-setup" }
-{ "name": "lead-synth-setup", "stop_on_error": true }
-```
-A recipe is a saved command list in `recipes/<name>.json`. `apply_recipe` runs
-it as one undo block. Recipe names allow letters, numbers, space, dash,
-underscore, dot.

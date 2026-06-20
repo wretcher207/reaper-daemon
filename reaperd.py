@@ -615,6 +615,31 @@ def cmd_jam(args):
     return rc
 
 
+def cmd_riff(args):
+    """Read a guitar stem's transients into a proposed kick grid (David's step 1).
+
+    Reads the SAVED .rpp on disk, parses the named guitar track's audio item,
+    detects onsets, and prints the kick grid at 100/50/30% attack strength. It's
+    a PROPOSAL David corrects (the percentile is an attack-strength heuristic,
+    not true open-vs-muted) — transcribe the row you like into a groove DSL.
+    """
+    if not os.path.isfile(args.project):
+        print(f"[riff] ERROR: project not found: {args.project}", file=sys.stderr)
+        return 1
+    skill_dir = os.path.join(args.bridge_root, "skills", "drum-apparatus")
+    cmd = [sys.executable, "-m", "drumgen.riff", args.project, args.track,
+           str(args.bars), str(args.start_bar)]
+    r = subprocess.run(cmd, cwd=skill_dir, capture_output=True, text=True)
+    if r.stdout:
+        print(r.stdout.rstrip())
+    if r.returncode != 0:
+        print(r.stderr.rstrip() or "[riff] failed to read the project", file=sys.stderr)
+        return 1
+    print("\n[riff] Proposal — David corrects it. Transcribe a kick row into a DSL, "
+          "then: reaperd.py groove <dsl> --track <name>")
+    return 0
+
+
 def cmd_list_maps(args):
     skill_dir = os.path.join(args.bridge_root, "skills", "drum-apparatus")
     if skill_dir not in sys.path:
@@ -697,13 +722,12 @@ def cmd_discover_map(args):
 
 
 def _save_overlay_map(bridge_root, name, role_map):
-    import json as _json
     odir = _overlay_dir(bridge_root)
     os.makedirs(odir, exist_ok=True)
     path = os.path.join(odir, name + ".json")
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        f.write(_json.dumps(role_map, separators=(",", ":")))
+        f.write(json.dumps(role_map, separators=(",", ":")))
     os.replace(tmp, path)
     return path
 
@@ -848,6 +872,15 @@ def build_parser():
 
     s = sub.add_parser("jam", help="render a DSL beat from stdin onto the selected track")
     s.set_defaults(func=cmd_jam)
+
+    s = sub.add_parser("riff",
+                       help="read a guitar stem's transients into a proposed kick grid")
+    s.add_argument("project", help="path to the saved .rpp project file")
+    s.add_argument("track", help="name of the guitar track to read")
+    s.add_argument("--bars", type=int, default=4, help="bars to read (default 4)")
+    s.add_argument("--start-bar", type=int, default=0,
+                   help="first bar to read, 0-indexed (default 0)")
+    s.set_defaults(func=cmd_riff)
 
     s = sub.add_parser("list-maps", help="print available drum-kit maps")
     s.set_defaults(func=cmd_list_maps)
