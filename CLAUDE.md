@@ -72,18 +72,18 @@ self-resolves the name too. Do not guess + retry, do not scan_fx to "find" a nam
 
 ### Setting plugin parameters ("set the kick EQ to 80 Hz")
 
-1. Scan the FX to get param `index` + `min`/`max` + current values:
-   `send_cmd.sh get_fx_parameters '{"target_track_guid":"{G}","fx_name_contains":"Pro-Q","limit":200}'`
-   (each row: `index`, `name`, `normalized_value`, `min`, `max`, `formatted_value`).
-2. Use `param_index` (the integer), not `param_name_contains` — FabFilter shares
-   words ("Threshold" vs "Auto Threshold") and a name match throws `AMBIGUOUS_PARAM`.
-3. Convert the target display value to normalized yourself and set it:
-   - linear: `norm = (target - min) / (max - min)`
-   - log/freq (Hz): `norm = log(target/min) / log(max/min)`
-   `send_cmd.sh set_fx_param '{"target_track_guid":"{G}","fx_index":0,"param_index":27,"normalized_value":0.267}'`
-   `set_fx_param` also accepts `"formatted_value":"80 Hz"` (bridge parses + converts
-   via the range; numeric values only). Verify by re-scanning the `formatted_value`.
-4. Batch multiple sets in one `batch` command with `stop_on_error:true`.
+**Easy way (any plugin):**
+```bash
+~/workspace/audio/reaper-bridge/setparam.sh <track> "<fx>" "<param>" "<display value>"
+```
+Binary-searches the normalized value that produces your target display, sets it,
+verifies. Handles any plugin, ±inf endpoints, log/linear scaling. Examples:
+`setparam.sh Kick "Pro-Q" "Band 1 Frequency" "80 Hz"` / `setparam.sh Kick "ReaEQ" "Gain-Band 2" "-3"`
+Use `norm=0.267` for direct normalized, or for enum/string params ("Bell", "Off").
+
+**Manual way:** scan with `get_fx_parameters`, use `param_index` (not name —
+FabFilter shares words), convert to normalized, `send_cmd.sh set_fx_param` with
+`normalized_value`. Batch in one `batch` with `stop_on_error:true`.
 
 ## Everything else
 
