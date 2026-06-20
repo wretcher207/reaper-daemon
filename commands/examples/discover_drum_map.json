@@ -1,0 +1,13 @@
+{
+  "id": "example-discover-drum-map",
+  "version": 3,
+  "type": "discover_drum_map",
+  "created_by": "agent",
+  "created_at": "2026-06-19T22:30:00-04:00",
+  "dry_run": false,
+  "payload": {
+    "target_track_name": "Drums",
+    "channels": [0],
+    "max_pitch": 127
+  }
+}

@@ -77,6 +77,19 @@ all tracks.
 `include_values: true` adds current value / formatted value per parameter (much
 larger). With `include_values: false` you get parameter names and indices only.
 
+### discover_drum_map
+Dump a drum track's MIDI note names (the `.midnam` the drum library installed)
+so the agent can auto-build a groovekit kit map. Returns `notes` as
+`{ "<pitch>": { "name": str, "channel": int } }` plus the track's FX list and
+`has_note_names` (false when the library exposes no note names -> fall back to
+GM Standard or a hand-built map).
+```json
+{ "target_track_name": "Drums", "channels": [0], "max_pitch": 127 }
+```
+The classification into groovekit roles (KICK_R, SNARE, HH_OPEN_1, ...) is done
+client-side by `reaperd.py discover-map`, which prints a report and can `--save`
+the result to the user map overlay. Read-only; no undo block.
+
 ---
 
 ## Transport / project

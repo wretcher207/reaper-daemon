@@ -21,6 +21,24 @@ import random
 from .catalog import load_maps
 from .smf import write_smf
 
+# Fallbacks for sparse maps (e.g. a discovered map with no explicit snare
+# ghost articulation). render() resolves each role through this table so a
+# missing role routes to its parent piece instead of KeyError-ing.
+ROLE_FALLBACKS = {
+    "KICK_L": "KICK_R",
+    "SNARE_FLAM": "SNARE", "SNARE_GHOST": "SNARE", "SNARE_RIM": "SNARE",
+    "HH_CLOSED_EDGE": "HH_CLOSED_TIP",
+    "HH_OPEN_2": "HH_OPEN_1", "HH_OPEN_3": "HH_OPEN_1",
+    "HH_PEDAL": "HH_CLOSED_TIP",
+    "RIDE_CRASH": "RIDE_TIP", "RIDE_BELL": "RIDE_TIP",
+    "BIG_CRASH": "CRASH_R", "CRASH_L": "CRASH_R",
+    "CHINA_L": "CHINA_R",
+    "SPLASH_L": "SPLASH_R",
+    "TOM_2": "TOM_1", "TOM_3": "TOM_2", "TOM_4": "TOM_3",
+    "BELL": "RIDE_BELL",
+    "STACK": "CHINA_R",
+}
+
 # ---------------------------------------------------------------------------
 # Ported constants / behaviour
 # ---------------------------------------------------------------------------
@@ -123,7 +141,7 @@ class DSLError(ValueError):
     pass
 
 
-def parse_dsl(text):
+def parse_dsl(text, default_map="GM Standard"):
     """Parse the step-grid DSL into a structured dict.
 
     Returns:
@@ -136,6 +154,10 @@ def parse_dsl(text):
             ...
           ]
         }
+
+    `@map` is optional: it defaults to `default_map` ("GM Standard") when the
+    DSL omits it, so a beat works out of the box on any GM-compatible kit. An
+    explicit `@map` in the DSL always wins.
     """
     tempo = None
     map_name = None
@@ -294,6 +316,19 @@ def render(sections, params, rng):
     ppq = params["ppq"]
     humanize = params.get("humanize", 20)
     drum_map = load_maps()[params["map"]]
+
+    def pitch_for(role):
+        r = role
+        seen = set()
+        while r not in drum_map and r in ROLE_FALLBACKS and r not in seen:
+            seen.add(r)
+            r = ROLE_FALLBACKS[r]
+        if r not in drum_map:
+            # Truly unmapped (no fallback chain reaches a real pitch). Drop
+            # the note rather than crash — render() is best-effort on a
+            # partial map and the caller's report flags what's missing.
+            return None
+        return drum_map[r]
 
     ticks_per_16th = ppq / 4.0
     dur_ticks = int(round(NOTE_DUR_QN * ppq))
@@ -508,10 +543,12 @@ def render(sections, params, rng):
             #     so per-role grouping would leave adjacent same-pitch hits
             #     unprotected. Keying on the resolved pitch handles both.
             for it in intents:
-                it["_pitch"] = drum_map[it["role"]]
+                it["_pitch"] = pitch_for(it["role"])
             prev_v_by_pitch = {}
             for it in intents:
                 pitch = it["_pitch"]
+                if pitch is None:
+                    continue  # unmapped role on a sparse/discovered map
                 prev_v = prev_v_by_pitch.get(pitch)
                 v = it["vel"]
                 if prev_v is not None and abs(v - prev_v) < 4:
@@ -534,12 +571,14 @@ def render(sections, params, rng):
 
             # ----- (8) resolve to events with timing -----
             for it in intents:
+                pitch = it["_pitch"]
+                if pitch is None:
+                    continue
                 pos_qn = cursor_qn + it["gstep"] * step_qn
                 # unison lock key: nominal absolute step in 16th-units rounded
                 step_key = round(pos_qn / step_qn)
                 off = sample_offset(abs_bar + it["bar"], (step_key,))
                 tick = int(round(pos_qn * ppq)) + int(round(off))
-                pitch = it["_pitch"]
                 events.append({
                     "tick": max(0, tick),
                     "pitch": pitch,

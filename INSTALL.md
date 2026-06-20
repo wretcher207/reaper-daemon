@@ -1,14 +1,16 @@
-# Install Prompt: Reaper Daemon (macOS)
+# Install Prompt: Reaper Daemon (cross-platform)
 
 **For humans:** paste this entire file into a coding agent that runs on your
-Mac with shell access (Claude Code, Codex CLI, Cursor's terminal agent, etc.).
-The agent will install the bridge end-to-end and verify it works. You only
-have to restart REAPER once when it asks.
+machine with shell access (Claude Code, Codex CLI, Cursor's terminal agent,
+etc.). The agent will install the bridge end-to-end and verify it works. You
+only have to restart REAPER once when it asks. Works on macOS, Windows, and
+Linux.
 
 **For the agent:** the rest of this file is for you. Do the phases in order.
 Each phase ends with a checkpoint — do not move on until you confirm the
 checkpoint. If anything fails, stop and report the exact error to the user
-instead of pushing forward.
+instead of pushing forward. Use `python3` on macOS/Linux and `python` on
+Windows (treat them as interchangeable below).
 
 ---
 
@@ -23,7 +25,7 @@ Confirm you can:
 If any of these are missing, stop now and tell the user verbatim:
 
 > I can't drive this install end-to-end from here. Open the install prompt in
-> Claude Code or another agent with shell access on your Mac and paste it
+> Claude Code or another agent with shell access on your machine and paste it
 > there.
 
 ## Phase 1 — Preflight
@@ -31,19 +33,24 @@ If any of these are missing, stop now and tell the user verbatim:
 Run these and read the output:
 
 ```bash
-uname -s
+uname -s            # macOS/Linux. On Windows the agent already knows its OS.
 command -v git || echo "missing"
-ls -d /Applications/REAPER.app 2>/dev/null || echo "missing"
+command -v python3 || command -v python || echo "missing"
 ```
+
+On Windows, `uname -s` won't exist — that's fine; skip it and confirm `git`
+and `python` are on PATH.
 
 Checkpoints:
 
-- `uname -s` must print `Darwin`. If not, this prompt is macOS-only — point
-  the user at the Windows bridge: <https://github.com/wretcher207/reaper-agent-bridge>
-- `git` must be on PATH. If missing, tell the user to install Xcode Command
-  Line Tools with `xcode-select --install` and re-run when finished.
-- REAPER.app must exist. If missing, ask the user where REAPER is installed.
-  If they don't have it, tell them to install REAPER from
+- `git` must be on PATH. If missing, tell the user to install it (Xcode CLT on
+  macOS via `xcode-select --install`; from git-scm.com on Windows/Linux) and
+  re-run when finished.
+- Python 3.8+ must be on PATH. If missing, point the user at
+  <https://www.python.org/downloads/> and stop.
+- REAPER must be installed. Ask the user where if you can't find it
+  (`/Applications/REAPER.app` on macOS, `C:\Program Files\REAPER (x64)\REAPER.exe`
+  on Windows). If they don't have it, tell them to install REAPER from
   <https://reaper.fm/download.php> first, then re-run.
 
 ## Phase 2 — Choose install location
@@ -53,7 +60,8 @@ Ask the user:
 > Where do you want to install the bridge? Default is `~/reaper-daemon`.
 > Press enter to accept, or paste a different absolute path.
 
-Expand `~` to `$HOME`. Call the result `$REPO` from here on.
+Expand `~` to `$HOME` (or `%USERPROFILE%` on Windows). Call the result `$REPO`
+from here on.
 
 - If `$REPO` does not exist: continue to Phase 3.
 - If `$REPO` exists and is already a clone of `reaper-daemon`
@@ -75,63 +83,59 @@ stop.
 
 ```bash
 cd "$REPO"
-./setup/macos-install.sh
+python3 setup/install.py
 ```
 
-This writes a marker-delimited block into REAPER's `Scripts/__startup.lua`
-that auto-loads the bridge on every launch. The script is idempotent — re-run
-is safe.
+This detects the OS, finds REAPER's per-user resource directory, and writes a
+marker-delimited block into `Scripts/__startup.lua` that auto-loads the bridge
+on every launch. Idempotent — re-run is safe.
 
 If it errors with `REAPER resource dir not found`, ask the user to find their
 REAPER resource directory (REAPER → Options → Show REAPER resource path in
-Finder), then re-run as:
+Finder/Explorer), then re-run as:
 
 ```bash
-REAPER_RESOURCE_PATH="<path the user gave>" ./setup/macos-install.sh
+REAPER_RESOURCE_PATH="<path the user gave>" python3 setup/install.py
 ```
 
 ## Phase 5 — Restart REAPER (human step)
 
 Tell the user verbatim:
 
-> Fully quit REAPER (Cmd+Q — not just close the window) and relaunch it.
-> Reply with "ready" once REAPER is open again.
+> Fully quit REAPER (Cmd+Q on macOS, File → Quit on Windows/Linux — not just
+> close the window) and relaunch it. Reply with "ready" once REAPER is open
+> again.
 
 Wait for their reply before continuing. Do not assume.
 
 ## Phase 6 — Verify the bridge is alive
 
-The bridge rewrites `bridge/heartbeat.json` every ~250ms while it's running.
-Check the file's modification time, not the timestamp inside it (timezone-safe):
-
 ```bash
-ls -la "$REPO/bridge/heartbeat.json"
-# fresh check: mtime within the last 10 seconds
-python3 -c "import os, time, sys; p='$REPO/bridge/heartbeat.json'; age = time.time() - os.path.getmtime(p) if os.path.exists(p) else 9999; print('fresh' if age < 10 else f'stale ({age:.1f}s)')"
+cd "$REPO"
+python3 reaperd.py status
 ```
 
 Checkpoints:
 
-- `fresh` → continue to Phase 7.
-- `stale` or file missing → confirm REAPER is actually open. If yes, tell the
-  user to load the bridge manually one time:
+- `CONNECTED` → continue to Phase 7.
+- `DEAD` (REAPER not running) → confirm REAPER is actually open; if not, ask
+  the user to launch it. If it is open and still DEAD, tell the user to load
+  the bridge manually one time:
   > In REAPER: Actions → Show action list → ReaScript: Load → pick
   > `$REPO/bridge/reaper_agent_bridge.lua` → run it.
-
-  Wait for them to confirm, then re-check. If still stale after a manual
-  load, surface the contents of `~/Library/Application Support/REAPER/Scripts/__startup.lua`
-  (just the managed block) and stop — something is off with REAPER's startup
-  hook.
+  Wait for them to confirm, then re-check.
+- `STALE` (heartbeat old) → surface the heartbeat age and the contents of the
+  managed block in REAPER's `Scripts/__startup.lua`, then stop — something is
+  off with the startup hook.
 
 ## Phase 7 — Smoke test
 
 ```bash
 cd "$REPO"
-./send_reaper_command.sh commands/examples/get_context.json --wait
+python3 reaperd.py send commands/examples/get_context.json --wait
 ```
 
-The helper prints `Sent command <id>` and then the JSON reply on the next
-line — parse the JSON line (it starts with `{`). Required:
+The reply is a single JSON object. Required:
 
 - `"ok": true`
 - `data.project_name` — the open project's name (string)
@@ -152,11 +156,12 @@ the user verbatim, filling in the values:
 > - "add a track called Drums"
 > - "set the tempo to 180 bpm"
 > - "scan every FX in this project"
+> - "discover the drum map on my Drums track and save it as MyKit"
 > - "save this control setup as a recipe called 'live-mix'"
 >
-> Full command surface: `$REPO/AGENTS.md`. Working JSON examples for every
-> command: `$REPO/commands/examples/`. If you ever want to remove the bridge,
-> ask me to run `./setup/macos-uninstall.sh`.
+> Full command surface: `$REPO/AGENTS.md`. The agent CLI: `python3 reaperd.py --help`.
+> Working JSON examples for every command: `$REPO/commands/examples/`. If you
+> ever want to remove the bridge, ask me to run `python3 setup/install.py --uninstall`.
 
 ## Error recovery — general rule
 

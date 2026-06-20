@@ -1588,6 +1588,53 @@ local function command_enum_installed_fx(command)
   return { query = payload.query or nil, count = #matches, fx = matches }
 end
 
+-- Discover a drum library's note->piece mapping by reading the MIDI note
+-- names REAPER has for the track. Most serious drum samplers (GGD, Superior
+-- Drummer, EZdrummer, BFD, Additive Drums) install a .midnam that REAPER
+-- exposes via GetTrackMIDINoteName; the agent's mapdetect.match_roles then
+-- classifies those names into groovekit roles. This is the generic, library-
+-- agnostic path. Kits with no .midnam (some Kontakt libraries) return an
+-- empty note list and the agent falls back to GM Standard / a manual map.
+local function command_discover_drum_map(command)
+  local payload = command.payload or {}
+  local track, track_index = find_track(payload)
+  local channels = payload.channels or { 0 }
+  if type(channels) ~= "table" then channels = { 0 } end
+  local max_pitch = payload.max_pitch or 127
+  local notes = {}
+  local any_name = false
+  for _, chan in ipairs(channels) do
+    for pitch = 0, max_pitch do
+      -- GetTrackMIDINoteName returns "" when no name is set for that note.
+      local ok_, name = reaper.GetTrackMIDINoteName(track, pitch, chan)
+      if ok_ and name and name ~= "" then
+        any_name = true
+        -- Key by pitch; first channel that names a note wins. Store the
+        -- channel so the agent can report which channel a kit lives on.
+        if notes[tostring(pitch)] == nil then
+          notes[tostring(pitch)] = { name = name, channel = chan }
+        end
+      end
+    end
+  end
+  local _, track_name = reaper.GetTrackName(track, "")
+  local fx_names = {}
+  for i = 0, reaper.TrackFX_GetCount(track) - 1 do
+    local _, fname = reaper.TrackFX_GetFXName(track, i, "")
+    fx_names[#fx_names + 1] = fname
+  end
+  return {
+    track = { index = track_index, name = track_name },
+    fx = fx_names,
+    channels = channels,
+    has_note_names = any_name,
+    note_count = (function()
+      local n = 0; for _ in pairs(notes) do n = n + 1 end return n
+    end)(),
+    notes = notes,
+  }
+end
+
 local handlers = {}
 
 -- Commands that don't need an undo block. `save_recipe` writes a file, not
@@ -1597,6 +1644,7 @@ local NO_UNDO_BLOCK = {
   get_context = true, get_fx_parameters = true, scan_fx = true,
   list_recipes = true, get_recipe = true, save_recipe = true,
   enum_installed_fx = true,
+  discover_drum_map = true,
 }
 
 local function is_mutating(command_type)
@@ -1685,6 +1733,7 @@ handlers.get_context = command_get_context
 handlers.get_fx_parameters = command_get_fx_parameters
 handlers.scan_fx = command_scan_fx
 handlers.enum_installed_fx = command_enum_installed_fx
+handlers.discover_drum_map = command_discover_drum_map
 
 -- Transport / project
 handlers.play = command_play

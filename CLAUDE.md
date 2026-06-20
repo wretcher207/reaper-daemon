@@ -2,23 +2,25 @@
 
 Control David's live REAPER session by writing one command. The round-trip is
 0.3s. If a request feels slow it is because YOU added steps. Send ONE command.
+Everything below is the single cross-platform CLI: `python3 reaperd.py`.
 
 ## Step 1 — always first
 
 ```bash
-~/workspace/audio/reaper-bridge/bridge_status.sh
+python3 ~/workspace/audio/reaper-bridge/reaperd.py status
 ```
 
 ## Drums (groove)
 
 ```bash
 # write the beat to /tmp/groove.dsl, then ONE command:
-~/workspace/audio/reaper-bridge/groove.sh /tmp/groove.dsl
+python3 ~/workspace/audio/reaper-bridge/reaperd.py groove /tmp/groove.dsl --track Drums
 ```
 
-- Inserts on the track David has SELECTED. He selects it before prompting.
-- NEVER guess a track. Do NOT run get_context to pick one. That is how a groove
-  hit "KT Out 1" and enraged David. Only pass `--track NAME` if David names it.
+- Inserts on the track David has SELECTED if `--track` is omitted. He selects
+  it before prompting. NEVER guess a track. Do NOT run get_context to pick one.
+  That is how a groove hit "KT Out 1" and enraged David. Only pass `--track NAME`
+  if David names it.
 
 DSL:
 ```
@@ -34,8 +36,19 @@ kick  | x . . . . . x . x . . . . . x . |
 ```
 Cells `.` rest `x` hit `X` accent `o` ghost · feel `pp p mp mf f ff fff` ·
 lanes `kick snare hat_o hat_c ride crash china tom1 tom2 tom3` · short lanes loop.
-Maps (exact): `RS Monarch` · `Odeholm Default (Wretcher Fix)` ·
-`Ultimate Heavy Drums (MDL Tone)` · `Sleep Token II by MixWave`. Ask which kit if unstated.
+`@map` is optional (defaults to GM Standard). Ask which kit if unstated.
+
+### Drum kits — auto-discover any library
+
+If the kit isn't one of the built-ins (RS Monarch, Odeholm, MDL Tone, Sleep
+Token II, GM Standard), discover it from the library's own .midnam:
+
+```bash
+python3 ~/workspace/audio/reaper-bridge/reaperd.py discover-map Drums --save MyKit
+python3 ~/workspace/audio/reaper-bridge/reaperd.py groove beat.dsl --track Drums --map MyKit
+```
+Kits with no .midnam (some Kontakt libs) report no note names; build by hand:
+`reaperd.py add-map MyKit --roles '{"KICK_R":36,"SNARE":38,...}'`.
 
 ### Cymbal rules (mandatory — David enforces these)
 
@@ -64,30 +77,31 @@ Half-time heavy:        Half-Time Crushing, Slam Breakdown (Lurch)
 ## Plugins (FX)
 
 ```bash
-~/workspace/audio/reaper-bridge/fxload.sh "<plugin words>" "<track|master>"
+python3 ~/workspace/audio/reaper-bridge/reaperd.py fxload "<plugin words>" "<track|master>"
 ```
 Resolves the exact installed name from REAPER's plugin cache and loads in ~1s.
-`send_cmd.sh add_fx '{"target_track_name":"master","fx_name":"<sloppy name>"}'`
+`reaperd.py cmd add_fx '{"target_track_name":"master","fx_name":"<sloppy name>"}'`
 self-resolves the name too. Do not guess + retry, do not scan_fx to "find" a name.
 
 ### Setting plugin parameters ("set the kick EQ to 80 Hz")
 
 **Easy way (any plugin):**
 ```bash
-~/workspace/audio/reaper-bridge/setparam.sh <track> "<fx>" "<param>" "<display value>"
+python3 ~/workspace/audio/reaper-bridge/reaperd.py setparam Kick "Pro-Q" "Band 1 Frequency" "80 Hz"
+python3 ~/workspace/audio/reaper-bridge/reaperd.py setparam Kick "ReaEQ" "Gain-Band 2" "-3"
 ```
 Binary-searches the normalized value that produces your target display, sets it,
-verifies. Handles any plugin, ±inf endpoints, log/linear scaling. Examples:
-`setparam.sh Kick "Pro-Q" "Band 1 Frequency" "80 Hz"` / `setparam.sh Kick "ReaEQ" "Gain-Band 2" "-3"`
+verifies. Handles any plugin, ±inf endpoints, log/linear scaling.
 Use `norm=0.267` for direct normalized, or for enum/string params ("Bell", "Off").
+EQ band shortcut: `reaperd.py eq Kick "Pro-Q" 1 80 -3 0.7`.
 
 **Manual way:** scan with `get_fx_parameters`, use `param_index` (not name —
-FabFilter shares words), convert to normalized, `send_cmd.sh set_fx_param` with
+FabFilter shares words), convert to normalized, `reaperd.py cmd set_fx_param` with
 `normalized_value`. Batch in one `batch` with `stop_on_error:true`.
 
 ## Everything else
 
-One command: `~/workspace/audio/reaper-bridge/send_cmd.sh <type> '<payload>'`
+One command: `python3 ~/workspace/audio/reaper-bridge/reaperd.py cmd <type> '<payload>'`
 (mute/solo/tempo/volume/pan/markers/remove_fx/bypass/automation/transport). Target
 master with `{"target_track_name":"master", ...}`. Confirm `ok:true` in the reply;
 don't narrate it.
@@ -95,7 +109,7 @@ don't narrate it.
 ## Hard rules
 
 - ONE command per request, then stop. No preamble, no "ok:true" reports, no demos.
-- Gate with `bridge_status.sh` first. If it's dead, say so — don't fake success.
+- Gate with `reaperd.py status` first. If it's dead, say so — don't fake success.
 - Never guess a track. Resolve the GUID from `get_context` and reuse it.
 - Never report done before reading the outbox reply with `ok:true`.
 - Never assume a Lua edit took effect — the defer loop runs the last-loaded code;

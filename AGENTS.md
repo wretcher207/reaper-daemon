@@ -1,8 +1,9 @@
-# Reaper Daemon: Agent Instructions (macOS)
+# Reaper Daemon: Agent Instructions (cross-platform)
 
 You can control REAPER through this local file bridge. No network, no socket:
 you read and write JSON files in shared folders, and a Lua script running
-inside REAPER executes them.
+inside REAPER executes them. Works on macOS, Windows, and Linux — the agent
+CLI is a single Python 3 file (`reaperd.py`) with no third-party deps.
 
 This bridge is plugin-agnostic. It knows nothing about any specific synth, amp
 sim, or drum tool. You discover what a project contains, then act on it. If a
@@ -22,13 +23,15 @@ recipes/                saved recipes (JSON) — you can save and replay these
 
 ## Required workflow
 
-1. Check `bridge/heartbeat.json`. If missing or its `alive_at` is stale (more
-   than a few seconds old), the bridge is not running — tell the user to
-   (re)start REAPER, or run the bridge action manually (see README). On macOS
-   the bridge auto-starts via `Scripts/__startup.lua`.
-2. Send a command: write `inbox/<id>.json.tmp`, then rename to
-   `inbox/<id>.json`. The rename must be atomic; never write `.json` directly.
-3. Poll for `outbox/<id>.json`. Read the result.
+1. Check the bridge is alive: `python3 reaperd.py status`. If it reports
+   `DEAD` or `STALE`, tell the user to (re)start REAPER, or run the bridge
+   action manually (see README). On a fresh install the bridge auto-starts via
+   `Scripts/__startup.lua`.
+2. Send a command. Easiest is the CLI: `python3 reaperd.py send <file> --wait`
+   or `python3 reaperd.py cmd <type> '<payload-json>'`. Under the hood this
+   writes `inbox/<id>.json.tmp` then atomically renames to `inbox/<id>.json`.
+   (Never write `.json` directly — the rename must be atomic.)
+3. The `--wait` flag polls `outbox/<id>.json` and prints the result.
 4. Report what happened. On `ok: false`, `error.code` is an `UPPER_SNAKE` code
    (e.g. `NO_TARGET_TRACK`, `AMBIGUOUS_FX`).
 
@@ -37,29 +40,33 @@ command to preview without changing the project.
 
 ## Sending a command
 
-Easiest — the helper auto-fills `id`/`created_at`/`created_by`, writes
-atomically, and (with `--wait`) polls the outbox and prints the result:
-
 ```bash
-./send_reaper_command.sh commands/examples/get_context.json --wait
-```
+# from a command JSON file (polls for the reply):
+python3 reaperd.py send commands/examples/get_context.json --wait
 
-Doing it directly in bash (what an agent that drives its own shell does):
+# by type + payload (resolves add_fx names, repairs set_fx_param aliases):
+python3 reaperd.py cmd add_fx '{"target_track_name":"master","fx_name":"pro q 4"}'
 
-```bash
-root="$(pwd)"
-id="agent-$(date +%Y-%m-%dT%H-%M-%S)-$(openssl rand -hex 2)"
-python3 - "$id" > "inbox/$id.json.tmp" <<'PY'
-import json, sys, datetime
-print(json.dumps({
-  "id": sys.argv[1], "version": 3, "type": "get_context",
-  "created_by": "agent", "created_at": datetime.datetime.now().astimezone().isoformat(),
-  "dry_run": False, "payload": {"include_fx": True}
-}, separators=(",", ":")))
+# direct, lowest-level (what the CLI does for you):
+python3 - <<'PY'
+import json, secrets, datetime, os
+root = os.getcwd()
+cid = f"agent-{secrets.token_hex(4)}"
+cmd = {"id": cid, "version": 3, "type": "get_context",
+       "created_by": "agent",
+       "created_at": datetime.datetime.now().astimezone().isoformat(),
+       "dry_run": False, "payload": {"include_fx": True}}
+tmp = os.path.join(root, "inbox", cid + ".json.tmp")
+out = os.path.join(root, "outbox", cid + ".json")
+os.makedirs(os.path.dirname(tmp), exist_ok=True)
+with open(tmp, "w") as f: json.dump(cmd, f)
+os.replace(tmp, tmp[:-4])  # atomic rename to inbox/<id>.json
+import time
+for _ in range(120):
+    if os.path.isfile(out):
+        print(open(out).read()); break
+    time.sleep(0.25)
 PY
-mv -f "inbox/$id.json.tmp" "inbox/$id.json"
-# poll
-for _ in $(seq 1 120); do [ -f "outbox/$id.json" ] && cat "outbox/$id.json" && break; sleep 0.25; done
 ```
 
 ## Commands
@@ -71,6 +78,8 @@ Full payloads and examples: `bridge/command_schema.md` and `commands/examples/`.
 - `get_fx_parameters` — full parameter list for one FX (paged).
 - `scan_fx` — every FX and its parameters across the project. Use this first
   when you do not know what plugins a project uses.
+- `discover_drum_map` — dump a drum track's MIDI note names (the library's
+  `.midnam`) so a kit map can be auto-built (see `reaperd.py discover-map`).
 
 **Transport / project**
 - `play`, `stop`, `pause`, `record`
@@ -95,6 +104,10 @@ Full payloads and examples: `bridge/command_schema.md` and `commands/examples/`.
 **Composition**
 - `batch` — run several commands as one undo block.
 - `save_recipe`, `list_recipes`, `get_recipe`, `apply_recipe`
+
+For the friendly wrappers around these (fxload, setparam, eq, groove, jam,
+discover-map, add-map), see `reaperd.py --help`. There are no shell `.sh`
+helpers anymore — `reaperd.py` is the single cross-platform entry point.
 
 ## Targeting tracks, FX, and parameters
 
@@ -130,14 +143,24 @@ they shift between plugin versions. Query with `scan_fx` or
    you the current normalized value; interpolate from there. When unsure, set
    a value, re-scan, read the `formatted_value`, and adjust.
 
-## Generating MIDI (macOS)
+## Generating MIDI (cross-platform)
 
-On macOS you generally run your own shell, so the Windows "job worker" is not
-needed: write the `.mid` file yourself (anywhere on disk), then send
-`insert_midi_file` with its absolute `midi_path`, a `target_track_name`, and a
-`position` (`{"type":"cursor"}` or a bar/beat). The bridge inserts it inside an
-undo block. The optional job-worker runner from the Windows repo was left out
-of this port for that reason.
+Write the `.mid` file yourself (anywhere on disk), then send `insert_midi_file`
+with its absolute `midi_path`, a `target_track_name`, and a `position`
+(`{"type":"cursor"}` or a bar/beat). Or use the DSL drum engine directly:
+
+```bash
+python3 reaperd.py groove beat.dsl --track Drums        # render + insert + verify
+python3 reaperd.py jam                                  # DSL from stdin -> selected track
+```
+
+The engine (`skills/drum-apparatus/`) humanizes velocity, fatigue, and timing.
+For a drum library it doesn't know, auto-discover its map first:
+
+```bash
+python3 reaperd.py discover-map Drums --save MyKit
+python3 reaperd.py groove beat.dsl --track Drums --map MyKit
+```
 
 ## Recipes — set up reusable controls
 

@@ -3,6 +3,11 @@ from pathlib import Path
 
 DRUMGEN_DIR = Path(__file__).resolve().parent.parent
 _CATALOG = DRUMGEN_DIR / "catalog"
+# User overlay: discovered / hand-added maps live here (gitignored), one JSON
+# file per map. They merge ON TOP of the built-in catalog/maps.json, so a user
+# can add a kit without touching a tracked file (and a `git pull` never
+# clobbers it). Keys (map names) in the overlay win on collision.
+_OVERLAY = DRUMGEN_DIR / "maps"
 
 ROLE_KEYS = [
     "KICK_R", "KICK_L", "SNARE", "SNARE_FLAM", "SNARE_RIM", "SNARE_GHOST",
@@ -16,7 +21,33 @@ ROLE_KEYS = [
 
 
 def load_maps():
-    return json.loads((_CATALOG / "maps.json").read_text())
+    """Return all available drum-kit maps: built-in catalog + user overlay.
+
+    The overlay (skills/drum-apparatus/maps/*.json) wins on name collision,
+    so discovered/added kits override built-ins of the same name. Built-in
+    maps.json is the source of truth for the shipped kits and is never
+    written to by tooling.
+    """
+    maps = {}
+    built_in = _CATALOG / "maps.json"
+    if built_in.is_file():
+        data = json.loads(built_in.read_text())
+        if isinstance(data, dict):
+            maps.update(data)
+    if _OVERLAY.is_dir():
+        for p in sorted(_OVERLAY.glob("*.json")):
+            try:
+                d = json.loads(p.read_text())
+            except Exception:
+                continue
+            if isinstance(d, dict):
+                # A single map file may be either {name: {role:pitch}} or a
+                # bare {role:pitch} (named after the file stem).
+                if len(d) == 1 and isinstance(next(iter(d.values())), dict):
+                    maps.update(d)
+                else:
+                    maps[p.stem] = d
+    return maps
 
 
 def load_grooves():

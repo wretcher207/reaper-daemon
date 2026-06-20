@@ -21,7 +21,8 @@ section arrangement. Default kit: **RS Monarch (Kontakt 8), MIDI channel 1.**
    `python generate.py --spec spec.json --out /tmp/drums.mid` (or `--groove`).
 4. **Insert** via the bridge `insert_midi_file` (target track "Kontakt 8",
    position = David's requested bar; default channel 1). Use the verified
-   `send_reaper_command.sh`.
+   `python3 reaperd.py groove <dsl> --track <name>` (render + insert + verify
+   in one round trip), or `reaperd.py cmd insert_midi_file '<payload>'`.
 5. **VERIFY AUDIBLY (hard gate):** set cursor to the clip, `play`, and ask David
    if it sounds right. NEVER claim a groove is good without his ear — this is
    the audio-must-be-audible rule. Parse-back proves notes exist, not that it

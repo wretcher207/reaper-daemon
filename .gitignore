@@ -36,3 +36,7 @@ MEMORY.md
 HANDOFF.md
 ERRORS.md
 docs/superpowers/
+
+# User drum-kit map overlay (discovered/added maps; not shipped with the repo)
+skills/drum-apparatus/maps/*
+!skills/drum-apparatus/maps/.gitkeep

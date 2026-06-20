@@ -5,8 +5,8 @@ from drumgen.smf import write_smf
 from drumgen.catalog import load_maps
 
 DEFAULTS = dict(humanize=45, push_pull=0, velocity_mode=1, power_hand="hh_open",
-                ph_velocity=90, ph_variance=40, fills=True, fill_velocity=115,
-                tempo=120, ppq=480, map_name="RS Monarch",
+                 ph_velocity=90, ph_variance=40, fills=True, fill_velocity=115,
+                 tempo=120, ppq=480, map_name="GM Standard",
                 bar_length_qn=4.0, step_qn=0.25, ph_spacing_qn=0.5, seed=1,
                 accent_cymbal="CRASH_R", accent_every_bars=1, cymbal_density=1,
                 cymbal_decay=0.72)
