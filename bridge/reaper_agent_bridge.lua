@@ -848,8 +848,9 @@ local function command_set_fx_param(command)
   local param_index, before = find_fx_param(track, api_index, payload)
   local ok = false
 
-  if payload.normalized_value ~= nil then
-    local value = tonumber(payload.normalized_value)
+  if payload.normalized_value ~= nil or payload.value ~= nil then
+    local raw = payload.normalized_value ~= nil and payload.normalized_value or payload.value
+    local value = tonumber(raw)
     if not value then error("BAD_PARAM_VALUE: normalized_value must be a number") end
     if value < 0 then value = 0 end
     if value > 1 then value = 1 end

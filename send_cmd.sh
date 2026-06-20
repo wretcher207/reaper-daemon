@@ -36,6 +36,22 @@ if [ "$TYPE" = "add_fx" ]; then
 fi
 # ----------------------------------------------------------------------------
 
+# --- set_fx_param field-name repair ------------------------------------------
+# Agents keep sending "value" (the obvious name) instead of "normalized_value"
+# (what the bridge actually accepts), and the bridge throws BAD_PARAM_VALUE
+# with no hint. Fix it here so it works regardless, no REAPER reload needed.
+# Also accepts "norm"/"normalized" as shorthand. Only rewrites when the
+# canonical field is absent and a synonym is present.
+if [ "$TYPE" = "set_fx_param" ]; then
+  PAYLOAD=$(printf '%s' "$PAYLOAD" | jq -c '
+    if has("normalized_value") then .
+    elif has("value")      then .normalized_value = .value      | del(.value)
+    elif has("norm")       then .normalized_value = .norm       | del(.norm)
+    elif has("normalized") then .normalized_value = .normalized | del(.normalized)
+    else . end')
+fi
+# ----------------------------------------------------------------------------
+
 ID="${TYPE}_$(date +%s%3N)"
 INBOX="$BRIDGE/inbox/${ID}.json"
 OUTBOX="$BRIDGE/outbox/${ID}.json"
