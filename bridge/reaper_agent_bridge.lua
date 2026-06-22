@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.1.1
+-- @version 3.2.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -13,9 +13,12 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
---   Repin to current bridge: master-track scan, set_fx_param formatted-value
---   binary search, singleton lock with render-busy guard, retention sweep,
---   meter-correct bar math, undo-block closed on handler errors.
+--   3.2.0: Windows atomic-write fix (heartbeat no longer freezes after first
+--   write); never sweep outbox/ (stop deleting unread replies); set_fx_param
+--   rolls back on a failed search and parses kHz displays correctly; bridge
+--   re-derives its root after the repo moves. Supersedes the 3.1.x line, whose
+--   refactor (drum renderer + dead handlers removed) shipped without a version
+--   bump.
 
 -- Runs as a deferred script. The bridge root is the folder one level up from
 -- this script, so it works wherever the repo is cloned or ReaPack installs it.
@@ -87,8 +90,15 @@ local function load_config()
   if text then
     local ok, parsed = pcall(json.decode, text)
     if ok and type(parsed) == "table" then
-      if not parsed.bridge_root or parsed.bridge_root == "" then
+      -- bridge_config.json lives inside the clone and moves with it, but its
+      -- saved bridge_root is absolute — after the repo moves it points at the OLD
+      -- location and the bridge silently polls a dead inbox while reaperd.py
+      -- writes to the new one. SCRIPT_DIR is always the live clone (the launcher
+      -- sets it), so DEFAULT_BRIDGE_ROOT is authoritative: if the saved root
+      -- disagrees, re-derive and rewrite. (Other config keys are preserved.)
+      if parsed.bridge_root ~= DEFAULT_BRIDGE_ROOT then
         parsed.bridge_root = DEFAULT_BRIDGE_ROOT
+        pcall(write_file, CONFIG_PATH, json.encode(parsed))
       end
       return parsed
     end
@@ -177,12 +187,19 @@ local function log_line(message)
 end
 
 -- POSIX rename(2) atomically replaces the destination whether it exists or
--- not, so we never pre-remove it: a pre-remove opens a window where readers
--- see no file, and if the rename then fails the old file is gone for good.
+-- not, so the first rename succeeds and we never pre-remove (a pre-remove opens
+-- a window where readers see no file). Windows rename() CANNOT replace an
+-- existing dest, so there the first rename fails on every overwrite — that froze
+-- the heartbeat after its first write. Fall back to remove + retry: still atomic
+-- on POSIX, and the only correctness-preserving option Windows offers.
 local function atomic_write_json(path, value)
   local tmp = path .. ".tmp"
   write_file(tmp, json.encode(value))
   local ok, err = os.rename(tmp, path)
+  if not ok then
+    os.remove(path)
+    ok, err = os.rename(tmp, path)
+  end
   if not ok then error(err or ("Cannot rename " .. tmp)) end
 end
 
@@ -229,6 +246,23 @@ end
 local function finite_or_nil(x)
   if type(x) ~= "number" or x ~= x or x == math.huge or x == -math.huge then return nil end
   return x
+end
+
+-- Parse the leading signed number from a plugin's formatted display, kHz-aware.
+-- Mirrors reaperd.py's _num_from. Without the ×1000, a band displaying "1.20 kHz"
+-- parses as 1.2 while the target "1200 Hz" parses as 1200, so the range check
+-- rejects every high-frequency band whose plugin shows kHz (FabFilter, ReaEQ…).
+-- "inf"/"-inf" map to ±1e30 so unbounded endpoints don't read as nil.
+local function parse_display_number(s)
+  if type(s) ~= "string" then return nil end
+  local low = s:lower()
+  if low:find("inf", 1, true) then
+    return low:find("-", 1, true) and -1e30 or 1e30
+  end
+  local num = tonumber(low:match("[-+]?%d*%.?%d+"))
+  if not num then return nil end
+  if low:find("khz", 1, true) then num = num * 1000 end
+  return num
 end
 
 -- TimeMap2_timeToBeats / TimeMap2_beatsToTime are present in every REAPER
@@ -879,11 +913,16 @@ local function command_set_fx_param(command)
     -- params ("Bell", "Off") have no parseable number and are rejected — use
     -- normalized_value for those (scan to find the value that formats right).
     local fv = tostring(payload.formatted_value)
-    local target = tonumber(fv:match("[-+]?%d*%.?%d+"))
+    local target = parse_display_number(fv)
     if not target then
       error("FORMATTED_VALUE_UNSUPPORTED: could not parse a number from '" .. fv
             .. "' (use normalized_value 0..1, or relative)")
     end
+    -- Snapshot the live value so a failed search rolls back. The search writes
+    -- the param ~26 times (each probe is a real SetParamNormalized); without
+    -- this, an out-of-range or non-numeric param left the band stranded at the
+    -- last probe — a garbage frequency/gain — instead of where it started.
+    local original = reaper.TrackFX_GetParamNormalized(track, api_index, param_index)
     local function fmt_num(norm)
       reaper.TrackFX_SetParamNormalized(track, api_index, param_index, norm)
       local pok, retval, text = pcall(reaper.TrackFX_GetFormattedParamValue, track, api_index, param_index, "")
@@ -892,38 +931,47 @@ local function command_set_fx_param(command)
         if type(text) == "string" then s = text
         elseif type(retval) == "string" then s = retval end
       end
-      return tonumber(s:match("[-+]?%d*%.?%d+"))
+      return parse_display_number(s)
     end
-    local lo, hi = 0.0, 1.0
-    local lo_num = fmt_num(lo)
-    local hi_num = fmt_num(hi)
-    if lo_num == nil or hi_num == nil then
-      error("FORMATTED_VALUE_UNSUPPORTED: parameter is not numeric (use normalized_value)")
-    end
-    local ascending = hi_num >= lo_num
-    if (ascending and (target < lo_num or target > hi_num))
-       or (not ascending and (target > lo_num or target < hi_num)) then
-      error("FORMATTED_VALUE_UNSUPPORTED: " .. fv .. " outside param range ("
-            .. tostring(lo_num) .. " .. " .. tostring(hi_num) .. "); use normalized_value")
-    end
-    local norm = (lo + hi) / 2
-    for _ = 1, 24 do
-      local num = fmt_num(norm)
-      if num == nil then break end
-      if (ascending and num < target) or (not ascending and num > target) then
-        lo = norm
-      else
-        hi = norm
+    local search_ok, search_err = pcall(function()
+      local lo, hi = 0.0, 1.0
+      local lo_num = fmt_num(lo)
+      local hi_num = fmt_num(hi)
+      if lo_num == nil or hi_num == nil then
+        error("FORMATTED_VALUE_UNSUPPORTED: parameter is not numeric (use normalized_value)")
       end
-      norm = (lo + hi) / 2
+      local ascending = hi_num >= lo_num
+      if (ascending and (target < lo_num or target > hi_num))
+         or (not ascending and (target > lo_num or target < hi_num)) then
+        error("FORMATTED_VALUE_UNSUPPORTED: " .. fv .. " outside param range ("
+              .. tostring(lo_num) .. " .. " .. tostring(hi_num) .. "); use normalized_value")
+      end
+      local norm = (lo + hi) / 2
+      for _ = 1, 24 do
+        local num = fmt_num(norm)
+        if num == nil then break end
+        if (ascending and num < target) or (not ascending and num > target) then
+          lo = norm
+        else
+          hi = norm
+        end
+        norm = (lo + hi) / 2
+      end
+      local best, d_best = lo, math.abs((fmt_num(lo) or target) - target)
+      local n_hi = fmt_num(hi)
+      if n_hi then
+        local d_hi = math.abs(n_hi - target)
+        if d_hi < d_best then best, d_best = hi, d_hi end
+      end
+      ok = reaper.TrackFX_SetParamNormalized(track, api_index, param_index, best)
+    end)
+    if not search_ok then
+      reaper.TrackFX_SetParamNormalized(track, api_index, param_index, original)
+      error(search_err)
     end
-    local best, d_best = lo, math.abs((fmt_num(lo) or target) - target)
-    local n_hi = fmt_num(hi)
-    if n_hi then
-      local d_hi = math.abs(n_hi - target)
-      if d_hi < d_best then best, d_best = hi, d_hi end
+    if not ok then
+      reaper.TrackFX_SetParamNormalized(track, api_index, param_index, original)
     end
-    ok = reaper.TrackFX_SetParamNormalized(track, api_index, param_index, best)
   else
     error("BAD_PARAM_VALUE: Provide normalized_value, relative, or formatted_value")
   end
@@ -1782,12 +1830,18 @@ local function maybe_heartbeat(force)
   end
 end
 
--- One-shot retention sweep at startup: bound logs/ and the archive|failed|outbox
--- dirs so a long-lived install never grows without limit. Runs once before the
+-- One-shot retention sweep at startup: bound logs/ and the archive|failed dirs
+-- so a long-lived install never grows without limit. Runs once before the
 -- loop, so zero per-tick cost. Log: rotate bridge.log -> bridge.log.1 past
 -- 1 MB (one backup, max ~2 MB). Dirs: keep the 200 newest .json files; command
 -- ids are timestamp-prefixed (manual-/agent-YYYY-MM-DDTHH-MM-SS-hex), so
 -- list_json_files' lexical sort == chronological, and files[1] is the oldest.
+-- outbox/ is DELIBERATELY excluded: it is the agent's reply queue, and a batch
+-- dump of >200 commands would let a count-based sweep delete replies the agent
+-- has not polled yet (send_command --wait would then time out on a command that
+-- actually succeeded). The reader (reaperd.py) deletes its own reply after
+-- reading it. ponytail: non-waited replies leak a few KB/session; add a
+-- time-based TTL here only if that ever matters.
 local function sweep_once()
   local log_path = join(paths.logs, "bridge.log")
   local f = io.open(log_path, "rb")
@@ -1805,7 +1859,7 @@ local function sweep_once()
   -- groups by prefix and would delete the wrong (newer) files. files[1] must be
   -- the oldest for the slice below to drop the oldest.
   local function stamp(f) return f:match("(%d%d%d%d%-%d%d%-%d%dT%d%d%-%d%d%-%d%d)") or f end
-  for _, dir in ipairs({ paths.archive, paths.failed, paths.outbox }) do
+  for _, dir in ipairs({ paths.archive, paths.failed }) do
     local files = list_json_files(dir)
     table.sort(files, function(a, b) return stamp(a) < stamp(b) end)
     if #files > keep then
@@ -1849,6 +1903,13 @@ local function loop()
     end
   end
   reaper.defer(loop)
+end
+
+-- Self-check seam: test_bridge.lua loads this file with REAPER_BRIDGE_SELFTEST
+-- set to exercise the pure/atomic helpers, then returns here before the defer
+-- loop starts (no live REAPER needed). One global check; no production cost.
+if _G.REAPER_BRIDGE_SELFTEST then
+  return { parse_display_number = parse_display_number, atomic_write_json = atomic_write_json }
 end
 
 -- Re-queue anything stranded in processing/ from a previous run (crash or

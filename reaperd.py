@@ -191,7 +191,15 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
     while elapsed < timeout_ms:
         if os.path.isfile(outbox):
             with open(outbox, "r", encoding="utf-8") as f:
-                return cid, f.read()
+                reply = f.read()
+            # The reader owns its reply: the bridge no longer count-sweeps
+            # outbox/ (it was deleting unread replies on big batches), so delete
+            # it here once read to keep the queue from growing unbounded.
+            try:
+                os.remove(outbox)
+            except OSError:
+                pass
+            return cid, reply
         time.sleep(0.05)
         elapsed += 50
     raise TimeoutError(f"timed out after {timeout_ms}ms waiting for {outbox}")
@@ -480,7 +488,12 @@ def cmd_eq(args):
     band = args.band
     band_re = re.compile(r"(^|\b)(eq\s*)?band\s*0*%d\b" % band)
     band_re2 = re.compile(r"\s*0*%d\s*[:\-]" % band)
-    roles = [("used", r"\bused\b"), ("freq", r"\b(freq(uency)?)\b"),
+    # Enable-param naming varies: ReaEQ "Enabled", FabFilter Pro-Q "On"/"Used",
+    # others expose only an inverted "Bypass", and some bands are always-on with
+    # no enable param at all. Detect any of them; require only Freq+Gain.
+    roles = [("enable", r"\b(used|enabled?|on|active)\b"),
+             ("bypass", r"\bbypass\b"),
+             ("freq", r"\b(freq(uency)?)\b"),
              ("gain", r"\bgain\b"), ("q", r"\b(q|bandwidth|width)\b")]
     idx = {}
     for p in params:
@@ -490,9 +503,12 @@ def cmd_eq(args):
         for key, pat in roles:
             if key not in idx and re.search(pat, n):
                 idx[key] = p.get("index")
-    used, ifreq, igain, iq = idx.get("used"), idx.get("freq"), idx.get("gain"), idx.get("q")
-    if used is None or ifreq is None or igain is None:
-        print(f"[eqband] could not find Band {band} Used/Frequency/Gain params. "
+    ifreq, igain, iq = idx.get("freq"), idx.get("gain"), idx.get("q")
+    ienable, enable_inverted = idx.get("enable"), False
+    if ienable is None and idx.get("bypass") is not None:
+        ienable, enable_inverted = idx.get("bypass"), True  # 0.0 = not bypassed = live
+    if ifreq is None or igain is None:
+        print(f"[eqband] could not find Band {band} Frequency/Gain params. "
               f"This EQ names bands differently.", file=sys.stderr)
         return 1
 
@@ -504,8 +520,10 @@ def cmd_eq(args):
         return send_type("set_fx_param", {**base, "param_index": i, "formatted_value": display},
                          bridge_root=br, resolve=False, repair=False).get("ok", False)
 
-    # Mark the band Used FIRST (else the curve stays flat), then dial freq/gain/Q.
-    setn(used, 1.0)
+    # Enable the band FIRST (else the curve stays flat), then dial freq/gain/Q.
+    enabled_ok = True
+    if ienable is not None:
+        enabled_ok = setn(ienable, 0.0 if enable_inverted else 1.0)
     setfmt(ifreq, f"{args.freq} Hz")
     setfmt(igain, f"{args.gain} dB")
     if args.q is not None and iq is not None:
@@ -520,16 +538,23 @@ def cmd_eq(args):
         p = pmap.get(i)
         return p.get("formatted_value", p.get("value")) if p else "?"
 
-    used_s = fv(used)
-    line = f"[eqband] Band {band} -> Used={used_s}  Freq={fv(ifreq)}  Gain={fv(igain)}"
+    line = f"[eqband] Band {band} ->"
+    if ienable is not None:
+        line += f"  {'Bypass' if enable_inverted else 'Enabled'}={fv(ienable)}"
+    line += f"  Freq={fv(ifreq)}  Gain={fv(igain)}"
     if iq is not None:
         line += f"  Q={fv(iq)}"
     print(line)
-    ok = str(used_s).strip().lower() in ("used", "on", "enabled", "1", "true")
+    if ienable is None:
+        live = True  # always-on band: setting freq/gain is all there is to do
+    elif enable_inverted:
+        live = enabled_ok  # bypass display is ambiguous; trust the un-bypass set
+    else:
+        live = str(fv(ienable)).strip().lower() in ("used", "on", "enabled", "active", "1", "true", "yes")
     print("[eqband] RESULT:",
-          "BAND IS LIVE on the curve." if ok
-          else "BAND DID NOT TAKE (Used is off) — do NOT claim success.")
-    return 0 if ok else 1
+          "BAND IS LIVE on the curve." if live
+          else "BAND DID NOT TAKE (enable is off) — do NOT claim success.")
+    return 0 if live else 1
 
 
 def cmd_groove(args):

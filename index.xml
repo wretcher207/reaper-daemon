@@ -1,14 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="reaper-daemon" commit="c8ebd99">
+<!-- Sources track raw/main so ReaPack always serves the current bridge instead
+     of a pinned commit that silently drifts behind HEAD. @version here MUST move
+     in lockstep with @version in bridge/reaper_agent_bridge.lua on every release,
+     and these fixes must be merged to main before this is published. A tagged,
+     pin-verified release pipeline is the proper next step (review Next-Level #3). -->
+<index version="1" name="reaper-daemon" commit="main">
   <category name="bridge">
     <reapack name="reaper_agent_bridge.lua" type="script" desc="Reaper Daemon (REAPER agent file bridge)">
       <metadata>
         <link rel="website" href="https://github.com/wretcher207/reaper-daemon">Reaper Daemon on GitHub</link>
       </metadata>
-      <version name="3.1.1" author="Dead Pixel Design" time="2026-06-20T16:00:00Z">
-        <changelog><![CDATA[Repin to current bridge: master-track scan, set_fx_param formatted-value binary search, singleton lock with render-busy guard, retention sweep, meter-correct bar math, undo-block closed on handler errors.]]></changelog>
-        <source main="main">https://github.com/wretcher207/reaper-daemon/raw/c8ebd99/bridge/reaper_agent_bridge.lua</source>
-        <source file="json.lua">https://github.com/wretcher207/reaper-daemon/raw/c8ebd99/bridge/json.lua</source>
+      <version name="3.2.0" author="Dead Pixel Design" time="2026-06-22T00:00:00Z">
+        <changelog><![CDATA[Windows atomic-write fix (heartbeat no longer freezes after first write); never sweep outbox/ (stop deleting unread replies); set_fx_param rolls back on a failed search and parses kHz displays correctly; bridge re-derives its root after the repo moves. Supersedes the 3.1.x line.]]></changelog>
+        <source main="main">https://github.com/wretcher207/reaper-daemon/raw/main/bridge/reaper_agent_bridge.lua</source>
+        <source file="json.lua">https://github.com/wretcher207/reaper-daemon/raw/main/bridge/json.lua</source>
       </version>
     </reapack>
   </category>
