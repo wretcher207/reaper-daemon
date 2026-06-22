@@ -18,6 +18,10 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      # gh-actions-lua builds Lua from source; on Windows it needs the MSVC
+      # toolchain (cl) on PATH or it fails with "Unable to locate executable cl".
+      - if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
       - uses: leafo/gh-actions-lua@v11
         with:
           luaVersion: "5.4"
