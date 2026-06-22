@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # One-line installer for Reaper Daemon. Clones the repo and wires the bridge
-# into REAPER's startup via setup/install.py. Cross-platform: macOS/Linux with
-# bash (or any POSIX sh); on Windows use Git Bash, WSL, or just run
+# into REAPER's startup via setup/install.py. Needs bash (the shebang is bash
+# and it uses `set -o pipefail`, which POSIX sh lacks) — on macOS/Linux that's
+# already present; on Windows use Git Bash or WSL, or just run
 # `python setup/install.py` directly from a cloned repo. Idempotent — re-run
 # safely after moving the repo.
 set -euo pipefail
