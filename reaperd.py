@@ -172,6 +172,9 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
     cmd.setdefault("created_at", datetime.datetime.now().astimezone().isoformat())
     cmd.setdefault("created_by", "cli")
     cmd.setdefault("dry_run", False)
+    token = _auth_token(bridge_root)
+    if token:
+        cmd.setdefault("token", token)
 
     inbox = os.path.join(bridge_root, "inbox", cid + ".json")
     outbox = os.path.join(bridge_root, "outbox", cid + ".json")
@@ -259,6 +262,17 @@ def _num_from(s):
 def _exit_for(res):
     """Exit code from a parsed reply: 0 if ok, 1 otherwise."""
     return 0 if (isinstance(res, dict) and res.get("ok")) else 1
+
+
+def _auth_token(bridge_root):
+    """Optional shared secret from bridge_config.json. None if the user set none.
+    The bridge reads the same key, so setting auth_token once wires both sides."""
+    path = os.path.join(bridge_root, "bridge", "bridge_config.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return (json.load(f).get("auth_token") or "").strip() or None
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -382,9 +396,10 @@ def cmd_setparam(args):
             return 1
         base = {"target_track_guid": guid}
 
-    # 2. FX selector.
+    # 2. FX selector. A bare #index needs an explicit scope (bridge rejects an
+    # ambiguous one); the CLI's #N always means a track FX.
     if args.fx.startswith("#"):
-        base = {**base, "fx_index": int(args.fx[1:])}
+        base = {**base, "fx_index": int(args.fx[1:]), "fx_scope": "track"}
     else:
         base = {**base, "fx_name_contains": args.fx}
 
@@ -471,7 +486,7 @@ def cmd_setparam(args):
 def cmd_eq(args):
     br = args.bridge_root
     if args.fx.startswith("#"):
-        base = {"target_track_name": args.track, "fx_index": int(args.fx[1:])}
+        base = {"target_track_name": args.track, "fx_index": int(args.fx[1:]), "fx_scope": "track"}
     else:
         base = {"target_track_name": args.track, "fx_name_contains": args.fx}
 

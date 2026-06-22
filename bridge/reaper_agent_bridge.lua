@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.2.0
+-- @version 3.3.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -13,12 +13,15 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.3.0: Robust add_fx_chain splicer (correct chunk depth + restore-on-error);
+--   UI time-budget on the drain loop; singleton-lock race closed via owner
+--   token; fx_index now requires an explicit fx_scope; dropped the fake
+--   reaper_focused field; optional shared-secret auth token; doc + polish fixes;
+--   added a cross-platform CI self-test (bridge/test_bridge.lua).
 --   3.2.0: Windows atomic-write fix (heartbeat no longer freezes after first
 --   write); never sweep outbox/ (stop deleting unread replies); set_fx_param
 --   rolls back on a failed search and parses kHz displays correctly; bridge
---   re-derives its root after the repo moves. Supersedes the 3.1.x line, whose
---   refactor (drum renderer + dead handlers removed) shipped without a version
---   bump.
+--   re-derives its root after the repo moves. Supersedes the 3.1.x line.
 
 -- Runs as a deferred script. The bridge root is the folder one level up from
 -- this script, so it works wherever the repo is cloned or ReaPack installs it.
@@ -111,6 +114,14 @@ end
 local config = load_config()
 local root = config.bridge_root
 
+-- Optional shared secret. When config.auth_token is a non-empty string, every
+-- command must carry a matching `token` field or it's rejected (AUTH_FAILED).
+-- Off by default. See the SECURITY note in README: this gates accidental or
+-- other-app writes to inbox/, NOT a local attacker who can read the
+-- (world-readable) config — the real control is keeping the folder local.
+local auth_token = (type(config.auth_token) == "string" and config.auth_token ~= "")
+  and config.auth_token or nil
+
 local paths = {
   inbox = join(root, "inbox"),
   processing = join(root, "processing"),
@@ -135,10 +146,24 @@ end
 -- defer loop synchronously for the whole render duration (no ticks, no
 -- heartbeats), which can exceed 60s. We never reclaim a render-busy lock no
 -- matter how old — a second bridge would race the first on the same inbox.
+--
+-- Lua has no atomic O_EXCL create, so the startup read→reclaim→write has a
+-- TOCTOU window: two bridges starting in the same tick both see a stale/absent
+-- lock and both write. To close it, each bridge stamps the lock with a unique
+-- OWNER token, then CONFIRMS ownership one race-window later (see loop): both
+-- read the same settled file, exactly one sees its own token and keeps looping;
+-- the other stops. No O_EXCL needed.
 local lockfile = join(paths.logs, "bridge.lock")
 
+-- Unique per process: a fresh table's identity string plus the high-res clock,
+-- so two bridges that start in the same second (even on Lua builds where table
+-- addresses aren't shown) still get distinct tokens.
+local OWNER = tostring({}) .. "-" .. string.format("%.6f", reaper.time_precise())
+local lock_confirmed = false
+local lock_claim_t = 0
+
 local function write_lock(busy)
-  write_file(lockfile, json.encode({ started = os.time(), busy = busy or "none" }))
+  write_file(lockfile, json.encode({ started = os.time(), busy = busy or "none", owner = OWNER }))
 end
 
 local function read_lock()
@@ -165,6 +190,7 @@ do
     end
   end
   write_lock("none")
+  lock_claim_t = reaper.time_precise()
 end
 
 local in_flight_command = nil
@@ -205,12 +231,15 @@ end
 
 local function move_file(src, dst)
   if os.rename(src, dst) then return true end
-  -- Cross-volume or perm failure: fall back to copy + remove. If the remove
-  -- fails, drop the copy so the file isn't left in both places (which would
-  -- re-queue and re-run the command).
+  -- Cross-volume or perm failure: fall back to copy + remove. Copy to dst.tmp
+  -- then rename into place so a crash mid-copy can't leave a partial dst that
+  -- looks like a complete command. If the remove of src fails, drop the copy so
+  -- the file isn't left in both places (which would re-queue and re-run it).
   local text = read_file(src)
   if not text then return false end
-  write_file(dst, text)
+  local tmp = dst .. ".tmp"
+  write_file(tmp, text)
+  if not os.rename(tmp, dst) then os.remove(tmp); return false end
   if os.remove(src) then return true end
   os.remove(dst)
   return false
@@ -306,12 +335,14 @@ end
 -- Heartbeat shape in one place so write_heartbeat and the pre-render heartbeat
 -- can't drift. `extra` overlays fields (render passes busy="render").
 local function heartbeat_payload(extra)
+  -- No reaper_focused: there's no clean native API for it, so it was always
+  -- hardcoded true — a lie an agent could act on. Omitted rather than faked.
+  -- (A real value needs js_ReaScriptAPI's Js_Window_GetForeground, optional.)
   local hb = {
     alive_at = now(),
     bridge_version = 3,
     project_name = get_project_name(),
     in_flight_command = in_flight_command,
-    reaper_focused = true,
   }
   if extra then for k, v in pairs(extra) do hb[k] = v end end
   return hb
@@ -513,12 +544,20 @@ end
 
 local function find_fx(payload)
   local track, track_index = find_track(payload)
-  local scope = payload.fx_scope or payload.scope or "all"
+  local explicit_scope = payload.fx_scope or payload.scope
+  local scope = explicit_scope or "all"
   local search_track_fx = scope == "all" or scope == "track" or scope == "normal"
   local search_input_fx = scope == "all" or scope == "input" or scope == "rec" or scope == "record"
   local matches = {}
 
   if payload.fx_index ~= nil then
+    -- A bare fx_index with no scope used to silently mean "track FX N" — an
+    -- agent that meant input FX N but forgot fx_scope hit the wrong plugin and
+    -- got a success reply. Require the scope explicitly; only name searches,
+    -- which span both lists, may default it.
+    if not explicit_scope then
+      error("AMBIGUOUS_SCOPE: fx_index requires an explicit fx_scope (\"track\" or \"input\")")
+    end
     local fx_index = tonumber(payload.fx_index)
     local api_index = fx_index
     local resolved_scope = "track"
@@ -766,6 +805,10 @@ local function insert_midi_payload(payload)
     seen[reaper.GetTrackMediaItem(track, i)] = true
   end
 
+  -- NOTE: depending on the user's "Import MIDI as" preference, InsertMedia can
+  -- pop a modal import dialog, which blocks the defer loop until dismissed —
+  -- a hang in unattended use. If that bites, set the project's MIDI import mode
+  -- via GetSetProjectInfo before this call. Documented in command_schema.md.
   reaper.InsertMedia(midi_path, 0)
 
   local item
@@ -1110,8 +1153,12 @@ local function command_set_tempo(command)
   local payload = command.payload or {}
   local bpm = tonumber(payload.bpm)
   if not bpm or bpm <= 0 then error("BAD_TEMPO: Provide a positive bpm") end
+  -- Sets the project's base/initial tempo. NOTE: in a project that already has
+  -- tempo-map markers, this changes the base only, not the markers — the playing
+  -- tempo at the cursor may not change. A positioned tempo change would need
+  -- SetTempoTimeSigMarker; expose that as its own verb if it's ever needed.
   reaper.SetCurrentBPM(0, bpm, true)
-  return { tempo = reaper.Master_GetTempo() }
+  return { tempo = reaper.Master_GetTempo(), has_tempo_markers = reaper.CountTempoTimeSigMarkers(0) > 0 }
 end
 
 local function command_add_track(command)
@@ -1232,6 +1279,69 @@ local function command_add_fx(command)
   }
 end
 
+-- Split a REAPER state chunk into lines (tolerating \r). Shared by the FX-chain
+-- splicer and its tests.
+local function split_lines(s)
+  local out = {}
+  for line in (s .. "\n"):gmatch("(.-)\n") do out[#out + 1] = (line:gsub("\r$", "")) end
+  return out
+end
+
+-- Splice a .RfxChain body (a sequence of FX blocks) into a track state chunk as
+-- direct children of the track's top-level <FXCHAIN>/<MASTERFXLIST>; if none
+-- exists yet, wrap a fresh one before the track's close. Pure + testable.
+--
+-- Depth follows REAPER's chunk invariant: a block OPENS on a line whose first
+-- non-space char is '<' and CLOSES on a line that is a lone '>'. A line that
+-- both opens and closes ('<X ...>') is net-zero and must NOT bump depth — the
+-- old code counted its '<' but never its '>', skewing every block after it and
+-- splicing into the middle of an FX (a corrupt chunk SetTrackStateChunk rejects,
+-- or worse, silently mangles). Data lines never start with '<' or equal '>'
+-- (brackets inside values are quoted), so they read as depth-0.
+-- Returns merged_lines, or nil + an error code.
+local function splice_fx_chain(lines, body_lines, container)
+  local open_idx, close_idx, depth = nil, nil, 0
+  for i = 1, #lines do
+    local t = lines[i]:match("^%s*(.-)%s*$")
+    local opens = t:sub(1, 1) == "<"
+    local single = opens and t:sub(-1) == ">"   -- '<X ...>' on one line: net 0
+    if opens and not single and depth == 1
+       and (t:find("^<FXCHAIN") or t:find("^<MASTERFXLIST")) then
+      open_idx = i
+    end
+    if opens and not single then
+      depth = depth + 1
+    elseif t == ">" then
+      depth = depth - 1
+      if open_idx and not close_idx and depth == 1 then close_idx = i end
+    end
+  end
+
+  local merged = {}
+  local function push_body() for _, v in ipairs(body_lines) do merged[#merged + 1] = v end end
+
+  if close_idx then
+    for i = 1, close_idx - 1 do merged[#merged + 1] = lines[i] end
+    push_body()
+    for i = close_idx, #lines do merged[#merged + 1] = lines[i] end
+  else
+    local track_close
+    for i = #lines, 1, -1 do
+      if lines[i]:match("^%s*>%s*$") then track_close = i; break end
+    end
+    if not track_close then return nil, "CHUNK_NO_TRACK_CLOSE" end
+    for i = 1, track_close - 1 do merged[#merged + 1] = lines[i] end
+    merged[#merged + 1] = "<" .. container
+    merged[#merged + 1] = "SHOW 0"
+    merged[#merged + 1] = "LASTSEL 0"
+    merged[#merged + 1] = "DOCKED 0"
+    push_body()
+    merged[#merged + 1] = ">"
+    for i = track_close, #lines do merged[#merged + 1] = lines[i] end
+  end
+  return merged
+end
+
 -- Load a saved REAPER FX chain (.RfxChain) onto a track WITH its stored state.
 -- add_fx only instantiates a single plugin by name (TrackFX_AddByName) and
 -- cannot carry a chain file's saved parameters. This reads the .RfxChain and
@@ -1258,12 +1368,6 @@ local function command_add_fx_chain(command)
   if not body or not body:match("%S") then error("CHAIN_EMPTY: " .. tostring(path)) end
   body = body:gsub("\r\n", "\n"):gsub("\r", "\n"):gsub("%s+$", "")
 
-  local function split_lines(s)
-    local out = {}
-    for line in (s .. "\n"):gmatch("(.-)\n") do out[#out + 1] = line end
-    return out
-  end
-
   local function is_fx_open(line)
     return line:match("^%s*<VST") or line:match("^%s*<JS")
       or line:match("^%s*<AU") or line:match("^%s*<CLAP")
@@ -1279,53 +1383,24 @@ local function command_add_fx_chain(command)
 
   local ok_chunk, chunk = reaper.GetTrackStateChunk(track, "", false)
   if not ok_chunk then error("CHUNK_READ_FAILED: GetTrackStateChunk returned false") end
-  local lines = split_lines(chunk)
 
-  -- Find an existing top-level <FXCHAIN> (a direct child of <TRACK>), if any.
-  -- Line-based depth: a line opening with '<' enters a block, a lone '>' exits.
-  local fxchain_close
-  do
-    local depth, fxchain_open = 0, nil
-    for i, line in ipairs(lines) do
-      if depth == 1 and (line:match("^%s*<FXCHAIN") or line:match("^%s*<MASTERFXLIST")) then fxchain_open = i end
-      if line:match("^%s*<") then
-        depth = depth + 1
-      elseif line:match("^%s*>%s*$") then
-        depth = depth - 1
-        if fxchain_open and not fxchain_close and depth == 1 then
-          fxchain_close = i
-        end
-      end
-    end
-  end
+  local merged, splice_err = splice_fx_chain(split_lines(chunk), body_lines, container)
+  if not merged then error(splice_err .. ": malformed track chunk") end
 
-  local merged = {}
-  local function push(t) for _, v in ipairs(t) do merged[#merged + 1] = v end end
-
-  if fxchain_close then
-    -- Append the chain's FX into the existing FXCHAIN, before its closing '>'.
-    for i = 1, fxchain_close - 1 do merged[#merged + 1] = lines[i] end
-    push(body_lines)
-    for i = fxchain_close, #lines do merged[#merged + 1] = lines[i] end
-  else
-    -- No FX yet: wrap the chain in a fresh FXCHAIN block before the TRACK close.
-    local track_close
-    for i = #lines, 1, -1 do
-      if lines[i]:match("^%s*>%s*$") then track_close = i; break end
-    end
-    if not track_close then error("CHUNK_NO_TRACK_CLOSE: malformed track chunk") end
-    for i = 1, track_close - 1 do merged[#merged + 1] = lines[i] end
-    push({ "<" .. container, "SHOW 0", "LASTSEL 0", "DOCKED 0" })
-    push(body_lines)
-    merged[#merged + 1] = ">"
-    for i = track_close, #lines do merged[#merged + 1] = lines[i] end
-  end
-
+  -- Snapshot the FX count, write, then verify it grew by exactly the chain's FX.
+  -- If the splice landed wrong (a chunk shape we mis-parsed), the count won't
+  -- match — restore the original chunk so a parser bug can never leave a corrupt
+  -- or half-merged track, and fail loud instead.
+  local fx_before = reaper.TrackFX_GetCount(track)
   if not reaper.SetTrackStateChunk(track, table.concat(merged, "\n"), false) then
     error("CHUNK_WRITE_FAILED: SetTrackStateChunk rejected the merged chunk")
   end
-
   local fx_after = reaper.TrackFX_GetCount(track)
+  if fx_after ~= fx_before + fx_in_chain then
+    reaper.SetTrackStateChunk(track, chunk, false)  -- restore the original chain
+    error("CHAIN_SPLICE_MISMATCH: expected " .. (fx_before + fx_in_chain)
+          .. " FX after splice, got " .. fx_after .. " — restored original chain")
+  end
   local fx_names = {}
   for i = 0, fx_after - 1 do
     local _, fxname = reaper.TrackFX_GetFXName(track, i, "")
@@ -1794,6 +1869,11 @@ local function process_file(filename)
   end
 
   command.id = command.id or filename:gsub("%.json$", "")
+  if auth_token and command.token ~= auth_token then
+    write_result(command, false, "AUTH_FAILED: missing or wrong token")
+    move_file(processing_path, join(paths.failed, filename))
+    return
+  end
   in_flight_command = command.id
   log_line("start " .. command.id .. " " .. tostring(command.type))
   local run_ok, data = pcall(run_command, command, false)
@@ -1881,19 +1961,38 @@ local function maybe_sweep()
   end
 end
 
+-- One race-window after claiming the lock, confirm we still own it (M4). 0.75s
+-- comfortably exceeds startup write-settling time and is well under the 5s
+-- heartbeat interval, so two racing bridges read the same stable file and
+-- exactly one sees its own token.
+local LOCK_CONFIRM_DELAY = 0.75
+-- Per-tick wall-clock budget for draining the inbox (M3). Checked AFTER each
+-- command — never splits one — so a burst of heavy commands can't freeze the UI
+-- thread; the remainder waits for the next tick. 50 stays as a hard backstop.
+local DRAIN_BUDGET = 0.03
+
 local function loop()
   local current = reaper.time_precise()
+
+  if not lock_confirmed and current - lock_claim_t >= LOCK_CONFIRM_DELAY then
+    local held = read_lock()
+    if held and held.owner and held.owner ~= OWNER then
+      log_line("BRIDGE_RACE_LOST: lock owned by " .. tostring(held.owner) .. "; stopping this bridge")
+      return  -- stop deferring; the winning bridge keeps running
+    end
+    lock_confirmed = true
+  end
+
   if current - last_poll >= poll_interval then
     last_poll = current
     local ok, err = pcall(function()
       maybe_heartbeat(false)
-      -- Drain all queued commands in one tick (capped to avoid blocking the
-      -- UI on a pathological inbox). The old one-per-tick cap limited
-      -- throughput to 4 cmd/s — a 100-command dump took 25s to drain.
       local files = list_json_files(paths.inbox)
+      local tick_start = reaper.time_precise()
       for i = 1, math.min(#files, 50) do
         process_file(files[i])
         maybe_heartbeat(false)  -- keep heartbeat/lock fresh mid-drain (self-throttles)
+        if reaper.time_precise() - tick_start >= DRAIN_BUDGET then break end
       end
       maybe_sweep()
     end)
@@ -1909,7 +2008,12 @@ end
 -- set to exercise the pure/atomic helpers, then returns here before the defer
 -- loop starts (no live REAPER needed). One global check; no production cost.
 if _G.REAPER_BRIDGE_SELFTEST then
-  return { parse_display_number = parse_display_number, atomic_write_json = atomic_write_json }
+  return {
+    parse_display_number = parse_display_number,
+    atomic_write_json = atomic_write_json,
+    split_lines = split_lines,
+    splice_fx_chain = splice_fx_chain,
+  }
 end
 
 -- Re-queue anything stranded in processing/ from a previous run (crash or

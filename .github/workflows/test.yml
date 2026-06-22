@@ -1,0 +1,41 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  bridge-lua:
+    # The whole point of the OS matrix: the bridge's atomic write uses os.rename,
+    # which on Windows can't replace an existing file. The Windows run exercises
+    # the remove+retry fallback (C1) — a regression there fails here, not live.
+    name: bridge self-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: leafo/gh-actions-lua@v11
+        with:
+          luaVersion: "5.4"
+      - name: bridge self-test (parse_display_number, atomic write, chunk splicer)
+        run: lua bridge/test_bridge.lua
+        shell: bash
+
+  drum-engine-python:
+    name: drum engine pytest + CLI syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: syntax-check the CLI and installer
+        run: python -m py_compile reaperd.py setup/install.py
+      - name: install pytest
+        run: python -m pip install --quiet pytest
+      - name: drum-apparatus tests
+        run: python -m pytest skills/drum-apparatus -q

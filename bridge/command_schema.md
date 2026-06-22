@@ -20,6 +20,10 @@ Every command is a JSON file in `inbox/`. Every result is a JSON file in
 `dry_run: true` on a mutating command returns what *would* run without changing
 the project. Read-only commands ignore `dry_run` and execute normally.
 
+`token` (optional): when `auth_token` is set in `bridge_config.json`, every
+command must include a matching `token` or it's rejected with `AUTH_FAILED`.
+`reaperd.py` fills it in automatically from the same config. Off by default.
+
 ## Result
 
 ```json
@@ -28,7 +32,8 @@ the project. Read-only commands ignore `dry_run` and execute normally.
 ```
 
 On failure: `ok: false`, no `data`, and `error: { code, details }` where `code`
-is an `UPPER_SNAKE` token (`NO_TARGET_TRACK`, `AMBIGUOUS_FX`, `NO_PARAM`, ...).
+is an `UPPER_SNAKE` token (`NO_TARGET_TRACK`, `AMBIGUOUS_FX`, `AMBIGUOUS_SCOPE`,
+`NO_PARAM`, `AUTH_FAILED`, ...).
 
 ## Shared selectors
 
@@ -37,7 +42,10 @@ is an `UPPER_SNAKE` token (`NO_TARGET_TRACK`, `AMBIGUOUS_FX`, `NO_PARAM`, ...).
 selected track.
 
 **FX** — `fx_index` (0-based) or `fx_name_contains` (substring,
-case-insensitive). `fx_scope`: `track` (default), `input`, or `all`.
+case-insensitive). `fx_scope`: `track`, `input`, or `all`. A name search
+defaults `fx_scope` to `all`; **`fx_index` requires an explicit `fx_scope`**
+(`track` or `input`) — a bare index silently meant track-FX-N and could hit the
+wrong plugin (→ `AMBIGUOUS_SCOPE`).
 
 **Parameter** — `param_index` (0-based) or `param_name_contains`.
 
@@ -224,6 +232,11 @@ deletes across every track.
   "loop": true, "replace_existing_in_range": false }
 ```
 `length.type`: `bars`, `region`, `time_selection`, `seconds`, `as_generated`.
+
+> Note: depending on REAPER's "Import MIDI as" preference, inserting a `.mid`
+> can pop a modal import dialog that blocks the bridge until dismissed. For
+> unattended use, set that preference to "in-project MIDI" once, or pre-set the
+> project's MIDI import mode.
 
 ---
 

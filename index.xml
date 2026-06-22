@@ -10,8 +10,8 @@
       <metadata>
         <link rel="website" href="https://github.com/wretcher207/reaper-daemon">Reaper Daemon on GitHub</link>
       </metadata>
-      <version name="3.2.0" author="Dead Pixel Design" time="2026-06-22T00:00:00Z">
-        <changelog><![CDATA[Windows atomic-write fix (heartbeat no longer freezes after first write); never sweep outbox/ (stop deleting unread replies); set_fx_param rolls back on a failed search and parses kHz displays correctly; bridge re-derives its root after the repo moves. Supersedes the 3.1.x line.]]></changelog>
+      <version name="3.3.0" author="Dead Pixel Design" time="2026-06-22T08:00:00Z">
+        <changelog><![CDATA[Robust add_fx_chain splicer (correct chunk depth + restore-on-error); UI time-budget on the drain loop; singleton-lock race closed; fx_index requires explicit fx_scope; dropped the fake reaper_focused field; optional shared-secret auth token; doc + polish fixes; cross-platform CI self-test. Includes all 3.2.0 fixes (Windows atomic write, outbox retention, set_fx_param rollback + kHz, moved-repo config).]]></changelog>
         <source main="main">https://github.com/wretcher207/reaper-daemon/raw/main/bridge/reaper_agent_bridge.lua</source>
         <source file="json.lua">https://github.com/wretcher207/reaper-daemon/raw/main/bridge/json.lua</source>
       </version>
