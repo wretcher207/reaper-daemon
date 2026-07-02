@@ -134,6 +134,38 @@ for the entire render duration, so `heartbeat.alive_at` goes stale. The
 heartbeat written just before render includes `"busy": "render"` so an agent
 can distinguish "rendering" from "bridge died".
 
+### capture_track_audio
+Gated — requires `allow_risk_level_3: true` in `bridge_config.json`.
+```json
+{ "target_track_name": "Rhythm L", "duration_seconds": 30,
+  "output_file": "/tmp/reaper-diagnosis/rhythm-l-20260702T143000.wav",
+  "sample_rate": 48000 }
+```
+Renders ONE track's post-FX output to a WAV via the stems render source
+(`RENDER_SETTINGS=2`, selected tracks, pre-master — parent-bus and master-bus
+FX are NOT printed) with custom bounds (`RENDER_BOUNDSFLAG=0`); the user's
+solo states and time selection are never touched. Optional `start_seconds`
+overrides the default range (active time selection if any, else cursor +
+`duration_seconds`, max 600). Use a unique/timestamped `output_file` so
+REAPER never raises an overwrite prompt mid-render. Track selection and all
+render settings are captured before and restored after, even on error.
+Synchronous like `render` (same `busy: "render"` heartbeat). Returns
+`file_path` (from `RENDER_TARGETS`, authoritative), `file_size_bytes`,
+`render_loudness_lufs` (LUFS-I parsed from `RENDER_STATS`), and
+`render_stats_raw`. The client should verify the file's mtime is newer than
+the command's `created_at` before trusting it.
+
+### get_track_routing
+Read-only.
+```json
+{ "target_track_name": "Rhythm L" }
+```
+Returns `sends` and `receives` (per entry: target/source track name,
+`volume_db`, `pan`, `mute`, `mono`, `phase_inverted`, channel mapping),
+`parent_track` (name/index/guid or null), track `volume_db`, `pan`,
+`phase_inverted`, and `automation_mode`. All volumes are converted to dB in
+the bridge (`D_VOL` is linear); hardware outputs are excluded.
+
 ---
 
 ## Tracks

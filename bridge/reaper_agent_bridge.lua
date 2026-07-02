@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.7.0
+-- @version 3.8.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -1597,6 +1597,202 @@ local function command_render(command)
   }
 end
 
+-- Post Mortem capture: render ONE track's post-FX output to a temp WAV using
+-- REAPER's stems render source (RENDER_SETTINGS=2, selected tracks, pre-master)
+-- and custom bounds (RENDER_BOUNDSFLAG=0 + RENDER_STARTPOS/ENDPOS), so neither
+-- the user's solo states nor their time selection is ever touched. Everything
+-- this mutates (track selection, render settings) is restored afterwards, even
+-- when the render throws — hence no undo block (nothing left to Ctrl+Z).
+local function command_capture_track_audio(command)
+  if not config.allow_risk_level_3 then
+    error("CAPTURE_BLOCKED: capture_track_audio is gated; set allow_risk_level_3 true in bridge_config.json")
+  end
+  local payload = command.payload or {}
+  local track, track_index = find_track(payload)
+  local output_file = payload.output_file
+  if not output_file or output_file == "" then
+    error("BAD_PAYLOAD: output_file is required (use a unique/timestamped name so REAPER never prompts to overwrite)")
+  end
+  local duration = tonumber(payload.duration_seconds) or 30
+  if duration <= 0 or duration > 600 then
+    error("BAD_PAYLOAD: duration_seconds must be in (0, 600]")
+  end
+
+  -- Capture range: explicit start_seconds, else the active time selection's
+  -- range (read-only — custom render bounds mean we never modify it), else
+  -- the edit cursor.
+  local start_time
+  if payload.start_seconds ~= nil then
+    start_time = tonumber(payload.start_seconds) or 0
+  else
+    local ts_start, ts_end = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+    if ts_end > ts_start then
+      start_time = ts_start
+      duration = math.min(duration, ts_end - ts_start)
+    else
+      start_time = reaper.GetCursorPosition()
+    end
+  end
+  local end_time = start_time + duration
+
+  -- Split output into directory + name: RENDER_FILE is the directory,
+  -- RENDER_PATTERN the filename (extension comes from the sink format).
+  local dir, name = output_file:match("^(.*)[/\\]([^/\\]+)$")
+  if not dir then dir, name = "", output_file end
+  local pattern = name:gsub("%.wav$", "")
+
+  -- Capture everything we are about to mutate.
+  local saved = {
+    settings = reaper.GetSetProjectInfo(0, "RENDER_SETTINGS", 0, false),
+    bounds = reaper.GetSetProjectInfo(0, "RENDER_BOUNDSFLAG", 0, false),
+    startpos = reaper.GetSetProjectInfo(0, "RENDER_STARTPOS", 0, false),
+    endpos = reaper.GetSetProjectInfo(0, "RENDER_ENDPOS", 0, false),
+    srate = reaper.GetSetProjectInfo(0, "RENDER_SRATE", 0, false),
+    file = select(2, reaper.GetSetProjectInfo_String(0, "RENDER_FILE", "", false)),
+    pattern = select(2, reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", "", false)),
+    format = select(2, reaper.GetSetProjectInfo_String(0, "RENDER_FORMAT", "", false)),
+  }
+  local saved_selection = {}
+  for i = 0, reaper.CountSelectedTracks(0) - 1 do
+    saved_selection[#saved_selection + 1] = reaper.GetSelectedTrack(0, i)
+  end
+
+  local ok, result = pcall(function()
+    reaper.SetOnlyTrackSelected(track)
+    reaper.GetSetProjectInfo(0, "RENDER_SETTINGS", 2, true) -- stems, selected tracks, pre-master
+    reaper.GetSetProjectInfo(0, "RENDER_BOUNDSFLAG", 0, true) -- custom time bounds
+    reaper.GetSetProjectInfo(0, "RENDER_STARTPOS", start_time, true)
+    reaper.GetSetProjectInfo(0, "RENDER_ENDPOS", end_time, true)
+    reaper.GetSetProjectInfo(0, "RENDER_SRATE", tonumber(payload.sample_rate) or 48000, true)
+    reaper.GetSetProjectInfo_String(0, "RENDER_FILE", dir, true)
+    reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", pattern, true)
+    -- 4-byte sink id, reversed: "wave" -> "evaw" (default WAV sink settings).
+    reaper.GetSetProjectInfo_String(0, "RENDER_FORMAT", "evaw", true)
+
+    -- REAPER tells us exactly what it will write; trust that over our guess.
+    local _, targets = reaper.GetSetProjectInfo_String(0, "RENDER_TARGETS", "", false)
+    local target = targets and targets:match("^[^;]+") or output_file
+
+    -- Same blocking-render heartbeat/lock dance as command_render.
+    atomic_write_json(paths.heartbeat, heartbeat_payload({ busy = "render" }))
+    write_lock("render")
+    reaper.Main_OnCommand(42230, 0) -- File: Render project
+
+    local f = io.open(target, "rb")
+    if not f then
+      error("CAPTURE_FAILED: render completed but no file at " .. tostring(target))
+    end
+    local size = f:seek("end")
+    f:close()
+    if size == 0 then error("CAPTURE_FAILED: rendered file is empty: " .. tostring(target)) end
+
+    -- Loudness stats for the most recent render. Semicolon-separated
+    -- key:value string, not JSON; pass the raw string through and parse
+    -- LUFS-I defensively (key name observed as LUFSI).
+    local _, stats = reaper.GetSetProjectInfo_String(0, "RENDER_STATS", "", false)
+    local lufs_i = stats and tonumber(stats:match("LUFSI:([%-%d%.]+)")) or nil
+
+    local _, track_name = reaper.GetTrackName(track, "")
+    return {
+      track = { index = track_index, name = track_name, guid = reaper.GetTrackGUID(track) },
+      file_path = target,
+      file_size_bytes = size,
+      duration_seconds = end_time - start_time,
+      start_seconds = start_time,
+      sample_rate = tonumber(payload.sample_rate) or 48000,
+      render_loudness_lufs = finite_or_nil(lufs_i),
+      render_stats_raw = stats ~= "" and stats or nil,
+      note = "Stems render (pre-master). Parent-bus FX are NOT printed into this capture.",
+    }
+  end)
+
+  -- Restore, error or not. REAPER has no try/finally; this is it.
+  reaper.GetSetProjectInfo(0, "RENDER_SETTINGS", saved.settings, true)
+  reaper.GetSetProjectInfo(0, "RENDER_BOUNDSFLAG", saved.bounds, true)
+  reaper.GetSetProjectInfo(0, "RENDER_STARTPOS", saved.startpos, true)
+  reaper.GetSetProjectInfo(0, "RENDER_ENDPOS", saved.endpos, true)
+  reaper.GetSetProjectInfo(0, "RENDER_SRATE", saved.srate, true)
+  reaper.GetSetProjectInfo_String(0, "RENDER_FILE", saved.file, true)
+  reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", saved.pattern, true)
+  reaper.GetSetProjectInfo_String(0, "RENDER_FORMAT", saved.format, true)
+  if #saved_selection > 0 then
+    reaper.SetOnlyTrackSelected(saved_selection[1])
+    for i = 2, #saved_selection do
+      reaper.SetTrackSelected(saved_selection[i], true)
+    end
+  else
+    reaper.SetTrackSelected(track, false)
+  end
+
+  if not ok then error(result) end
+  return result
+end
+
+local AUTOMATION_MODE_NAMES = {
+  [0] = "trim/read", [1] = "read", [2] = "touch", [3] = "write", [4] = "latch",
+}
+
+-- Read-only routing snapshot for mix diagnosis: sends, receives, parent bus,
+-- volume, pan, phase, automation mode. All volumes are converted to dB here
+-- in the bridge (D_VOL is linear, 1.0 = unity) so clients always see dB.
+local function command_get_track_routing(command)
+  local payload = command.payload or {}
+  local track, track_index = find_track(payload)
+
+  -- GetTrackSendName's index space is hardware outputs first, THEN track
+  -- sends — a category-0 send index must be offset by the hw-output count.
+  local hw_output_count = reaper.GetTrackNumSends(track, 1)
+
+  local function send_entries(category)
+    -- category 0 = sends, -1 = receives (hardware outs deliberately excluded)
+    local entries = {}
+    for i = 0, reaper.GetTrackNumSends(track, category) - 1 do
+      local _, other_name
+      if category < 0 then
+        _, other_name = reaper.GetTrackReceiveName(track, i)
+      else
+        _, other_name = reaper.GetTrackSendName(track, hw_output_count + i)
+      end
+      local function v(key) return reaper.GetTrackSendInfo_Value(track, category, i, key) end
+      entries[#entries + 1] = {
+        [category < 0 and "source_track_name" or "target_track_name"] = other_name,
+        volume_db = db_from_volume(v("D_VOL")),
+        pan = v("D_PAN"),
+        mute = v("B_MUTE") == 1,
+        mono = v("B_MONO") == 1,
+        phase_inverted = v("B_PHASE") == 1,
+        src_channel = math.floor(v("I_SRCCHAN")),
+        dst_channel = math.floor(v("I_DSTCHAN")),
+      }
+    end
+    return entries
+  end
+
+  local parent = reaper.GetParentTrack(track)
+  local parent_info = nil
+  if parent then
+    local _, parent_name = reaper.GetTrackName(parent, "")
+    parent_info = {
+      name = parent_name,
+      index = math.floor(reaper.GetMediaTrackInfo_Value(parent, "IP_TRACKNUMBER")),
+      guid = reaper.GetTrackGUID(parent),
+    }
+  end
+
+  local _, track_name = reaper.GetTrackName(track, "")
+  local automode = math.floor(reaper.GetMediaTrackInfo_Value(track, "I_AUTOMODE"))
+  return {
+    track = { index = track_index, name = track_name, guid = reaper.GetTrackGUID(track) },
+    sends = send_entries(0),
+    receives = send_entries(-1),
+    parent_track = parent_info,
+    volume_db = db_from_volume(reaper.GetMediaTrackInfo_Value(track, "D_VOL")),
+    pan = reaper.GetMediaTrackInfo_Value(track, "D_PAN"),
+    phase_inverted = reaper.GetMediaTrackInfo_Value(track, "B_PHASE") == 1,
+    automation_mode = AUTOMATION_MODE_NAMES[automode] or tostring(automode),
+  }
+end
+
 -- ---------------------------------------------------------------------------
 -- Discovery
 -- ---------------------------------------------------------------------------
@@ -1747,6 +1943,10 @@ local NO_UNDO_BLOCK = {
   get_context = true, get_fx_parameters = true, scan_fx = true,
   enum_installed_fx = true,
   discover_drum_map = true,
+  get_track_routing = true,
+  -- capture_track_audio restores everything it touches (selection, render
+  -- settings), so there is no project state a user would want to Ctrl+Z.
+  capture_track_audio = true,
 }
 
 local function is_mutating(command_type)
@@ -1832,6 +2032,8 @@ handlers.set_cursor = command_set_cursor
 handlers.set_time_selection = command_set_time_selection
 handlers.set_tempo = command_set_tempo
 handlers.render = command_render
+handlers.capture_track_audio = command_capture_track_audio
+handlers.get_track_routing = command_get_track_routing
 
 -- Track lifecycle
 handlers.add_track = command_add_track
