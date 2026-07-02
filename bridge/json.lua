@@ -139,6 +139,11 @@ function Parser:parse_string()
           code = 0x10000 + ((code - 0xD800) * 0x400) + (low - 0xDC00)
           self.pos = self.pos + 6
         end
+        -- A low surrogate reaching this point was not consumed by the pairing
+        -- above, so it is lone — encoding it would emit invalid UTF-8.
+        if code >= 0xDC00 and code <= 0xDFFF then
+          error("Lone low surrogate at byte " .. (self.pos - 4))
+        end
         -- Encode the code point as UTF-8.
         if code < 0x80 then
           out[#out + 1] = string.char(code)
@@ -196,7 +201,15 @@ function Parser:parse_array()
     return out
   end
   while true do
-    out[#out + 1] = self:parse_value()
+    local at = self.pos
+    local value = self:parse_value()
+    if value == nil then
+      -- null decodes to Lua nil, and a nil array element silently SHIFTS every
+      -- later element down ([1,null,3] -> {1,3}) — positional corruption for
+      -- batch.commands / automation points. Refuse loudly instead.
+      error("null array element at byte " .. at .. " (would shift later elements)")
+    end
+    out[#out + 1] = value
     self:skip_ws()
     local char = self:next()
     if char == "]" then

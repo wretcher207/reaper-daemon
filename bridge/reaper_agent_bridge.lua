@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.6.0
+-- @version 3.7.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -155,6 +155,26 @@ end
 -- the other stops. No O_EXCL needed.
 local lockfile = join(paths.logs, "bridge.lock")
 
+-- POSIX rename(2) atomically replaces the destination whether it exists or
+-- not, so the first rename succeeds and we never pre-remove (a pre-remove opens
+-- a window where readers see no file). Windows rename() CANNOT replace an
+-- existing dest, so there the first rename fails on every overwrite — that froze
+-- the heartbeat after its first write. Fall back to remove + retry: still atomic
+-- on POSIX, and the only correctness-preserving option Windows offers.
+-- (Defined here, above the lock code, so the lock file gets the same guarantee:
+-- a plain write can be read half-written by a starting bridge, which is the
+-- exact race the OWNER-confirm protocol depends on the file settling for.)
+local function atomic_write_json(path, value)
+  local tmp = path .. ".tmp"
+  write_file(tmp, json.encode(value))
+  local ok, err = os.rename(tmp, path)
+  if not ok then
+    os.remove(path)
+    ok, err = os.rename(tmp, path)
+  end
+  if not ok then error(err or ("Cannot rename " .. tmp)) end
+end
+
 -- Unique per process: a fresh table's identity string plus the high-res clock,
 -- so two bridges that start in the same second (even on Lua builds where table
 -- addresses aren't shown) still get distinct tokens.
@@ -163,7 +183,7 @@ local lock_confirmed = false
 local lock_claim_t = 0
 
 local function write_lock(busy)
-  write_file(lockfile, json.encode({ started = os.time(), busy = busy or "none", owner = OWNER }))
+  atomic_write_json(lockfile, { started = os.time(), busy = busy or "none", owner = OWNER })
 end
 
 local function read_lock()
@@ -177,18 +197,33 @@ local function read_lock()
   return nil
 end
 
-do
-  local existing = read_lock()
-  if existing then
-    local started = tonumber(existing.started)
-    local busy = existing.busy or "none"
-    if busy == "render" then
-      error("BRIDGE_ALREADY_RUNNING: lock held by a bridge that is rendering (started at " .. tostring(started) .. ")")
-    end
-    if started and (os.time() - started) < 60 then
-      error("BRIDGE_ALREADY_RUNNING: lock held by a bridge started at " .. tostring(started))
-    end
+-- `started` is refreshed on every heartbeat (~5s), so on a live bridge it is
+-- always recent; it only ages during a synchronous render (no ticks) or after
+-- a death. A render lock is never reclaimed inside the generous bound — but
+-- past it (power loss mid-render, force-quit) the old behavior bricked the
+-- bridge permanently: BRIDGE_ALREADY_RUNNING on every start, watchdog restarts
+-- included, until logs/bridge.lock was hand-deleted.
+local RENDER_LOCK_MAX_AGE = 6 * 3600
+
+-- nil = proceed (no lock, stale lock, or ancient render lock: reclaim);
+-- string = refuse to start with this error.
+local function lock_verdict(existing, now_epoch)
+  if not existing then return nil end
+  local started = tonumber(existing.started)
+  local busy = existing.busy or "none"
+  if busy == "render" then
+    if started and (now_epoch - started) > RENDER_LOCK_MAX_AGE then return nil end
+    return "BRIDGE_ALREADY_RUNNING: lock held by a bridge that is rendering (started at " .. tostring(started) .. ")"
   end
+  if started and (now_epoch - started) < 60 then
+    return "BRIDGE_ALREADY_RUNNING: lock held by a bridge started at " .. tostring(started)
+  end
+  return nil
+end
+
+do
+  local verdict = lock_verdict(read_lock(), os.time())
+  if verdict then error(verdict) end
   write_lock("none")
   lock_claim_t = reaper.time_precise()
 end
@@ -221,21 +256,17 @@ local function error_code_from(message, fallback)
   return tostring(message):match("(%u%u[%u_]*):") or fallback
 end
 
--- POSIX rename(2) atomically replaces the destination whether it exists or
--- not, so the first rename succeeds and we never pre-remove (a pre-remove opens
--- a window where readers see no file). Windows rename() CANNOT replace an
--- existing dest, so there the first rename fails on every overwrite — that froze
--- the heartbeat after its first write. Fall back to remove + retry: still atomic
--- on POSIX, and the only correctness-preserving option Windows offers.
-local function atomic_write_json(path, value)
-  local tmp = path .. ".tmp"
-  write_file(tmp, json.encode(value))
-  local ok, err = os.rename(tmp, path)
-  if not ok then
-    os.remove(path)
-    ok, err = os.rename(tmp, path)
+-- command.id names the reply file in outbox/, so it must never traverse out
+-- of it ("../bridge/heartbeat" would clobber the heartbeat — the auth check
+-- runs AFTER the id is adopted, so the token does not protect this) and must
+-- be a string (a numeric id crashed before any reply, stranding the file).
+-- Anything suspicious falls back to the inbox filename's stem, which is what
+-- the CLI polls for anyway.
+local function safe_id(id, fallback)
+  if type(id) == "string" and id:match("^[%w%-_.]+$") and not id:match("%.%.") then
+    return id
   end
-  if not ok then error(err or ("Cannot rename " .. tmp)) end
+  return fallback
 end
 
 local function move_file(src, dst)
@@ -1862,6 +1893,30 @@ local function write_result(command, ok, data_or_error)
   atomic_write_json(join(paths.outbox, command.id .. ".json"), result)
 end
 
+local function write_heartbeat()
+  atomic_write_json(paths.heartbeat, heartbeat_payload())
+  write_lock("none")
+end
+
+-- Write the heartbeat at most every `heartbeat_interval` seconds, or
+-- immediately when a command starts/finishes (in_flight_command changes)
+-- or on the first tick. The old code wrote it 4×/second forever — ~345k
+-- renames/day on a file nothing was reading that often.
+-- (Defined above process_file so the in-flight marker actually reaches disk:
+-- it used to be set and cleared strictly inside process_file while every
+-- maybe_heartbeat call ran outside it, so no heartbeat ever carried it and a
+-- 30s sampler load read as "bridge died".)
+local function maybe_heartbeat(force)
+  local t = reaper.time_precise()
+  if force or last_heartbeat == nil
+     or in_flight_command ~= last_in_flight
+     or t - last_heartbeat >= heartbeat_interval then
+    write_heartbeat()
+    last_heartbeat = t
+    last_in_flight = in_flight_command
+  end
+end
+
 local function process_file(filename)
   local inbox_path = join(paths.inbox, filename)
   local processing_path = join(paths.processing, filename)
@@ -1877,13 +1932,14 @@ local function process_file(filename)
     return
   end
 
-  command.id = command.id or filename:gsub("%.json$", "")
+  command.id = safe_id(command.id, filename:gsub("%.json$", ""))
   if auth_token and command.token ~= auth_token then
     write_result(command, false, "AUTH_FAILED: missing or wrong token")
     move_file(processing_path, join(paths.failed, filename))
     return
   end
   in_flight_command = command.id
+  maybe_heartbeat()  -- publish the marker BEFORE the (possibly long) command runs
   log_line("start " .. command.id .. " " .. tostring(command.type))
   local run_ok, data = pcall(run_command, command, false)
   -- write_result -> json.encode can throw (a value json can't encode); if it does,
@@ -1897,26 +1953,6 @@ local function process_file(filename)
   local destination = run_ok and paths.archive or paths.failed
   move_file(processing_path, join(destination, filename))
   in_flight_command = nil
-end
-
-local function write_heartbeat()
-  atomic_write_json(paths.heartbeat, heartbeat_payload())
-  write_lock("none")
-end
-
--- Write the heartbeat at most every `heartbeat_interval` seconds, or
--- immediately when a command starts/finishes (in_flight_command changes)
--- or on the first tick. The old code wrote it 4×/second forever — ~345k
--- renames/day on a file nothing was reading that often.
-local function maybe_heartbeat(force)
-  local t = reaper.time_precise()
-  if force or last_heartbeat == nil
-     or in_flight_command ~= last_in_flight
-     or t - last_heartbeat >= heartbeat_interval then
-    write_heartbeat()
-    last_heartbeat = t
-    last_in_flight = in_flight_command
-  end
 end
 
 -- One-shot retention sweep at startup: bound logs/ and the archive|failed dirs
@@ -2054,6 +2090,8 @@ if _G.REAPER_BRIDGE_SELFTEST then
     parse_created_at = parse_created_at,
     requeue_decision = requeue_decision,
     error_code_from = error_code_from,
+    safe_id = safe_id,
+    lock_verdict = lock_verdict,
   }
 end
 
@@ -2061,8 +2099,8 @@ end
 for _, filename in ipairs(list_json_files(paths.processing)) do
   local processing_path = join(paths.processing, filename)
   local text = read_file(processing_path)
-  local id = tostring(text or ""):match('"id"%s*:%s*"([^"]+)"')
-    or filename:gsub("%.json$", "")
+  local id = safe_id(tostring(text or ""):match('"id"%s*:%s*"([^"]+)"'),
+    filename:gsub("%.json$", ""))
   local action = requeue_decision(text,
     exists(join(paths.outbox, id .. ".json")),
     exists(join(paths.archive, filename)),

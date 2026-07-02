@@ -66,5 +66,16 @@ ok = p(function() json.decode('"\\u00"') end); check("err short u escape", ok, f
 ok = p(function() json.decode("42x") end); check("err trailing data", ok, false)
 ok = p(function() json.encode(math.huge) end); check("err encode huge", ok, false)
 
+-- Fix 16 (2026-07-02 review): null in an array shifted later elements down
+-- ([1,null,3] -> {1,3}); now it must throw instead of corrupting positions.
+ok = p(function() json.decode("[1,null,3]") end); check("err null in array", ok, false)
+ok = p(function() json.decode("[null]") end); check("err lone null element", ok, false)
+check("null object value still drops key", next(json.decode('{"a":null}')), nil)
+check("arrays without null still decode", #json.decode("[1,2,3]"), 3)
+
+-- Fix 16b: a lone LOW surrogate emitted invalid UTF-8 (highs were rejected).
+ok = p(function() json.decode('"\\udc00"') end); check("err lone low surrogate", ok, false)
+ok = p(function() json.decode('"\\ud83d"') end); check("err lone high surrogate", ok, false)
+
 print(string.format("\n%d passed, %d failed", pass, fail))
 if fail > 0 then os.exit(1) end
