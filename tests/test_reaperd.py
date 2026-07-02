@@ -199,3 +199,33 @@ def test_eq_happy_path_still_reports_live(monkeypatch, root, capsys):
     ]))
     assert reaperd.cmd_eq(_eq_args(root)) == 0
     assert "BAND IS LIVE" in capsys.readouterr().out
+
+
+# --- fix 9 (phase 2): paginated FX param scan with the field the bridge reads
+
+def test_scan_fx_parameters_paginates_past_bridge_cap(monkeypatch):
+    page1 = {"ok": True, "data": {"parameters": [{"index": i} for i in range(1000)],
+                                  "has_more": True}}
+    page2 = {"ok": True, "data": {"parameters": [{"index": 1000 + i} for i in range(200)],
+                                  "has_more": False}}
+    seen = []
+
+    def fake(cmd_type, payload, **kw):
+        assert cmd_type == "get_fx_parameters"
+        seen.append(payload)
+        return page1 if len(seen) == 1 else page2
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    params, err = reaperd.scan_fx_parameters({"target_track_name": "master"}, None)
+    assert err is None
+    assert len(params) == 1200                    # Kontakt-scale plugin fully scanned
+    assert seen[0]["limit"] == 1000               # the field the bridge reads...
+    assert "max_params" not in seen[0]            # ...not the one it ignores
+    assert seen[0]["offset"] == 0 and seen[1]["offset"] == 1000
+
+
+def test_scan_fx_parameters_error_passthrough(monkeypatch):
+    monkeypatch.setattr(reaperd, "send_type",
+                        lambda *a, **k: {"ok": False, "error": {"code": "NO_FX"}})
+    params, err = reaperd.scan_fx_parameters({}, None)
+    assert params is None
+    assert err == {"code": "NO_FX"}

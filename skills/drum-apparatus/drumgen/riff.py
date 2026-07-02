@@ -53,8 +53,9 @@ def parse_project(rpp_path, track_name):
 # ---- WAV reading (handles 32-bit float, which stdlib `wave` rejects) -------
 
 def read_wav_mono(path, max_seconds=None):
-    """Return (sample_rate, [mono float samples]). Supports PCM int16/24/32 and
-    IEEE float32 (fmt tag 3). Downmixes to mono."""
+    """Return (sample_rate, [mono float samples]). Supports PCM int16/24/32,
+    IEEE float32 (fmt tag 3), and WAVE_FORMAT_EXTENSIBLE (0xFFFE) wrapping
+    either. Downmixes to mono."""
     with open(path, "rb") as f:
         data = f.read()
     if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
@@ -68,6 +69,10 @@ def read_wav_mono(path, max_seconds=None):
         body = data[pos + 8:pos + 8 + sz]
         if cid == b"fmt ":
             tag, nch, sr, _byterate, _align, bits = struct.unpack("<HHIIHH", body[:16])
+            if tag == 0xFFFE and len(body) >= 26:
+                # WAVE_FORMAT_EXTENSIBLE: the effective tag is the first two
+                # bytes of the SubFormat GUID (fmt body offset 24).
+                tag = struct.unpack("<H", body[24:26])[0]
             fmt = (tag, nch, sr, bits)
         elif cid == b"data":
             raw = body
@@ -84,6 +89,14 @@ def read_wav_mono(path, max_seconds=None):
     elif tag == 1 and bits == 16:                    # PCM 16
         a = array.array("h"); a.frombytes(raw[: len(raw) // 2 * 2])
         flo = array.array("f", (x / 32768.0 for x in a))
+    elif tag == 1 and bits == 24:                    # PCM 24, REAPER's default
+        n = len(raw) // 3
+        buf = bytearray(n * 4)      # 3 LE bytes into the top of each int32:
+        buf[1::4] = raw[:n * 3:3]   # a free <<8 with sign extension, so the
+        buf[2::4] = raw[1:n * 3:3]  # 32-bit scale divisor applies unchanged
+        buf[3::4] = raw[2:n * 3:3]
+        a = array.array("i"); a.frombytes(bytes(buf))
+        flo = array.array("f", (x / 2147483648.0 for x in a))
     elif tag == 1 and bits == 32:                    # PCM 32
         a = array.array("i"); a.frombytes(raw[: len(raw) // 4 * 4])
         flo = array.array("f", (x / 2147483648.0 for x in a))
