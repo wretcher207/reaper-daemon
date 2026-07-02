@@ -124,5 +124,25 @@ eq(container_depth_of(m3, "SENTINEL_NEW"), 2, "single-line node didn't skew the 
 local m4, err4 = splice(B.split_lines("DATA only\nMORE"), fxbody, "FXCHAIN")
 ok(m4 == nil and err4 == "CHUNK_NO_TRACK_CLOSE", "malformed chunk returns an error code")
 
+-- Fix 1 (2026-07-02 review): startup requeue triage. A stranded processing/
+-- file must NOT re-run when it already executed (reply/archive exists) or when
+-- it is stale (its CLI reported TIMEOUT long ago); a fresh crash still re-runs.
+local rd = B.requeue_decision
+local pca = B.parse_created_at
+local tnow = os.time()
+local fresh_cmd = '{"id":"a","created_at":"'
+  .. os.date("%Y-%m-%dT%H:%M:%S", tnow - 60) .. '-04:00"}'
+local stale_cmd = '{"id":"b","created_at":"'
+  .. os.date("%Y-%m-%dT%H:%M:%S", tnow - 3600) .. '-04:00"}'
+eq(rd(fresh_cmd, false, false, tnow), "requeue", "fresh crash re-runs")
+eq(rd(stale_cmd, false, false, tnow), "discard", "stale command discarded")
+eq(rd(fresh_cmd, true, false, tnow), "skip", "existing outbox reply skips requeue")
+eq(rd(stale_cmd, false, true, tnow), "skip", "archive entry skips requeue")
+eq(rd('{"id":"c"}', false, false, tnow), "requeue", "unknown age keeps old behavior")
+eq(rd(nil, false, false, tnow), "requeue", "unreadable file keeps old behavior")
+ok(pca(fresh_cmd) ~= nil, "created_at parses")
+ok(math.abs(pca(fresh_cmd) - (tnow - 60)) <= 1, "created_at epoch is faithful")
+eq(pca('{"id":"c"}'), nil, "missing created_at is nil")
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))

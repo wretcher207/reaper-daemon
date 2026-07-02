@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.3.0
+-- @version 3.4.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -2004,6 +2004,35 @@ local function loop()
   reaper.defer(loop)
 end
 
+-- Startup requeue triage for files stranded in processing/ from a previous
+-- run. Blind requeue had two honesty bugs: (a) a command that already ran
+-- (reply written, but the processing->archive move failed) re-executes on
+-- restart — double-apply; (b) a command whose CLI long ago reported TIMEOUT
+-- silently applies later to whatever project is open then. Decision:
+--   "skip"    reply or archive entry for this id exists: it already executed.
+--   "discard" older than REQUEUE_MAX_AGE: too stale to trust; route to failed/.
+--   "requeue" fresh crash mid-command: the undo block evaporated, safe to re-run.
+-- Unknown age (no parseable created_at) requeues, matching the old behavior.
+local REQUEUE_MAX_AGE = 15 * 60
+
+local function parse_created_at(text)
+  -- created_at is written by the CLI as local time with a zone suffix; the
+  -- date/time components are local, so os.time() on them is comparable to
+  -- os.time() now. Coarse is fine: the gate is minutes-scale.
+  local y, mo, d, h, mi, s = tostring(text or ""):match(
+    '"created_at"%s*:%s*"(%d+)%-(%d+)%-(%d+)T(%d+):(%d+):(%d+)')
+  if not y then return nil end
+  return os.time({ year = tonumber(y), month = tonumber(mo), day = tonumber(d),
+                   hour = tonumber(h), min = tonumber(mi), sec = tonumber(s) })
+end
+
+local function requeue_decision(text, has_reply, has_archive, now_epoch)
+  if has_reply or has_archive then return "skip" end
+  local created = parse_created_at(text)
+  if created and (now_epoch - created) > REQUEUE_MAX_AGE then return "discard" end
+  return "requeue"
+end
+
 -- Self-check seam: test_bridge.lua loads this file with REAPER_BRIDGE_SELFTEST
 -- set to exercise the pure/atomic helpers, then returns here before the defer
 -- loop starts (no live REAPER needed). One global check; no production cost.
@@ -2013,14 +2042,32 @@ if _G.REAPER_BRIDGE_SELFTEST then
     atomic_write_json = atomic_write_json,
     split_lines = split_lines,
     splice_fx_chain = splice_fx_chain,
+    parse_created_at = parse_created_at,
+    requeue_decision = requeue_decision,
   }
 end
 
--- Re-queue anything stranded in processing/ from a previous run (crash or
--- force-quit mid-command). An uncommitted undo block evaporates on crash,
--- so the command never took effect — safe to re-run. One-shot at startup.
+-- One-shot triage of processing/ at startup (see requeue_decision above).
 for _, filename in ipairs(list_json_files(paths.processing)) do
-  move_file(join(paths.processing, filename), join(paths.inbox, filename))
+  local processing_path = join(paths.processing, filename)
+  local text = read_file(processing_path)
+  local id = tostring(text or ""):match('"id"%s*:%s*"([^"]+)"')
+    or filename:gsub("%.json$", "")
+  local action = requeue_decision(text,
+    exists(join(paths.outbox, id .. ".json")),
+    exists(join(paths.archive, filename)),
+    os.time())
+  if action == "requeue" then
+    move_file(processing_path, join(paths.inbox, filename))
+  elseif action == "skip" then
+    log_line("requeue skip (already executed) " .. filename)
+    move_file(processing_path, join(paths.archive, filename))
+  else
+    log_line("requeue discard (stale) " .. filename)
+    pcall(write_result, { id = id, type = "requeue" }, false,
+      "STALE_COMMAND: stranded in processing/ past the requeue age gate; not re-run")
+    move_file(processing_path, join(paths.failed, filename))
+  end
 end
 
 sweep_once()
