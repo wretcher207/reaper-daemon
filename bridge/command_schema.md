@@ -38,8 +38,13 @@ is an `UPPER_SNAKE` token (`NO_TARGET_TRACK`, `AMBIGUOUS_FX`, `AMBIGUOUS_SCOPE`,
 ## Shared selectors
 
 **Track** — every track-targeting command resolves, in order:
-`target_track_guid`, `target_track_name` (exact, case-insensitive), then the
-selected track.
+`target_track_guid`, `target_track_name` (exact, case-insensitive),
+`track_name_contains` (substring, case-insensitive; errors
+`AMBIGUOUS_TARGET_TRACK` on multiple matches), then `use_selected_track: true`
+(errors `NO_TARGET_TRACK` when nothing is selected). There is deliberately NO
+implicit selected-track fallback: targeting the selection requires the explicit
+`use_selected_track` flag (post-"KT Out 1" rule — a groove once landed on the
+wrong track via silent fallback).
 
 **FX** — `fx_index` (0-based) or `fx_name_contains` (substring,
 case-insensitive). `fx_scope`: `track`, `input`, or `all`. A name search

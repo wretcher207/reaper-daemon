@@ -62,7 +62,9 @@ MODIFIERS = {
 
 
 def _norm(name):
-    return re.sub(r"\s+", " ", (name or "").strip().lower())
+    if not isinstance(name, str):
+        return ""  # .midnam junk (numbers, nil) must not crash classify()
+    return re.sub(r"\s+", " ", name.strip().lower())
 
 
 def _has(pattern, text):
@@ -87,6 +89,10 @@ def classify(name):
             break
     if family is None:
         return None
+    # A hi-hat articulation named after another family ("Hi-Hat Foot Splash")
+    # is still a hat — prefer the hat family on co-occurrence.
+    if family != "hat" and any(_has(p, t) for p in dict(FAMILY_PATTERNS)["hat"]):
+        family = "hat"
 
     modifier = None
     tom_index = None
@@ -320,10 +326,10 @@ def match_roles(notes):
         direct["SPLASH_R"] = sp[0]["pitch"]
         if len(sp) > 1:
             direct["SPLASH_L"] = sp[-1]["pitch"]
-    if buckets["stack"]:
-        direct["STACK"] = buckets["stack"][0]["pitch"]
+    if buckets["stack"]:  # sorted like the other cymbals: deterministic pick
+        direct["STACK"] = sorted(buckets["stack"], key=lambda d: d["pitch"])[0]["pitch"]
     if buckets["bell"]:
-        direct["BELL"] = buckets["bell"][0]["pitch"]
+        direct["BELL"] = sorted(buckets["bell"], key=lambda d: d["pitch"])[0]["pitch"]
 
     # --- fallbacks --------------------------------------------------------
     fallback = {}
@@ -344,7 +350,7 @@ def match_roles(notes):
     has_time = ("HH_OPEN_1" in direct or "HH_CLOSED_TIP" in direct
                 or "RIDE_TIP" in direct)
     has_crash = ("CRASH_R" in direct or "CHINA_R" in direct)
-    complete = all(r in direct for r in primaries) and has_time
+    complete = all(r in direct for r in primaries) and has_time and has_crash
 
     return full, {
         "matched": dict(sorted(direct.items())),

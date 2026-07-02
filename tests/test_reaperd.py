@@ -274,3 +274,46 @@ def test_status_falls_back_to_fresh_heartbeat_when_process_unknown(root, monkeyp
 def test_status_dead_when_process_definitely_gone(root, monkeypatch):
     monkeypatch.setattr(reaperd, "reaper_running", lambda: False)
     assert reaperd.status_ok(root, quiet=True) is False
+
+
+# --- phase 5 minors ----------------------------------------------------------
+
+def test_groove_gates_on_dead_bridge_instantly(root, monkeypatch, tmp_path):
+    # A dead REAPER used to cost groove the full 20s insert timeout.
+    monkeypatch.setattr(reaperd, "status_ok", lambda *a, **k: False)
+    monkeypatch.setattr(reaperd.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError(
+                            "groove must not render when the bridge is dead")))
+    dsl = tmp_path / "beat.dsl"
+    dsl.write_text("@tempo 144\n[v] bars=1 feel=mf\ngrid 16\nkick | x... |\n")
+    args = argparse.Namespace(bridge_root=root, dsl=str(dsl), track=None,
+                              position=None, tempo=None, seed=None, map=None)
+    assert reaperd.cmd_groove(args) == 1
+
+
+def test_status_busy_flag_expires(root, monkeypatch):
+    # A heartbeat frozen at busy=render used to read BUSY forever, even days
+    # after a death mid-render. Past the cap it must read dead.
+    monkeypatch.setattr(reaperd, "reaper_running", lambda: True)
+    hb = os.path.join(root, "bridge", "heartbeat.json")
+    with open(hb, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"project_name": "x", "alive_at": "t", "busy": "render"}))
+    fresh_busy = time.time() - 60
+    os.utime(hb, (fresh_busy, fresh_busy))
+    assert reaperd.status_ok(root, quiet=True) is True     # 1 min: still BUSY
+    ancient = time.time() - 20 * 60
+    os.utime(hb, (ancient, ancient))
+    assert reaperd.status_ok(root, quiet=True) is False    # 20 min: dead
+
+
+def test_strip_block_aborts_on_begin_without_end():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "rd_install", os.path.join(REPO, "setup", "install.py"))
+    install = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(install)
+    text = "user code\n" + install.BEGIN + "\nmanaged line\nmore user code\n"
+    with pytest.raises(RuntimeError):
+        install.strip_block(text)
+    intact = f"a\n{install.BEGIN}\nx\n{install.END}\nb\n"
+    assert install.strip_block(intact) == "a\nb\n"

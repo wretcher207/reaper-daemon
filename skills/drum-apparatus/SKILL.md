@@ -139,12 +139,13 @@ as the reference for how his layers actually behave:
    the notes exist, not that it slaps.
 
 ## Params that matter
-`humanize` (0-100, default 45), `push_pull` (-100..100; negative = laid back /
-positive = pushed), `power_hand` (hh_closed|hh_open|ride|crash|china|stack|none),
-`fills` (auto fill + turnaround crash on the last bar).
-- Lower `humanize` (~20) for machine-tight tech death; raise (~60) for loose,
-  human grooves.
-- Put `fill: true` on the section before a transition, not every section.
+The live engine (`groove` + the DSL) exposes: `@tempo`, `@map`, `@seed`,
+per-section `bars` / `feel` (pp-fff) / `grid`, and the cell articulations
+(`x` hit, `X` accent, `o` ghost, `f` flam). Humanization (velocity model,
+fatigue envelope, weak foot, golden rule, timing jitter) happens in the engine
+at render time — there are no `humanize` / `push_pull` / `power_hand` /
+`fills` knobs (those belonged to the removed legacy renderer). Tighter or
+looser: change `feel` or re-roll `@seed`; write fills as explicit lanes.
 
 ## Breakdowns (read this — they are NOT grooves)
 A breakdown is spaced stabs + silence + naked kick chug, with a cymbal on the BIG
@@ -159,7 +160,7 @@ Authoring your own: add a `cymbal` step-string (`X`=crash, `C`=china, `p`=splash
 cross-bar indexing handles it.
 
 ## Catalog (vocabulary, not a menu)
-36 grooves across 10 subgenres (DEATH METAL, SLAM DEATH, BLACK METAL, GRINDCORE,
+50 grooves across 10 subgenres (DEATH METAL, SLAM DEATH, BLACK METAL, GRINDCORE,
 METALCORE, DOOM & SLUDGE, PROGRESSIVE METAL, ROCK, THRASH METAL, BREAKDOWNS) in
 `catalog/grooves.json`. Reach into these for patterns mid-build — but the beat is
 built from the riff (step 1), not selected from this list.

@@ -87,8 +87,18 @@ def write(path, text):
 
 
 def strip_block(text):
-    """Remove the managed BEGIN..END block, preserve everything else."""
+    """Remove the managed BEGIN..END block, preserve everything else.
+
+    A BEGIN with no matching END (hand-edited startup file) aborts instead of
+    silently deleting everything after BEGIN — __startup.lua may hold the
+    user's own code below our block.
+    """
     lines = text.splitlines()
+    if BEGIN in lines and END not in lines:
+        raise RuntimeError(
+            "managed BEGIN marker found without its END marker in __startup.lua; "
+            "refusing to rewrite (everything after BEGIN would be deleted). "
+            "Restore the END marker line or remove the block by hand.")
     out = []
     skip = False
     for line in lines:

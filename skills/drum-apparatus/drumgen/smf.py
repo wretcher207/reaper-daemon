@@ -9,15 +9,24 @@ def _vlq(n):
 
 
 def write_smf(events, ppq=480, tempo=120):
+    if tempo <= 0:
+        raise ValueError(f"tempo must be positive, got {tempo}")
+    us_per_qn = int(round(60_000_000 / tempo))
+    if us_per_qn > 0xFFFFFF:
+        # The SMF tempo meta is 3 bytes; below ~3.6 BPM it truncated silently
+        # and wrote a wildly wrong tempo.
+        raise ValueError(f"tempo {tempo} below the SMF representable range")
     evs = sorted(events, key=lambda e: e["tick"])
     pairs = []  # (tick, kind, pitch, vel); kind 1=on, 0=off
     for e in evs:
+        if not 0 <= e["pitch"] <= 127:
+            # An out-of-range pitch wrote a corrupt SMF.
+            raise ValueError(f"MIDI pitch {e['pitch']} out of range 0-127")
         pairs.append((e["tick"], 1, e["pitch"], e["vel"]))
         pairs.append((e["tick"] + e["dur"], 0, e["pitch"], 0))
     pairs.sort(key=lambda p: (p[0], p[1]))  # offs before ons at same tick
 
     trk = bytearray()
-    us_per_qn = int(round(60_000_000 / tempo))
     trk += _vlq(0) + bytes([0xFF, 0x51, 0x03]) + struct.pack(">I", us_per_qn)[1:]
     trk += _vlq(0) + bytes([0xFF, 0x58, 0x04, 4, 2, 24, 8])
     prev = 0

@@ -37,9 +37,12 @@ import sys
 import tempfile
 import time
 
-BRIDGE_ROOT = os.environ.get("REAPER_DAEMON_ROOT") or os.path.dirname(
-    os.path.abspath(__file__)
-)
+# expanduser+abspath: a literal "~" in REAPER_DAEMON_ROOT (or --bridge-root)
+# used to silently mkdir "./~/.../inbox" in the CWD and queue commands nowhere.
+BRIDGE_ROOT = os.path.abspath(os.path.expanduser(
+    os.environ.get("REAPER_DAEMON_ROOT")
+    or os.path.dirname(os.path.abspath(__file__))
+))
 
 BEGIN_MARKER = "-- >>> reaper-agent-bridge (managed) >>>"
 END_MARKER = "-- <<< reaper-agent-bridge (managed) <<<"
@@ -405,10 +408,15 @@ def status_ok(bridge_root=None, quiet=False):
     if age <= fresh_secs:
         say(f"CONNECTED: heartbeat {age:.0f}s old | project: {proj} | alive_at {alive}")
         return True
-    if busy != "none":
+    busy_cap = 15 * 60  # a busy flag outliving any real render means a death mid-render
+    if busy != "none" and age <= busy_cap:
         say(f"BUSY: {busy} in progress | heartbeat {age:.0f}s old | project: {proj}")
         say(f"      A synchronous {busy} blocks the loop on purpose; this is not a death.")
         return True
+    if busy != "none":
+        say(f"STALE: heartbeat says busy={busy} but is {age:.0f}s old (>{busy_cap}s) —")
+        say("       that is a bridge that died mid-operation, not a live one.")
+        return False
     say(f"STALE: heartbeat {age:.0f}s old (>{fresh_secs}s). The bridge loop has stopped.")
     say(f"       Last alive_at: {alive} | project: {proj}")
     say("       Revive: re-run the bridge action (Actions list), or relaunch REAPER so")
@@ -660,6 +668,11 @@ def cmd_eq(args):
 
 def cmd_groove(args):
     br = args.bridge_root
+    # Instant heartbeat gate (jam has always had it): a dead REAPER should
+    # fail here in ~0s, not after the full 20s insert timeout.
+    if not status_ok(br, quiet=True):
+        print("[groove] REAPER is DOWN — relaunch it, nothing inserted.", file=sys.stderr)
+        return 1
     if not os.path.isfile(args.dsl):
         print(f"[groove] ERROR: DSL file not found: {args.dsl}", file=sys.stderr)
         return 1
@@ -685,7 +698,15 @@ def cmd_groove(args):
     if args.seed is not None:
         gen += ["--seed", str(args.seed)]
     print(f"[groove] Rendering DSL: {args.dsl}")
-    r = subprocess.run(gen, capture_output=True, text=True)
+    try:
+        r = subprocess.run(gen, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        print("[groove] ERROR: drum engine did not finish in 120s", file=sys.stderr)
+        try:
+            os.unlink(midi)
+        except OSError:
+            pass
+        return 1
     if r.returncode != 0:
         print(r.stderr or r.stdout, file=sys.stderr)
         try:
@@ -753,9 +774,18 @@ def cmd_riff(args):
         print(f"[riff] ERROR: project not found: {args.project}", file=sys.stderr)
         return 1
     skill_dir = os.path.join(args.bridge_root, "skills", "drum-apparatus")
+    if not os.path.isdir(skill_dir):
+        print(f"[riff] ERROR: drum skill not found at {skill_dir}", file=sys.stderr)
+        return 1
     cmd = [sys.executable, "-m", "drumgen.riff", args.project, args.track,
            str(args.bars), str(args.start_bar)]
-    r = subprocess.run(cmd, cwd=skill_dir, capture_output=True, text=True)
+    try:
+        r = subprocess.run(cmd, cwd=skill_dir, capture_output=True, text=True,
+                           timeout=300)
+    except subprocess.TimeoutExpired:
+        print("[riff] ERROR: onset analysis did not finish in 300s "
+              "(very long stem? trim it or pass fewer bars)", file=sys.stderr)
+        return 1
     if r.stdout:
         print(r.stdout.rstrip())
     if r.returncode != 0:
@@ -909,9 +939,16 @@ def cmd_add_map(args):
     cleaned = {}
     for k, v in role_map.items():
         try:
-            cleaned[k] = int(v)
+            pitch = int(v)
         except (TypeError, ValueError):
             print(f"warning: skipping non-integer role {k!r} = {v!r}", file=sys.stderr)
+        else:
+            if 0 <= pitch <= 127:
+                cleaned[k] = pitch
+            else:
+                # An out-of-range pitch would corrupt the SMF at render time.
+                print(f"warning: skipping role {k!r} = {pitch} "
+                      f"(MIDI pitch must be 0-127)", file=sys.stderr)
         if known and k not in known:
             print(f"warning: {k!r} is not a known groovekit role", file=sys.stderr)
     path = _save_overlay_map(br, name, cleaned)
@@ -1040,6 +1077,8 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if getattr(args, "bridge_root", None):
+        args.bridge_root = os.path.abspath(os.path.expanduser(args.bridge_root))
     return args.func(args)
 
 

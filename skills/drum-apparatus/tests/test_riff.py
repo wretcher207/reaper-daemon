@@ -11,21 +11,21 @@ def test_onsets_to_kick_grid_quantizes():
     step = 60.0 / 144 / 4
     times = [0.0, 8 * step, 0.001]  # step 0, step 8, and a dupe near 0
     kick = onsets_to_kick_grid(times, 144, bars=1, grid=16)
-    assert kick == "x-------x-------"
+    assert kick == "x.......x......."
 
 
 def test_onsets_to_kick_grid_respects_start_bar():
     step = 60.0 / 144 / 4
     times = [16 * step]            # first 16th of bar 2
     kick = onsets_to_kick_grid(times, 144, bars=1, grid=16, start_bar=1)
-    assert kick == "x---------------"
+    assert kick == "x..............."
 
 
 def test_offset_steps_shifts_grid_later():
     step = 60.0 / 144 / 4
     times = [0.0]                                    # hit at step 0
-    assert onsets_to_kick_grid(times, 144, 1, offset_steps=0) == "x" + "-" * 15
-    assert onsets_to_kick_grid(times, 144, 1, offset_steps=1) == "-x" + "-" * 14
+    assert onsets_to_kick_grid(times, 144, 1, offset_steps=0) == "x" + "." * 15
+    assert onsets_to_kick_grid(times, 144, 1, offset_steps=1) == ".x" + "." * 14
 
 
 def test_strong_onsets_keeps_loudest():
