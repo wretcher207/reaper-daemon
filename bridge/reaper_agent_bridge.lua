@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.5.0
+-- @version 3.6.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -210,6 +210,15 @@ local function log_line(message)
     file:write("[" .. now() .. "] " .. message .. "\n")
     file:close()
   end
+end
+
+-- Error strings look like "<script path>:559: NO_FX: details" (Lua prefixes
+-- error() with "file:line: "), so the UPPER_SNAKE code is searched anywhere in
+-- the string. Require >=2 leading uppercase: on Windows the script path starts
+-- with a drive letter ("C:\..."), and a one-uppercase match decoded every
+-- error as code "C".
+local function error_code_from(message, fallback)
+  return tostring(message):match("(%u%u[%u_]*):") or fallback
 end
 
 -- POSIX rename(2) atomically replaces the destination whether it exists or
@@ -1760,7 +1769,7 @@ local function command_batch(command)
     results[#results + 1] = { index = i, type = sub.type, ok = ok, data = ok and data or nil, error = ok and nil or tostring(data) }
     if not ok and payload.stop_on_error ~= false then
       reaper.Undo_EndBlock(command.undo_label or payload.undo_label or "Agent: batch failed", -1)
-      local inner = tostring(data):match("([A-Z_]+):") or "BATCH_FAILED"
+      local inner = error_code_from(data, "BATCH_FAILED")
       error(inner .. ": batch sub-command " .. i .. " failed: " .. tostring(data))
     end
   end
@@ -1847,9 +1856,7 @@ local function write_result(command, ok, data_or_error)
       type = command.type,
       finished_at = now(),
       message = tostring(data_or_error),
-      -- Lua 5.3+ prefixes error() messages with "file:line: ", so anchor the
-      -- UPPER_SNAKE code search anywhere in the string, not just at ^.
-      error = { code = tostring(data_or_error):match("([A-Z_]+):[^:]") or "COMMAND_FAILED", details = tostring(data_or_error) },
+      error = { code = error_code_from(data_or_error, "COMMAND_FAILED"), details = tostring(data_or_error) },
     }
   end
   atomic_write_json(join(paths.outbox, command.id .. ".json"), result)
@@ -2046,6 +2053,7 @@ if _G.REAPER_BRIDGE_SELFTEST then
     splice_fx_chain = splice_fx_chain,
     parse_created_at = parse_created_at,
     requeue_decision = requeue_decision,
+    error_code_from = error_code_from,
   }
 end
 
