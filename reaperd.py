@@ -166,7 +166,7 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
     cid = str(cmd.get("id", "")).strip()
     if not cid or cid == "<auto>":
         stamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-        cid = f"cli-{stamp}-{secrets.token_hex(2)}"
+        cid = f"cli-{stamp}-{secrets.token_hex(8)}"
         cmd["id"] = cid
     cmd.setdefault("version", 3)
     cmd.setdefault("created_at", datetime.datetime.now().astimezone().isoformat())
@@ -180,6 +180,13 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
     outbox = os.path.join(bridge_root, "outbox", cid + ".json")
     os.makedirs(os.path.dirname(inbox), exist_ok=True)
 
+    # A leftover reply with this id (fixed-id command file, or an unread reply
+    # from a previous run) would be read back as THIS command's result.
+    try:
+        os.remove(outbox)
+    except OSError:
+        pass
+
     data = json.dumps(cmd, separators=(",", ":"))
     tmp = inbox + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -190,8 +197,8 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
     if not wait:
         return cid, None
 
-    elapsed = 0
-    while elapsed < timeout_ms:
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
         if os.path.isfile(outbox):
             with open(outbox, "r", encoding="utf-8") as f:
                 reply = f.read()
@@ -204,7 +211,15 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
                 pass
             return cid, reply
         time.sleep(0.05)
-        elapsed += 50
+    # Withdraw the command so a TIMEOUT report stays true: a file left in
+    # inbox/ (or requeued from processing/ at bridge startup) would still
+    # execute later against whatever project is open then. If the bridge
+    # already grabbed it, this remove misses; the bridge's requeue age gate
+    # covers that side.
+    try:
+        os.remove(inbox)
+    except OSError:
+        pass
     raise TimeoutError(f"timed out after {timeout_ms}ms waiting for {outbox}")
 
 
@@ -299,6 +314,14 @@ def cmd_send(args):
         return 1
     if reply is not None:
         print(reply)
+        # The installer points users here to verify the bridge; exiting 0 on
+        # an ok:false reply would report a broken command as success.
+        try:
+            res = json.loads(reply)
+        except ValueError:
+            print("error: reply is not valid JSON", file=sys.stderr)
+            return 1
+        return _exit_for(res)
     return 0
 
 
@@ -459,6 +482,10 @@ def cmd_setparam(args):
     # 6. Verify by re-reading the formatted value.
     scan2 = send_type("get_fx_parameters", {**base, "limit": 1000},
                       bridge_root=br, resolve=False, repair=False)
+    if not scan2.get("ok"):
+        print(f"[setparam] ERROR: verify re-scan failed: {scan2.get('error')} "
+              f"— set was sent but the landed value is UNVERIFIED.", file=sys.stderr)
+        return 1
     after = None
     for p in scan2.get("data", {}).get("parameters", []):
         if p.get("index") == pidx:
@@ -469,18 +496,38 @@ def cmd_setparam(args):
         print(f"[setparam] RESULT: set {pname} to normalized {args.value[5:]} "
               f"(displays as {after})")
         return 0
-    tn = _num_from(args.value)
+    return _judge_landed(pname, args.value, after)
+
+
+def _judge_landed(pname, target, after):
+    """Exit code for a formatted-value set: 0 when the landed display is on
+    target (or close), 1 on a real miss. Split out so the tolerance logic is
+    testable without a live bridge."""
+    tn = _num_from(target)
     an = _num_from(after)
+    if tn is None:
+        # Enum/string target ("Bell", "Off"): no tolerance math; compare text.
+        if after is not None and str(after).strip().lower() == str(target).strip().lower():
+            print(f"[setparam] RESULT: OK — {pname} = {after}")
+            return 0
+        print(f"[setparam] RESULT: MISSED — {pname} displays {after!r}, "
+              f"target was {target!r}.", file=sys.stderr)
+        return 1
     if an is None:
         print(f"[setparam] RESULT: SET but display is non-numeric ({after}) "
-              f"— re-scan to verify.", file=sys.stderr)
+              f"— UNVERIFIED, re-scan before trusting it.", file=sys.stderr)
+        return 1
+    diff = abs(an - tn)
+    if diff <= max(abs(tn) * 0.02, 0.5):
+        print(f"[setparam] RESULT: OK — {pname} = {after} (target was {target})")
         return 0
-    if abs(an - tn) <= max(abs(tn) * 0.02, 0.5):
-        print(f"[setparam] RESULT: OK — {pname} = {after} (target was {args.value})")
-    else:
-        print(f"[setparam] RESULT: CLOSE — {pname} = {after} (target was {args.value}; "
-              f"off by a hair — re-run or use norm= for exact)")
-    return 0
+    if diff <= max(abs(tn) * 0.10, 1.0):
+        print(f"[setparam] RESULT: CLOSE — {pname} = {after} (target was {target}; "
+              f"re-run or use norm= for exact)")
+        return 0
+    print(f"[setparam] RESULT: MISSED — {pname} = {after}, target was {target} "
+          f"(>10% off). NOT claiming success.", file=sys.stderr)
+    return 1
 
 
 def cmd_eq(args):
@@ -536,17 +583,28 @@ def cmd_eq(args):
                          bridge_root=br, resolve=False, repair=False).get("ok", False)
 
     # Enable the band FIRST (else the curve stays flat), then dial freq/gain/Q.
-    enabled_ok = True
+    # Every set's reply matters: a dead bridge mid-sequence must fail loudly,
+    # not fall through to a success banner.
+    sets = []
     if ienable is not None:
-        enabled_ok = setn(ienable, 0.0 if enable_inverted else 1.0)
-    setfmt(ifreq, f"{args.freq} Hz")
-    setfmt(igain, f"{args.gain} dB")
+        sets.append(("enable", setn(ienable, 0.0 if enable_inverted else 1.0)))
+    sets.append(("freq", setfmt(ifreq, f"{args.freq} Hz")))
+    sets.append(("gain", setfmt(igain, f"{args.gain} dB")))
     if args.q is not None and iq is not None:
-        setfmt(iq, str(args.q))
+        sets.append(("q", setfmt(iq, str(args.q))))
+    failed = [name for name, ok in sets if not ok]
+    if failed:
+        print(f"[eqband] FAILED: set did not take for: {', '.join(failed)}. "
+              f"Band {band} is NOT verified — do NOT claim success.", file=sys.stderr)
+        return 1
 
     # Verify: read the band back and report real values.
     final = send_type("get_fx_parameters", {**base, "include_values": True, "max_params": 2000},
                       bridge_root=br, resolve=False, repair=False)
+    if not final.get("ok"):
+        print(f"[eqband] FAILED verify re-scan: {final.get('error')}. Sets were "
+              f"acknowledged but the band is UNVERIFIED.", file=sys.stderr)
+        return 1
     pmap = {p.get("index"): p for p in final.get("data", {}).get("parameters", [])}
 
     def fv(i):
@@ -561,9 +619,11 @@ def cmd_eq(args):
         line += f"  Q={fv(iq)}"
     print(line)
     if ienable is None:
-        live = True  # always-on band: setting freq/gain is all there is to do
+        # Always-on band: no enable param exists. All sets returned ok and the
+        # re-scan read the values back, so "live" rests on that evidence.
+        live = True
     elif enable_inverted:
-        live = enabled_ok  # bypass display is ambiguous; trust the un-bypass set
+        live = True  # bypass display is ambiguous; the un-bypass set returned ok
     else:
         live = str(fv(ienable)).strip().lower() in ("used", "on", "enabled", "active", "1", "true", "yes")
     print("[eqband] RESULT:",
