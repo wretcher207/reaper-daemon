@@ -70,7 +70,7 @@ def test_sparse_map_falls_back():
 def test_unnumbered_toms_ranked_by_pitch():
     # Higher pitch = TOM_1, descending. Names carry no numbers.
     notes = {
-        36: "Kick", 38: "Snare", 46: "Open Hat",
+        36: "Kick", 38: "Snare", 46: "Open Hat", 49: "Crash",
         50: "Rack Tom", 45: "Mid Tom", 41: "Low Tom", 43: "Floor Tom",
     }
     m, rep = match_roles(notes)
@@ -107,3 +107,31 @@ def test_all_roles_known():
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---- 2026-07-02 review minors ----------------------------------------------
+
+def test_no_crash_kit_reports_partial():
+    # "complete" is documented as kick + snare + timekeeper + CRASH; has_crash
+    # was computed but never enforced, so crash-less kits claimed complete.
+    notes = {36: "Kick", 38: "Snare", 46: "Open Hat"}
+    _, rep = match_roles(notes)
+    assert not rep["complete"]
+    assert rep["reason"] == "PARTIAL_MAP"
+
+
+def test_hihat_foot_splash_is_a_hat_not_a_splash():
+    fam, _mod, _ = classify("Hi-Hat Foot Splash")
+    assert fam == "hat"
+
+
+def test_classify_survives_non_string_names():
+    assert classify(42) is None
+    assert classify(None) is None
+
+
+def test_stack_pick_is_lowest_pitch_deterministic():
+    notes = {36: "Kick", 38: "Snare", 46: "Open Hat", 49: "Crash",
+             60: "Stack High", 55: "Stack Low"}
+    m, _ = match_roles(notes)
+    assert m["STACK"] == 55

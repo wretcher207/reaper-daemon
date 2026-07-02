@@ -15,6 +15,7 @@ import array
 import os
 import re
 import struct
+import sys
 
 
 # ---- RPP parsing -----------------------------------------------------------
@@ -161,7 +162,9 @@ def strong_onsets(onsets, keep_pct):
 def onsets_to_kick_grid(onsets, tempo, bars, grid=16, item_start=0.0, start_bar=0,
                         offset_steps=0):
     """Snap onsets to a `grid`-per-bar lane and return a kick string of bars*grid
-    cells ('x' = hit, '-' = rest), covering [start_bar, start_bar+bars).
+    cells ('x' = hit, '.' = rest), covering [start_bar, start_bar+bars).
+    Rests are '.' because that is the only rest cell the groove DSL accepts —
+    this string's whole purpose is to be pasted into a DSL kick lane.
 
     offset_steps: calibration shift in grid steps (+1 = everything one 16th later).
     The grid is anchored to item time 0, but a stem's musical downbeat may sit a
@@ -171,7 +174,7 @@ def onsets_to_kick_grid(onsets, tempo, bars, grid=16, item_start=0.0, start_bar=
     step_s = (60.0 / tempo) * 4.0 / grid
     total = bars * grid
     offset = start_bar * grid
-    cells = ["-"] * total
+    cells = ["."] * total
     for t in onsets:
         idx = round((t - item_start) / step_s) - offset + offset_steps
         if 0 <= idx < total:
@@ -198,6 +201,12 @@ def riff_to_kicks(rpp_path, track_name, bars=4, start_bar=0, grid=16,
     proj = parse_project(rpp_path, track_name)
     if not proj["items"]:
         raise ValueError(f"no audio items on track {track_name!r} in {rpp_path}")
+    if len(proj["items"]) > 1:
+        # Comped/spliced tracks have several items; only the first is analyzed,
+        # so say so instead of silently transcribing a fraction of the riff.
+        print(f"[riff] WARNING: track {track_name!r} has {len(proj['items'])} items; "
+              f"only the first (at {proj['items'][0]['position']:.2f}s) is analyzed.",
+              file=sys.stderr)
     it = proj["items"][0]
     sr, mono = read_wav_mono(it["source"], max_seconds=max_seconds)
     onsets = detect_onsets(mono, sr)
@@ -205,7 +214,8 @@ def riff_to_kicks(rpp_path, track_name, bars=4, start_bar=0, grid=16,
     kick = onsets_to_kick_grid(times, proj["tempo"], bars, grid, it["position"],
                                start_bar, offset_steps)
     return {"tempo": proj["tempo"], "source": it["source"], "sr": sr,
-            "onsets": onsets, "kept": len(times), "kick": kick, "grid": grid}
+            "onsets": onsets, "kept": len(times), "kick": kick, "grid": grid,
+            "item_count": len(proj["items"])}
 
 
 if __name__ == "__main__":

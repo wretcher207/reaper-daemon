@@ -208,10 +208,17 @@ def parse_dsl(text, default_map="GM Standard"):
             val = parts[1].strip() if len(parts) > 1 else ""
             if key == "tempo":
                 tempo = int(val)
+                # Out-of-range tempi used to surface as raw tracebacks (0 =
+                # ZeroDivisionError, negative = struct.error) or, below ~3.6
+                # BPM, silently truncate the SMF tempo meta. Fail at parse.
+                if not 20 <= tempo <= 999:
+                    raise DSLError(f"@tempo {tempo} out of range (20-999)")
             elif key == "map":
                 map_name = val
             elif key == "ppq":
                 ppq = int(val)
+                if not 24 <= ppq <= 32767:
+                    raise DSLError(f"@ppq {ppq} out of range (24-32767)")
             elif key == "seed":
                 seed = int(val)
             else:
@@ -229,6 +236,9 @@ def parse_dsl(text, default_map="GM Standard"):
                     k, v = tok.split("=", 1)
                     attrs[k.strip().lower()] = v.strip()
             bars = int(attrs.get("bars", 1))
+            if bars < 1:
+                # bars=-1 used to rewind cursor_qn and corrupt positions.
+                raise DSLError(f"bars={bars} in [{name}] (must be >= 1)")
             feel = attrs.get("feel", "mf").lower()
             if feel not in FEEL_CENTER:
                 raise DSLError(f"unknown feel '{feel}' in [{name}]")
@@ -423,6 +433,9 @@ def render(sections, params, rng):
     # We collect "hit intents" first (with base/articulation/metrical velocity),
     # grouped per lane in time order, then apply fatigue + jitter + golden rule,
     # then resolve to events with timing.
+    # Kick R/L alternation carries ACROSS sections (it's one pair of feet):
+    # a per-section counter put two consecutive right-foot hits at every seam.
+    kick_alt_count = 0
     for sec in sections:
         grid = sec["grid"]
         feel = sec["feel"]
@@ -452,7 +465,7 @@ def render(sections, params, rng):
         bar_has_left = [False] * bars
         if kick_lane_idx is not None:
             _, full = lane_cells[kick_lane_idx]
-            count = 0
+            count = kick_alt_count
             for gstep, c in enumerate(full):
                 if c != CELL_REST:
                     foot = "KICK_R" if count % 2 == 0 else "KICK_L"
@@ -460,6 +473,7 @@ def render(sections, params, rng):
                     if foot == "KICK_L":
                         bar_has_left[gstep // grid] = True
                     count += 1
+            kick_alt_count = count
         # explicit kick_l lanes also lift the pedal in their bar
         for lane, full in lane_cells:
             if lane["kind"] == "kick_l":
@@ -474,7 +488,9 @@ def render(sections, params, rng):
             if lane["role"].startswith(_SHELL_PREFIXES):
                 shell_steps.update(g for g, c in enumerate(full) if c != CELL_REST)
 
-        # Build per-lane intent lists.
+        # Build per-lane intent lists; they merge into one section stream for
+        # the golden-rule pass below (two lanes can share one output pitch).
+        section_intents = []
         for lane, full in lane_cells:
             kind = lane["kind"]
             base_role = lane["role"]
@@ -586,10 +602,13 @@ def render(sections, params, rng):
                         frac = _fatigue_factor(pos, rlen)
                         base_minus_1 = it["vel"] - 1.0
                         it["vel"] -= base_minus_1 * frac
-                        # per-bar recovery: first run-hit of each new bar
+                        # per-bar recovery: first run-hit of each NEW bar. The
+                        # very first hit of a run has no fatigue to recover
+                        # from — boosting it (~9 over feel center) was a bug.
                         b = it["bar"]
                         if b not in seen_bar:
-                            it["vel"] += rng.uniform(8, 10)
+                            if pos > 0:
+                                it["vel"] += rng.uniform(8, 10)
                             seen_bar.add(b)
                         # small gaussian noise on top
                         it["vel"] += rng.gauss(0, 2.0)
@@ -602,57 +621,63 @@ def render(sections, params, rng):
                 else:
                     it["vel"] += rng.gauss(0, jit)
 
-            # ----- (7) GOLDEN RULE pass (per OUTPUT PITCH, time order) -----
-            # No hit within 4 of the immediately preceding hit on the same
-            # physical PITCH. This must be enforced on the stream the parser
-            # actually sees (grouped by MIDI pitch), not on the interleaved
-            # intent list, because one DSL lane can scatter across several
-            # roles/pitches AND several roles can collapse onto one pitch:
-            #   - hat_open -> HH_OPEN_1/2/3 are THREE distinct pitches, so two
-            #     same-pitch hits separated by a different-pitch hat hit could
-            #     otherwise land within 4 of each other.
-            #   - kick -> KICK_R/KICK_L are TWO roles but ONE pitch (e.g. 24),
-            #     so per-role grouping would leave adjacent same-pitch hits
-            #     unprotected. Keying on the resolved pitch handles both.
-            for it in intents:
-                it["_pitch"] = pitch_for(it["role"])
-            prev_v_by_pitch = {}
-            for it in intents:
-                pitch = it["_pitch"]
-                if pitch is None:
-                    continue  # unmapped role on a sparse/discovered map
-                lo, hi = bounds.get(pitch, (1, 127))
-                prev_v = prev_v_by_pitch.get(pitch)
-                v = it["vel"]
-                if prev_v is not None and abs(v - prev_v) < 4:
-                    v = prev_v + 4 if v >= prev_v else prev_v - 4
-                # clamp to this pitch's band so the neighbor relationship holds
-                # on bounded values (kick ceiling, snare band).
-                v = max(lo, min(hi, v))
-                # if clamping collapsed the gap (e.g. both pinned at the ceiling),
-                # push the other way, still within the band.
-                if prev_v is not None and abs(v - prev_v) < 4:
-                    v = prev_v - 4 if prev_v >= hi - 3 else prev_v + 4
-                    v = max(lo, min(hi, v))
-                it["vel"] = v
-                prev_v_by_pitch[pitch] = v
+            section_intents.extend(intents)
 
-            # ----- (8) resolve to events with timing -----
-            for it in intents:
-                pitch = it["_pitch"]
-                if pitch is None:
-                    continue
-                pos_qn = cursor_qn + it["gstep"] * step_qn
-                # unison lock key: nominal absolute step in 16th-units rounded
-                step_key = round(pos_qn / step_qn)
-                off = sample_offset(abs_bar + it["bar"], (step_key,))
-                tick = int(round(pos_qn * ppq)) + int(round(off))
-                events.append({
-                    "tick": max(0, tick),
-                    "pitch": pitch,
-                    "vel": int(round(clamp_v(pitch, it["vel"]))),
-                    "dur": dur_ticks,
-                })
+        # ----- (7) GOLDEN RULE pass (per OUTPUT PITCH, time order) -----
+        # No hit within 4 of the immediately preceding hit on the same
+        # physical PITCH. This must be enforced on the stream the parser
+        # actually sees (grouped by MIDI pitch), not on the interleaved
+        # intent list, because one DSL lane can scatter across several
+        # roles/pitches AND several roles can collapse onto one pitch:
+        #   - hat_open -> HH_OPEN_1/2/3 are THREE distinct pitches, so two
+        #     same-pitch hits separated by a different-pitch hat hit could
+        #     otherwise land within 4 of each other.
+        #   - kick -> KICK_R/KICK_L are TWO roles but ONE pitch (e.g. 24),
+        #     so per-role grouping would leave adjacent same-pitch hits
+        #     unprotected. Keying on the resolved pitch handles both.
+        # Runs over ALL lanes merged in gstep order: two lanes sharing a pitch
+        # (crash + crash_r) used to each get an independent pass, so cross-lane
+        # neighbors could land at machine-gun gap 1.
+        for it in section_intents:
+            it["_pitch"] = pitch_for(it["role"])
+        section_intents.sort(key=lambda it: it["gstep"])  # stable: lane order kept on ties
+        prev_v_by_pitch = {}
+        for it in section_intents:
+            pitch = it["_pitch"]
+            if pitch is None:
+                continue  # unmapped role on a sparse/discovered map
+            lo, hi = bounds.get(pitch, (1, 127))
+            prev_v = prev_v_by_pitch.get(pitch)
+            v = it["vel"]
+            if prev_v is not None and abs(v - prev_v) < 4:
+                v = prev_v + 4 if v >= prev_v else prev_v - 4
+            # clamp to this pitch's band so the neighbor relationship holds
+            # on bounded values (kick ceiling, snare band).
+            v = max(lo, min(hi, v))
+            # if clamping collapsed the gap (e.g. both pinned at the ceiling),
+            # push the other way, still within the band.
+            if prev_v is not None and abs(v - prev_v) < 4:
+                v = prev_v - 4 if prev_v >= hi - 3 else prev_v + 4
+                v = max(lo, min(hi, v))
+            it["vel"] = v
+            prev_v_by_pitch[pitch] = v
+
+        # ----- (8) resolve to events with timing -----
+        for it in section_intents:
+            pitch = it["_pitch"]
+            if pitch is None:
+                continue
+            pos_qn = cursor_qn + it["gstep"] * step_qn
+            # unison lock key: nominal absolute step in 16th-units rounded
+            step_key = round(pos_qn / step_qn)
+            off = sample_offset(abs_bar + it["bar"], (step_key,))
+            tick = int(round(pos_qn * ppq)) + int(round(off))
+            events.append({
+                "tick": max(0, tick),
+                "pitch": pitch,
+                "vel": int(round(clamp_v(pitch, it["vel"]))),
+                "dur": dur_ticks,
+            })
 
         cursor_qn += bars * 4.0
         abs_bar += bars
