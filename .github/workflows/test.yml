@@ -41,5 +41,5 @@ jobs:
         run: python -m py_compile reaperd.py setup/install.py
       - name: install pytest
         run: python -m pip install --quiet pytest
-      - name: drum-apparatus tests
-        run: python -m pytest skills/drum-apparatus -q
+      - name: drum-apparatus + CLI tests
+        run: python -m pytest skills/drum-apparatus tests -q
