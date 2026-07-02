@@ -303,6 +303,18 @@ def parse_dsl(text, default_map="GM Standard"):
 # Humanize engine
 # ---------------------------------------------------------------------------
 
+def _tile(cells, total):
+    """Tile a lane's cells to exactly `total` steps ("short lanes loop").
+
+    Handles every length mismatch: shorter lanes repeat (with a partial
+    repeat at the end when the lengths don't divide evenly), longer lanes
+    truncate to the section. The old `cells * (total // len(cells))` rendered
+    ZERO steps when the lane was longer than the section (32 cells in a
+    bars=1 grid-16 section) and silently dropped the tail bar when they
+    didn't divide (32 cells in bars=3)."""
+    return (cells * (total // len(cells) + 1))[:total]
+
+
 def _is_run_lane(grid, steps_fired):
     """A RUN = >=6 consecutive hits on a lane at fast spacing.
 
@@ -425,15 +437,8 @@ def render(sections, params, rng):
         # We compute per-lane expanded cells first.
         lane_cells = []
         for lane in sec["lanes"]:
-            cells = lane["cells"]
             total = grid * bars
-            if len(cells) == bars * grid:
-                full = cells
-            else:
-                # repeat the one-bar (or multi) pattern across bars
-                reps = total // len(cells)
-                full = cells * reps
-            lane_cells.append((lane, full))
+            lane_cells.append((lane, _tile(lane["cells"], total)))
 
         # Determine kick alternation per absolute step, and which bars get a
         # left kick. Kick alternates R/L on CONSECUTIVE kick hits across the
@@ -676,8 +681,7 @@ def exposed_focal_hits(parsed, limit=8):
         step_pop = {}                       # gstep -> how many lanes fire there
         lanes_full = []
         for lane in sec["lanes"]:
-            cells = lane["cells"]
-            full = cells if len(cells) == total else cells * (total // len(cells))
+            full = _tile(lane["cells"], total)
             steps = [g for g, c in enumerate(full) if c != CELL_REST]
             lanes_full.append((lane["lane"], steps))
             for g in steps:

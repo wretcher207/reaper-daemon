@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.4.0
+-- @version 3.5.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -1653,7 +1653,7 @@ end
 -- Discover a drum library's note->piece mapping by reading the MIDI note
 -- names REAPER has for the track. Most serious drum samplers (GGD, Superior
 -- Drummer, EZdrummer, BFD, Additive Drums) install a .midnam that REAPER
--- exposes via GetTrackMIDINoteName; the agent's mapdetect.match_roles then
+-- exposes via GetTrackMIDINoteNameEx; the agent's mapdetect.match_roles then
 -- classifies those names into groovekit roles. This is the generic, library-
 -- agnostic path. Kits with no .midnam (some Kontakt libraries) return an
 -- empty note list and the agent falls back to GM Standard / a manual map.
@@ -1667,9 +1667,11 @@ local function command_discover_drum_map(command)
   local any_name = false
   for _, chan in ipairs(channels) do
     for pitch = 0, max_pitch do
-      -- GetTrackMIDINoteName returns "" when no name is set for that note.
-      local ok_, name = reaper.GetTrackMIDINoteName(track, pitch, chan)
-      if ok_ and name and name ~= "" then
+      -- GetTrackMIDINoteNameEx takes the MediaTrack (the non-Ex variant wants
+      -- a track INDEX, so passing a MediaTrack always failed) and returns the
+      -- single name string, nil/"" when no name is set for that note.
+      local name = reaper.GetTrackMIDINoteNameEx(0, track, pitch, chan)
+      if name and name ~= "" then
         any_name = true
         -- Key by pitch; first channel that names a note wins. Store the
         -- channel so the agent can report which channel a kit lives on.

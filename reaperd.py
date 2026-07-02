@@ -254,6 +254,28 @@ def send_type(cmd_type, payload, bridge_root=None, timeout_ms=10000,
         return {"ok": False, "error": {"code": "BAD_REPLY", "details": str(e)}}
 
 
+def scan_fx_parameters(base, bridge_root, include_values=False):
+    """Every parameter of one FX, paginated past the bridge's 1000-per-reply
+    cap (Kontakt-scale plugins) with the field the bridge actually reads
+    (`limit`; `max_params` was silently ignored, hiding EQ bands past index
+    200 on big plugins). Returns (params, None) or (None, error)."""
+    payload = dict(base)
+    if include_values:
+        payload["include_values"] = True
+    params, offset = [], 0
+    while True:
+        res = send_type("get_fx_parameters", {**payload, "limit": 1000, "offset": offset},
+                        bridge_root=bridge_root, resolve=False, repair=False)
+        if not res.get("ok"):
+            return None, res.get("error")
+        data = res.get("data", {})
+        chunk = data.get("parameters", [])
+        params.extend(chunk)
+        if not data.get("has_more") or not chunk:
+            return params, None
+        offset += len(chunk)
+
+
 # ---------------------------------------------------------------------------
 # Small shared bits
 # ---------------------------------------------------------------------------
@@ -427,12 +449,10 @@ def cmd_setparam(args):
         base = {**base, "fx_name_contains": args.fx}
 
     # 3. Scan params.
-    scan = send_type("get_fx_parameters", {**base, "limit": 1000},
-                     bridge_root=br, resolve=False, repair=False)
-    if not scan.get("ok"):
-        print(f"[setparam] ERROR: scan failed: {scan.get('error')}", file=sys.stderr)
+    params, err = scan_fx_parameters(base, br)
+    if err is not None:
+        print(f"[setparam] ERROR: scan failed: {err}", file=sys.stderr)
         return 1
-    params = scan.get("data", {}).get("parameters", [])
 
     # 4. Resolve param by #index or unique substring.
     if args.param.startswith("#"):
@@ -480,14 +500,13 @@ def cmd_setparam(args):
         return 1
 
     # 6. Verify by re-reading the formatted value.
-    scan2 = send_type("get_fx_parameters", {**base, "limit": 1000},
-                      bridge_root=br, resolve=False, repair=False)
-    if not scan2.get("ok"):
-        print(f"[setparam] ERROR: verify re-scan failed: {scan2.get('error')} "
+    params2, err2 = scan_fx_parameters(base, br)
+    if err2 is not None:
+        print(f"[setparam] ERROR: verify re-scan failed: {err2} "
               f"— set was sent but the landed value is UNVERIFIED.", file=sys.stderr)
         return 1
     after = None
-    for p in scan2.get("data", {}).get("parameters", []):
+    for p in params2:
         if p.get("index") == pidx:
             after = p.get("formatted_value")
             break
@@ -537,14 +556,12 @@ def cmd_eq(args):
     else:
         base = {"target_track_name": args.track, "fx_name_contains": args.fx}
 
-    scan = send_type("get_fx_parameters", {**base, "include_values": True, "max_params": 2000},
-                     bridge_root=br, resolve=False, repair=False)
-    if not scan.get("ok"):
-        print(f"[eqband] FAILED reading params: {scan.get('error')}", file=sys.stderr)
+    params, err = scan_fx_parameters(base, br, include_values=True)
+    if err is not None:
+        print(f"[eqband] FAILED reading params: {err}", file=sys.stderr)
         print("[eqband] (AMBIGUOUS_FX = duplicate instances; target one with #0 / #1)",
               file=sys.stderr)
         return 1
-    params = scan.get("data", {}).get("parameters", [])
 
     # Discover this band's param indices by name across EQ naming conventions.
     band = args.band
@@ -599,13 +616,12 @@ def cmd_eq(args):
         return 1
 
     # Verify: read the band back and report real values.
-    final = send_type("get_fx_parameters", {**base, "include_values": True, "max_params": 2000},
-                      bridge_root=br, resolve=False, repair=False)
-    if not final.get("ok"):
-        print(f"[eqband] FAILED verify re-scan: {final.get('error')}. Sets were "
+    final, ferr = scan_fx_parameters(base, br, include_values=True)
+    if ferr is not None:
+        print(f"[eqband] FAILED verify re-scan: {ferr}. Sets were "
               f"acknowledged but the band is UNVERIFIED.", file=sys.stderr)
         return 1
-    pmap = {p.get("index"): p for p in final.get("data", {}).get("parameters", [])}
+    pmap = {p.get("index"): p for p in final}
 
     def fv(i):
         p = pmap.get(i)

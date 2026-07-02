@@ -77,3 +77,70 @@ def test_parse_project_reads_tempo_and_item():
         assert len(proj["items"]) == 1
         assert proj["items"][0]["position"] == 1.5
         assert proj["items"][0]["source"] == os.path.join(d, "Media/riff.wav")
+
+
+# ---- fix 8 (2026-07-02 review): 24-bit PCM + WAVE_FORMAT_EXTENSIBLE --------
+# REAPER records 24-bit PCM by default; the reader used to raise on it and on
+# the 0xFFFE extensible header some DAWs write.
+
+def _pcm24(sample):
+    return struct.pack("<i", int(sample * 8388607))[:3]  # low 3 LE bytes
+
+
+def _wav(tag, bits, frames, sr=48000, nch=1, extensible=False):
+    if bits == 24:
+        payload = b"".join(_pcm24(s) for s in frames)
+    elif tag == 3:
+        payload = struct.pack("<%df" % len(frames), *frames)
+    else:
+        payload = struct.pack("<%dh" % len(frames),
+                              *(int(s * 32767) for s in frames))
+    align = nch * bits // 8
+    if extensible:
+        guid = struct.pack("<H", tag) + b"\x00\x00" + bytes(
+            (0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71))
+        fmt = struct.pack("<HHIIHH", 0xFFFE, nch, sr, sr * align, align, bits)
+        fmt += struct.pack("<HHI", 22, bits, 0) + guid
+    else:
+        fmt = struct.pack("<HHIIHH", tag, nch, sr, sr * align, align, bits)
+    chunks = (b"fmt " + struct.pack("<I", len(fmt)) + fmt + (b"\x00" if len(fmt) & 1 else b"")
+              + b"data" + struct.pack("<I", len(payload)) + payload
+              + (b"\x00" if len(payload) & 1 else b""))
+    return b"RIFF" + struct.pack("<I", 4 + len(chunks)) + b"WAVE" + chunks
+
+
+def _roundtrip(blob):
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "t.wav")
+        open(p, "wb").write(blob)
+        return read_wav_mono(p)
+
+
+def test_read_wav_24bit_pcm():
+    frames = [0.5, -0.5, 0.25, -1.0, 0.0]
+    sr, mono = _roundtrip(_wav(1, 24, frames))
+    assert sr == 48000
+    assert len(mono) == len(frames)
+    for got, want in zip(mono, frames):
+        assert abs(got - want) < 1e-3
+
+
+def test_read_wav_extensible_24bit_pcm():
+    frames = [0.5, -0.25]
+    _, mono = _roundtrip(_wav(1, 24, frames, extensible=True))
+    for got, want in zip(mono, frames):
+        assert abs(got - want) < 1e-3
+
+
+def test_read_wav_extensible_float32():
+    frames = [0.5, -0.125, 1.0]
+    _, mono = _roundtrip(_wav(3, 32, frames, extensible=True))
+    for got, want in zip(mono, frames):
+        assert abs(got - want) < 1e-6
+
+
+def test_read_wav_16bit_still_works():
+    frames = [0.5, -0.5]
+    _, mono = _roundtrip(_wav(1, 16, frames))
+    for got, want in zip(mono, frames):
+        assert abs(got - want) < 1e-3
