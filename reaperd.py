@@ -76,8 +76,15 @@ def reaper_running():
                 capture_output=True, text=True, timeout=6,
             )
             return "REAPER.exe" in (r.stdout or "")
-        r = subprocess.run(["pgrep", "-x", "REAPER"], capture_output=True, timeout=6)
-        return r.returncode == 0
+        if system == "Darwin":
+            r = subprocess.run(["pgrep", "-x", "REAPER"], capture_output=True, timeout=6)
+            return r.returncode == 0
+        # Linux: the binary is lowercase `reaper`, and packaging varies (wine,
+        # flatpak wrappers), so match both cases and treat a miss as UNKNOWN
+        # rather than dead — the heartbeat is the authority there.
+        r = subprocess.run(["pgrep", "-x", "REAPER|reaper"],
+                           capture_output=True, timeout=6)
+        return True if r.returncode == 0 else None
     except Exception:
         return None
 
@@ -378,7 +385,10 @@ def status_ok(bridge_root=None, quiet=False):
         say("DEAD: REAPER is not running. Launch REAPER (auto-start will load the bridge).")
         return False
     if not os.path.isfile(hb):
-        say("DEAD: REAPER is up but no heartbeat file. Bridge never loaded.")
+        if running:
+            say("DEAD: REAPER is up but no heartbeat file. Bridge never loaded.")
+        else:
+            say("DEAD: no heartbeat file. Bridge never loaded (is REAPER running?).")
         say("      Fix: python3 setup/install.py, then relaunch REAPER.")
         return False
     age = time.time() - os.path.getmtime(hb)

@@ -229,3 +229,48 @@ def test_scan_fx_parameters_error_passthrough(monkeypatch):
     params, err = reaperd.scan_fx_parameters({}, None)
     assert params is None
     assert err == {"code": "NO_FX"}
+
+
+# --- fixes 10-11 (phase 3): platform correctness ----------------------------
+
+class _Ret:
+    def __init__(self, rc):
+        self.returncode = rc
+        self.stdout = ""
+
+
+def test_reaper_running_linux_miss_is_unknown_not_dead(monkeypatch):
+    monkeypatch.setattr(reaperd.platform, "system", lambda: "Linux")
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["argv"] = argv
+        return _Ret(1)
+    monkeypatch.setattr(reaperd.subprocess, "run", fake_run)
+    assert reaperd.reaper_running() is None       # heartbeat decides, not pgrep
+    assert seen["argv"][-1] == "REAPER|reaper"    # lowercase binary matched too
+
+
+def test_reaper_running_linux_hit_is_true(monkeypatch):
+    monkeypatch.setattr(reaperd.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(reaperd.subprocess, "run", lambda *a, **k: _Ret(0))
+    assert reaperd.reaper_running() is True
+
+
+def test_reaper_running_macos_miss_is_still_false(monkeypatch):
+    monkeypatch.setattr(reaperd.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(reaperd.subprocess, "run", lambda *a, **k: _Ret(1))
+    assert reaperd.reaper_running() is False
+
+
+def test_status_falls_back_to_fresh_heartbeat_when_process_unknown(root, monkeypatch):
+    monkeypatch.setattr(reaperd, "reaper_running", lambda: None)
+    hb = os.path.join(root, "bridge", "heartbeat.json")
+    with open(hb, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"project_name": "x", "alive_at": "t", "busy": "none"}))
+    assert reaperd.status_ok(root, quiet=True) is True
+
+
+def test_status_dead_when_process_definitely_gone(root, monkeypatch):
+    monkeypatch.setattr(reaperd, "reaper_running", lambda: False)
+    assert reaperd.status_ok(root, quiet=True) is False

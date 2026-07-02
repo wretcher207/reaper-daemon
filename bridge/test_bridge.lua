@@ -144,5 +144,17 @@ ok(pca(fresh_cmd) ~= nil, "created_at parses")
 ok(math.abs(pca(fresh_cmd) - (tnow - 60)) <= 1, "created_at epoch is faithful")
 eq(pca('{"id":"c"}'), nil, "missing created_at is nil")
 
+-- Fix 10 (2026-07-02 review): error-code extraction vs Windows drive letters.
+-- "C:\...\bridge.lua:559: NO_FX: x" used to decode as code "C".
+local ecf = B.error_code_from
+eq(ecf("C:\\Users\\d\\bridge.lua:559: NO_FX: no such fx", "COMMAND_FAILED"),
+   "NO_FX", "Windows path does not eat the code")
+eq(ecf("/u/bridge.lua:12: BAD_JSON: eof", "COMMAND_FAILED"),
+   "BAD_JSON", "POSIX path still decodes")
+eq(ecf("D:\\x.lua:3: AUTH_FAILED: missing token", "BATCH_FAILED"),
+   "AUTH_FAILED", "underscore codes decode")
+eq(ecf("something exploded with no code", "COMMAND_FAILED"),
+   "COMMAND_FAILED", "no code falls back")
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))
