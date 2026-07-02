@@ -28,6 +28,9 @@ jobs:
       - name: bridge self-test (parse_display_number, atomic write, chunk splicer)
         run: lua bridge/test_bridge.lua
         shell: bash
+      - name: json codec self-test (CWD-sensitive; run from repo root)
+        run: lua bridge/test_json.lua
+        shell: bash
 
   drum-engine-python:
     name: drum engine pytest + CLI syntax
