@@ -156,5 +156,27 @@ eq(ecf("D:\\x.lua:3: AUTH_FAILED: missing token", "BATCH_FAILED"),
 eq(ecf("something exploded with no code", "COMMAND_FAILED"),
    "COMMAND_FAILED", "no code falls back")
 
+-- Fix 13 (2026-07-02 review): command.id names the outbox reply file, so a
+-- hostile/malformed id must fall back to the inbox filename stem.
+local sid = B.safe_id
+eq(sid("agent-2026-07-02T10-00-00-abcd", "fb"), "agent-2026-07-02T10-00-00-abcd",
+   "normal id kept")
+eq(sid("../bridge/heartbeat", "fb"), "fb", "path traversal rejected")
+eq(sid("a/b", "fb"), "fb", "separator rejected")
+eq(sid("x..y", "fb"), "fb", "dot-dot anywhere rejected")
+eq(sid(42, "fb"), "fb", "non-string rejected")
+eq(sid(nil, "fb"), "fb", "missing id falls back")
+
+-- Fix 12 (2026-07-02 review): render locks reclaim after a generous bound.
+local lv = B.lock_verdict
+local lnow = os.time()
+eq(lv(nil, lnow), nil, "no lock proceeds")
+ok(lv({ started = lnow - 30, busy = "none" }, lnow) ~= nil, "fresh lock refuses")
+eq(lv({ started = lnow - 120, busy = "none" }, lnow), nil, "stale lock reclaimed")
+ok(lv({ started = lnow - 3600, busy = "render" }, lnow) ~= nil,
+   "hour-old render lock still refuses (long renders are real)")
+eq(lv({ started = lnow - 7 * 3600, busy = "render" }, lnow), nil,
+   "ancient render lock reclaimed (power loss no longer bricks the bridge)")
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))
