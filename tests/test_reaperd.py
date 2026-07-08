@@ -9,45 +9,15 @@ import argparse
 import json
 import os
 import sys
-import threading
 import time
 
 import pytest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import reaperd  # noqa: E402
-
-
-@pytest.fixture
-def root(tmp_path):
-    for d in ("inbox", "outbox", "processing", "bridge"):
-        (tmp_path / d).mkdir()
-    return str(tmp_path)
-
-
-def fake_bridge(root, reply_body, delay=0.0):
-    """Watch inbox/, answer the first command with reply_body, like the bridge."""
-    def run():
-        inbox = os.path.join(root, "inbox")
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            files = [f for f in os.listdir(inbox)
-                     if f.endswith(".json") and not f.endswith(".tmp")]
-            if files:
-                cid = files[0][:-len(".json")]
-                os.remove(os.path.join(inbox, files[0]))
-                time.sleep(delay)
-                reply = dict(reply_body, id=cid)
-                path = os.path.join(root, "outbox", cid + ".json")
-                with open(path + ".tmp", "w", encoding="utf-8") as f:
-                    f.write(json.dumps(reply))
-                os.replace(path + ".tmp", path)
-                return
-            time.sleep(0.01)
-    t = threading.Thread(target=run, daemon=True)
-    t.start()
-    return t
+from bridge_fakes import fake_bridge  # noqa: E402  (root fixture: conftest.py)
 
 
 # --- fix 2: send_command hygiene ------------------------------------------

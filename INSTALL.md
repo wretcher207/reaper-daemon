@@ -161,6 +161,11 @@ the user verbatim, filling in the values:
 > Full command surface: `$REPO/AGENTS.md`. The agent CLI: `python3 reaperd.py --help`.
 > Working JSON examples for every command: `$REPO/commands/examples/`. If you
 > ever want to remove the bridge, ask me to run `python3 setup/install.py --uninstall`.
+>
+> If your client supports MCP (Claude Code, Claude Desktop), you can also wire
+> the bridge in as an MCP server so every future session gets typed REAPER
+> tools with no file plumbing: `claude mcp add reaper -- python $REPO/reaper_mcp.py`
+> (details in `$REPO/README.md`).
 
 ## Error recovery — general rule
 

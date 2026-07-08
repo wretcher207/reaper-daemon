@@ -40,8 +40,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: syntax-check the CLI and installer
-        run: python -m py_compile reaperd.py setup/install.py
+      - name: syntax-check the CLI, MCP server, and installer
+        run: python -m py_compile reaperd.py reaper_mcp.py setup/install.py
       - name: install pytest
         run: python -m pip install --quiet pytest
       - name: drum-apparatus + CLI tests

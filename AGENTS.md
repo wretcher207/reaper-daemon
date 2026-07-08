@@ -5,6 +5,12 @@ you read and write JSON files in shared folders, and a Lua script running
 inside REAPER executes them. Works on macOS, Windows, and Linux — the agent
 CLI is a single Python 3 file (`reaperd.py`) with no third-party deps.
 
+If your environment supports MCP, prefer the MCP server over the raw CLI:
+`reaper_mcp.py` (stdio, zero deps, same repo root) exposes these same commands
+as typed tools, plus `analyze_track` / `compare_tracks` mix diagnosis when
+Post Mortem is installed. Wiring instructions are in the README. Everything
+below still applies when you use the CLI directly.
+
 This bridge is plugin-agnostic. It knows nothing about any specific synth, amp
 sim, or drum tool. You discover what a project contains, then act on it. If a
 human asks you to set up controls for plugins you have never seen, use

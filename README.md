@@ -2,13 +2,17 @@
 
 A local file bridge for controlling REAPER from an AI agent — Claude Code,
 Codex, Cursor's terminal agent, anything that can read and write files. No
-network, no socket, no MCP server: the agent drops JSON command files in a
-folder, a Lua script inside REAPER executes them and writes JSON results back.
+network, no socket required: the agent drops JSON command files in a folder, a
+Lua script inside REAPER executes them and writes JSON results back. An
+**optional MCP server** (`reaper_mcp.py`, stdio, same trust model) exposes the
+whole bridge as tools for Claude Desktop, Claude Code, and any other MCP
+client — see [MCP server](#mcp-server--talk-to-reaper-in-plain-english) below.
 
 Works on **macOS, Windows, and Linux**. The bridge itself is pure Lua using
 native REAPER API only (path separators are derived from `package.config`, so
-the same script runs everywhere). The agent-facing CLI is a single Python 3
-file (`reaperd.py`) with no third-party dependencies.
+the same script runs everywhere). The agent-facing CLI (`reaperd.py`) and the
+MCP server (`reaper_mcp.py`) are plain Python 3 files with no third-party
+dependencies.
 
 The bridge is **plugin-agnostic and drum-library-agnostic**. It ships with no
 knowledge of any specific synth, amp sim, or instrument. An agent discovers
@@ -135,6 +139,43 @@ installed name from the VST/CLAP/AU cache before loading. `setparam` works on
 any plugin by parameter index, binary-searching the normalized value that
 produces a target display value, then verifying.
 
+## MCP server — talk to REAPER in plain English
+
+`reaper_mcp.py` wraps the same file bridge as an
+[MCP](https://modelcontextprotocol.io) stdio server, so any MCP client can
+drive REAPER conversationally. Zero dependencies, no network listener — it
+translates tool calls into the same inbox/outbox files, with the same safety
+semantics (undo blocks, `dry_run`, risk gating).
+
+Claude Code:
+
+```bash
+claude mcp add reaper -- python /path/to/reaper-daemon/reaper_mcp.py
+```
+
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{ "mcpServers": { "reaper": {
+    "command": "python",
+    "args": ["C:/path/to/reaper-daemon/reaper_mcp.py"] } } }
+```
+
+Then just ask: *"add a ReaEQ to the bass and carve 2 dB at 300 Hz"*, *"what
+plugins are on the master?"*, *"program a d-beat groove at bar 33"*.
+
+18 tools: project/FX discovery (`get_context`, `scan_fx`,
+`get_fx_parameters`, `get_track_routing`), transport, tracks, FX chains,
+`set_fx_param` (formatted values like `"-16.00 dB"` work), automation
+envelopes, markers/regions, MIDI insertion, `batch` (one undo block),
+post-FX stem capture, and — with
+[Post Mortem](https://github.com/wretcher207/post-mortem) installed —
+`analyze_track` / `compare_tracks`, which hand the calling model measured
+mix data (LUFS, true peak, spectrum, stereo image, masking table) to
+diagnose. Mutations are undoable with one Ctrl/Cmd+Z; destructive tools ask
+the model to confirm intent; audio capture stays behind the
+`allow_risk_level_3` config gate (restart REAPER after changing it).
+
 ## Drum kits — any library, auto-discovered
 
 The DSL drum engine (`skills/drum-apparatus/`) ships a few built-in kit maps
@@ -175,6 +216,7 @@ bridge/reaper_agent_bridge.lua   the bridge (runs inside REAPER, OS-neutral)
 bridge/bridge_config.json        machine-specific config (regenerated)
 bridge/command_schema.md         full command reference
 reaperd.py                       cross-platform agent CLI (Python 3)
+reaper_mcp.py                    MCP stdio server over the same bridge
 setup/install.py                 wire auto-start into REAPER (cross-platform)
 commands/examples/               one JSON example per command
 skills/drum-apparatus/           DSL drum engine + kit-map auto-discovery
