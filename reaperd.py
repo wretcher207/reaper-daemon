@@ -78,7 +78,7 @@ def reaper_running():
                 ["tasklist", "/FI", "IMAGENAME eq REAPER.exe", "/NH"],
                 capture_output=True, text=True, timeout=6,
             )
-            return "REAPER.exe" in (r.stdout or "")
+            return "reaper.exe" in (r.stdout or "").lower()
         if system == "Darwin":
             r = subprocess.run(["pgrep", "-x", "REAPER"], capture_output=True, timeout=6)
             return r.returncode == 0
