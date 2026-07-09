@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.8.1
+-- @version 3.8.2
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -1693,9 +1693,44 @@ local function command_capture_track_audio(command)
     saved_selection[#saved_selection + 1] = reaper.GetSelectedTrack(0, i)
   end
 
+  -- Isolation. "Stems (selected tracks)" can only render a track that holds
+  -- media items; an item-less routing track (e.g. a Kontakt multi-out stem)
+  -- silently falls back to the master mix, so the capture returns the WHOLE
+  -- mix — every stem comes back byte-identical. Force real isolation by
+  -- exclusive-soloing the target for the render, then restoring every track's
+  -- solo state. Verified live 2026-07-09: unsoloed Kick/Snare/Hi_Hats captures
+  -- were identical full-mix renders; soloed, each isolated correctly.
+  local master_track = reaper.GetMasterTrack(0)
+  local isolate = track ~= master_track
+  local track_count = reaper.CountTracks(0)
+  local saved_solo = {}
+  local master_fx_count = 0
+  local saved_master_fx = {}
+  if isolate then
+    for i = 0, track_count - 1 do
+      saved_solo[i] = reaper.GetMediaTrackInfo_Value(reaper.GetTrack(0, i), "I_SOLO")
+    end
+    -- Master-bus FX color every capture (verified 2026-07-09: the master
+    -- limiter added ~7 dB to a soloed kick). Bypass them for the render so the
+    -- measurement reflects the track, not the mastering chain, then restore.
+    master_fx_count = reaper.TrackFX_GetCount(master_track)
+    for i = 0, master_fx_count - 1 do
+      saved_master_fx[i] = reaper.TrackFX_GetEnabled(master_track, i)
+    end
+  end
+
   local autoclose_token = nil
   local ok, result = pcall(function()
     reaper.SetOnlyTrackSelected(track)
+    if isolate then
+      for i = 0, track_count - 1 do
+        reaper.SetMediaTrackInfo_Value(reaper.GetTrack(0, i), "I_SOLO", 0)
+      end
+      reaper.SetMediaTrackInfo_Value(track, "I_SOLO", 1)
+      for i = 0, master_fx_count - 1 do
+        reaper.TrackFX_SetEnabled(master_track, i, false)
+      end
+    end
     reaper.GetSetProjectInfo(0, "RENDER_SETTINGS", 2, true) -- stems, selected tracks, pre-master
     reaper.GetSetProjectInfo(0, "RENDER_BOUNDSFLAG", 0, true) -- custom time bounds
     reaper.GetSetProjectInfo(0, "RENDER_STARTPOS", start_time, true)
@@ -1740,7 +1775,7 @@ local function command_capture_track_audio(command)
       sample_rate = tonumber(payload.sample_rate) or 48000,
       render_loudness_lufs = finite_or_nil(lufs_i),
       render_stats_raw = stats ~= "" and stats or nil,
-      note = "Stems render (pre-master). Parent-bus FX are NOT printed into this capture.",
+      note = "Isolated by exclusive-soloing the target; master-bus FX bypassed for the render so the mastering chain doesn't color the measurement. Item-less routing tracks render through the master path, so parent-bus FX may still be printed. Solo and master-FX states restored after.",
       render_autoclose_warning = autoclose_token.guaranteed and nil or autoclose_token.reason,
     }
   end)
@@ -1755,6 +1790,14 @@ local function command_capture_track_audio(command)
   reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", saved.pattern, true)
   reaper.GetSetProjectInfo_String(0, "RENDER_FORMAT", saved.format, true)
   restore_render_autoclose(autoclose_token)
+  if isolate then
+    for i = 0, track_count - 1 do
+      reaper.SetMediaTrackInfo_Value(reaper.GetTrack(0, i), "I_SOLO", saved_solo[i] or 0)
+    end
+    for i = 0, master_fx_count - 1 do
+      reaper.TrackFX_SetEnabled(master_track, i, saved_master_fx[i])
+    end
+  end
   if #saved_selection > 0 then
     reaper.SetOnlyTrackSelected(saved_selection[1])
     for i = 2, #saved_selection do
