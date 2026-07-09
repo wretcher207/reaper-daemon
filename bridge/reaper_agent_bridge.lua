@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.8.0
+-- @version 3.8.1
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -1566,6 +1566,39 @@ local function command_delete_items_in_range(command)
   return { removed_count = removed, range = { start = start_time, ["end"] = end_time } }
 end
 
+-- REAPER's render action (42230) is synchronous AND leaves the "Rendering to
+-- File" progress window open until it is dismissed, UNLESS the window's
+-- "Automatically close when finished" checkbox is ticked. That checkbox is the
+-- config var `renderclosewhendone` bit 0 (&1); on a fresh install it is off, so
+-- Main_OnCommand(42230) never returns and the whole defer loop hangs (observed
+-- ~11 min) until the window is closed by hand. Force the bit on for our render
+-- and restore the user's setting afterward. This is the bridge's ONLY use of
+-- SWS (SNM_*), so degrade gracefully when SWS is absent: we cannot force the
+-- checkbox, so the caller surfaces a warning instead of silently risking a hang.
+local RENDER_AUTOCLOSE_VAR = "renderclosewhendone"
+
+local function ensure_render_autoclose()
+  if not (reaper.SNM_GetIntConfigVar and reaper.SNM_SetIntConfigVar) then
+    return { guaranteed = false, reason = "SWS not installed: cannot force render-window auto-close" }
+  end
+  local cur = reaper.SNM_GetIntConfigVar(RENDER_AUTOCLOSE_VAR, -1)
+  if cur == -1 then
+    -- -1 is the "var not found" sentinel; the real bitfield is never negative.
+    return { guaranteed = false, reason = "renderclosewhendone unavailable" }
+  end
+  if cur & 1 == 1 then
+    return { guaranteed = true }  -- already auto-closing; leave it, nothing to restore
+  end
+  reaper.SNM_SetIntConfigVar(RENDER_AUTOCLOSE_VAR, cur | 1)
+  return { guaranteed = true, restore = cur }
+end
+
+local function restore_render_autoclose(token)
+  if token and token.restore ~= nil and reaper.SNM_SetIntConfigVar then
+    reaper.SNM_SetIntConfigVar(RENDER_AUTOCLOSE_VAR, token.restore)
+  end
+end
+
 local function command_render(command)
   if not config.allow_risk_level_3 then
     error("RENDER_BLOCKED: render is gated; set allow_risk_level_3 true in bridge_config.json")
@@ -1589,11 +1622,14 @@ local function command_render(command)
   write_lock("render")
   -- Render with the project's most recent render settings (format, sample rate,
   -- etc. must be configured once in REAPER's Render dialog).
+  local autoclose = ensure_render_autoclose()
   reaper.Main_OnCommand(42230, 0) -- 42230 = File: Render project
+  restore_render_autoclose(autoclose)
   return {
     rendered = true,
     output_file = select(2, reaper.GetSetProjectInfo_String(0, "RENDER_FILE", "", false)),
     note = "Render used REAPER's last-saved render settings.",
+    render_autoclose_warning = autoclose.guaranteed and nil or autoclose.reason,
   }
 end
 
@@ -1657,6 +1693,7 @@ local function command_capture_track_audio(command)
     saved_selection[#saved_selection + 1] = reaper.GetSelectedTrack(0, i)
   end
 
+  local autoclose_token = nil
   local ok, result = pcall(function()
     reaper.SetOnlyTrackSelected(track)
     reaper.GetSetProjectInfo(0, "RENDER_SETTINGS", 2, true) -- stems, selected tracks, pre-master
@@ -1676,6 +1713,7 @@ local function command_capture_track_audio(command)
     -- Same blocking-render heartbeat/lock dance as command_render.
     atomic_write_json(paths.heartbeat, heartbeat_payload({ busy = "render" }))
     write_lock("render")
+    autoclose_token = ensure_render_autoclose()
     reaper.Main_OnCommand(42230, 0) -- File: Render project
 
     local f = io.open(target, "rb")
@@ -1703,6 +1741,7 @@ local function command_capture_track_audio(command)
       render_loudness_lufs = finite_or_nil(lufs_i),
       render_stats_raw = stats ~= "" and stats or nil,
       note = "Stems render (pre-master). Parent-bus FX are NOT printed into this capture.",
+      render_autoclose_warning = autoclose_token.guaranteed and nil or autoclose_token.reason,
     }
   end)
 
@@ -1715,6 +1754,7 @@ local function command_capture_track_audio(command)
   reaper.GetSetProjectInfo_String(0, "RENDER_FILE", saved.file, true)
   reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", saved.pattern, true)
   reaper.GetSetProjectInfo_String(0, "RENDER_FORMAT", saved.format, true)
+  restore_render_autoclose(autoclose_token)
   if #saved_selection > 0 then
     reaper.SetOnlyTrackSelected(saved_selection[1])
     for i = 2, #saved_selection do
@@ -2294,6 +2334,8 @@ if _G.REAPER_BRIDGE_SELFTEST then
     error_code_from = error_code_from,
     safe_id = safe_id,
     lock_verdict = lock_verdict,
+    ensure_render_autoclose = ensure_render_autoclose,
+    restore_render_autoclose = restore_render_autoclose,
   }
 end
 

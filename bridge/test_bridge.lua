@@ -178,5 +178,48 @@ ok(lv({ started = lnow - 3600, busy = "render" }, lnow) ~= nil,
 eq(lv({ started = lnow - 7 * 3600, busy = "render" }, lnow), nil,
    "ancient render lock reclaimed (power loss no longer bricks the bridge)")
 
+-- Render-dialog-hang fix: force renderclosewhendone bit0 (auto-close) on for a
+-- render, restore the user's setting after. Needs SWS (SNM_*); must degrade,
+-- never hang, when SWS is absent.
+local ear = B.ensure_render_autoclose
+local rar = B.restore_render_autoclose
+
+-- No SWS -> cannot force auto-close; degrade to "not guaranteed" (caller warns).
+_G.reaper.SNM_GetIntConfigVar = nil
+_G.reaper.SNM_SetIntConfigVar = nil
+local tok = ear()
+eq(tok.guaranteed, false, "no SWS -> not guaranteed")
+ok(tok.restore == nil, "no SWS -> nothing to restore")
+rar(tok) -- must be a harmless no-op, not an error
+
+-- SWS present: back the config var with a table so get/set round-trips.
+local store = { renderclosewhendone = 2097156 } -- real on-disk value: bit0 clear (auto-close OFF)
+_G.reaper.SNM_GetIntConfigVar = function(name, errval)
+  local v = store[name]; if v == nil then return errval end; return v
+end
+_G.reaper.SNM_SetIntConfigVar = function(name, val) store[name] = val; return true end
+
+-- bit0 clear -> force it on, return the original for restore, preserve other bits.
+tok = ear()
+eq(tok.guaranteed, true, "SWS + bit clear -> guaranteed")
+eq(tok.restore, 2097156, "original value captured for restore")
+eq(store.renderclosewhendone & 1, 1, "auto-close bit forced on for the render")
+eq(store.renderclosewhendone, 2097157, "only bit0 flipped, other bits preserved")
+rar(tok)
+eq(store.renderclosewhendone, 2097156, "user's setting restored after render")
+
+-- bit0 already set -> leave it alone, nothing to restore.
+store.renderclosewhendone = 2097157
+tok = ear()
+eq(tok.guaranteed, true, "SWS + bit already set -> guaranteed")
+ok(tok.restore == nil, "already auto-closing -> no restore needed")
+eq(store.renderclosewhendone, 2097157, "already-on value untouched")
+
+-- config var missing (SNM returns the error sentinel) -> degrade, don't touch.
+store.renderclosewhendone = nil
+tok = ear()
+eq(tok.guaranteed, false, "missing config var -> not guaranteed")
+ok(tok.restore == nil, "missing config var -> nothing to restore")
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))
