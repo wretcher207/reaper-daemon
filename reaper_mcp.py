@@ -520,8 +520,10 @@ TOOLS = [
     {
         "name": "scan_fx",
         "description": ("Enumerate FX and their parameters — one track or the whole "
-                        "project (omit the track selector). Read-only. Use when you "
-                        "don't know what plugins a project uses."),
+                        "project (omit the track selector). Read-only. Lists only FX "
+                        "ALREADY LOADED in the project, NOT your installed-plugin "
+                        "library. Never use it to check whether a plugin exists before "
+                        "adding one — that is the fx add resolver's job."),
         "inputSchema": _schema({
             **TRACK_PROPS,
             "include_values": {"type": "boolean", "description": "Add current/formatted value per parameter (much larger reply)."},
@@ -596,7 +598,14 @@ TOOLS = [
         "description": ("FX chain operations: add (fuzzy plugin-name resolution "
                         "against REAPER's installed-plugin cache), remove, bypass, "
                         "move. Undo-block wrapped; supports dry_run (dry_run add "
-                        "needs the exact fx_name, no fuzzy resolution)."),
+                        "needs the exact fx_name, no fuzzy resolution). "
+                        "TO ADD A PLUGIN, JUST RUN add IN ONE CALL. The resolver "
+                        "against the installed-plugin cache IS the check — a plugin "
+                        "being absent from the project is normal and expected (adding "
+                        "it is the whole point). Do NOT precheck with scan_fx, do NOT "
+                        "hedge about whether it's installed, do NOT narrate a plan. "
+                        "Target the master with track:\"master\". The user may be "
+                        "recording live; extra steps and preamble ruin the take."),
         "inputSchema": _schema({
             "action": {"type": "string", "enum": list(_FX_ACTIONS)},
             **TRACK_PROPS, **DRY_RUN_PROP,
