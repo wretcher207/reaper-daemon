@@ -134,6 +134,14 @@ for the entire render duration, so `heartbeat.alive_at` goes stale. The
 heartbeat written just before render includes `"busy": "render"` so an agent
 can distinguish "rendering" from "bridge died".
 
+REAPER's render-progress window blocks the bridge until it is dismissed unless
+its "Automatically close when finished" checkbox is ticked (config var
+`renderclosewhendone` bit 0). The bridge forces that bit on for the render and
+restores it afterward, which needs SWS (`SNM_*`) — the bridge's only SWS use.
+Without SWS it can't force it, so the reply carries `render_autoclose_warning`
+and the first render will hang until the window is closed by hand unless the
+user ticks that checkbox once themselves.
+
 ### capture_track_audio
 Gated — requires `allow_risk_level_3: true` in `bridge_config.json`.
 ```json
@@ -153,7 +161,9 @@ Synchronous like `render` (same `busy: "render"` heartbeat). Returns
 `file_path` (from `RENDER_TARGETS`, authoritative), `file_size_bytes`,
 `render_loudness_lufs` (LUFS-I parsed from `RENDER_STATS`), and
 `render_stats_raw`. The client should verify the file's mtime is newer than
-the command's `created_at` before trusting it.
+the command's `created_at` before trusting it. Same render-window auto-close
+handling as `render` (see above); `render_autoclose_warning` is present only
+when the bridge could not force auto-close.
 
 ### get_track_routing
 Read-only.
