@@ -164,7 +164,8 @@ the user verbatim, filling in the values:
 >
 > If your client supports MCP (Claude Code, Claude Desktop), you can also wire
 > the bridge in as an MCP server so every future session gets typed REAPER
-> tools with no file plumbing: `claude mcp add reaper -- python $REPO/reaper_mcp.py`
+> tools with no file plumbing: `claude mcp add reaper -- python3 $REPO/reaper_mcp.py`
+> (use `python` on Windows if `python3` is not on PATH)
 > (details in `$REPO/README.md`).
 
 ## Error recovery — general rule

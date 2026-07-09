@@ -150,8 +150,10 @@ semantics (undo blocks, `dry_run`, risk gating).
 Claude Code:
 
 ```bash
-claude mcp add reaper -- python /path/to/reaper-daemon/reaper_mcp.py
+claude mcp add reaper -- python3 /path/to/reaper-daemon/reaper_mcp.py
 ```
+
+(Use `python` instead of `python3` on Windows if that's what is on PATH.)
 
 Claude Desktop (`claude_desktop_config.json`):
 
