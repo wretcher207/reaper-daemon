@@ -186,11 +186,11 @@ def tool_get_fx_parameters(args):
         if args.get(key) is not None:
             base[key] = args[key]
     base = {k: v for k, v in base.items() if v is not None}
-    params, err = reaperd.scan_fx_parameters(
+    data, err = reaperd.scan_fx_parameter_data(
         base, BRIDGE_ROOT, include_values=args.get("include_values", True))
     if err:
         return _text(json.dumps({"ok": False, "error": err}, indent=1), is_error=True)
-    return _text(json.dumps({"ok": True, "parameters": params}, indent=1))
+    return _text(json.dumps({"ok": True, **data}, indent=1))
 
 
 def tool_get_track_routing(args):

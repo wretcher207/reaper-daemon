@@ -59,6 +59,38 @@ eq(pdn("inf"), 1e30, "inf endpoint")
 eq(pdn("-inf"), -1e30, "-inf endpoint")
 eq(pdn("Bell"), nil, "enum/string rejected")
 
+-- P1-001: discovery responses use REAPER's real FX GUID and keep the display
+-- index separate from the encoded API index used for input FX.
+local fx_guid_calls = {}
+_G.reaper.TrackFX_GetFXGUID = function(track, api_index)
+  fx_guid_calls[#fx_guid_calls + 1] = { track = track, api_index = api_index }
+  return "{FX-GUID-" .. tostring(api_index) .. "}"
+end
+local fxs = B.fx_summary("track-object", 0x1000002, 2, "input", "VST3: Test", {
+  parameter_count = 37,
+})
+eq(fxs.index, 2, "FX summary keeps display index")
+eq(fxs.api_index, 0x1000002, "FX summary keeps encoded API index")
+eq(fxs.scope, "input", "FX summary keeps scope")
+eq(fxs.name, "VST3: Test", "FX summary keeps name")
+eq(fxs.guid, "{FX-GUID-16777218}", "FX summary uses real REAPER GUID")
+eq(fxs.parameter_count, 37, "FX summary keeps extra fields")
+eq(fx_guid_calls[1].track, "track-object", "FX GUID receives the real track")
+eq(fx_guid_calls[1].api_index, 0x1000002, "FX GUID receives encoded API index")
+
+-- Live GUID smoke testing exposed a Lua truthiness trap in batch results:
+-- `ok and nil or tostring(data)` always selected tostring(data), so successful
+-- subcommands carried a fake `error: table: ...`. Success and failure fields
+-- must be mutually exclusive.
+local br_ok = B.batch_result(3, "scan_fx", true, { fx_count = 1 })
+eq(br_ok.ok, true, "batch success stays successful")
+eq(br_ok.data.fx_count, 1, "batch success carries data")
+eq(br_ok.error, nil, "batch success omits error")
+local br_fail = B.batch_result(4, "get_fx_parameters", false, "NO_FX: missing")
+eq(br_fail.ok, false, "batch failure stays failed")
+eq(br_fail.data, nil, "batch failure omits data")
+eq(br_fail.error, "NO_FX: missing", "batch failure carries error")
+
 -- C1: writing the same path twice must succeed (this is what froze on Windows).
 local p = join(sandbox, "aw_test.json")
 B.atomic_write_json(p, { a = 1 })

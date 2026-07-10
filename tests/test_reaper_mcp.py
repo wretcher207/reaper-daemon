@@ -125,6 +125,54 @@ def test_get_context_round_trip(root):
     assert "isError" not in resp["result"]
 
 
+def test_scan_fx_round_trip_preserves_track_and_fx_guids(root):
+    data = {
+        "tracks": [{
+            "index": 2,
+            "name": "Guitar",
+            "guid": "{TRACK-GUITAR}",
+            "fx": [{
+                "index": 0,
+                "api_index": 0,
+                "scope": "track",
+                "name": "VST3: Amp",
+                "guid": "{FX-AMP}",
+            }],
+        }],
+    }
+    fake_bridge(root, {"ok": True, "type": "scan_fx", "data": data})
+    resp = call("scan_fx", {"track": "Guitar"})
+    body = json.loads(result_text(resp))
+    track = body["data"]["tracks"][0]
+    assert track["guid"] == "{TRACK-GUITAR}"
+    assert track["fx"][0]["guid"] == "{FX-AMP}"
+    assert track["fx"][0]["scope"] == "track"
+
+
+def test_get_fx_parameters_round_trip_preserves_track_and_fx_guids(root):
+    data = {
+        "track": {"index": 2, "name": "Guitar", "guid": "{TRACK-GUITAR}"},
+        "fx": {
+            "index": 0,
+            "api_index": 0,
+            "scope": "track",
+            "name": "VST3: Amp",
+            "guid": "{FX-AMP}",
+            "parameter_count": 1,
+        },
+        "parameters": [{"index": 0, "name": "Gain"}],
+        "paging": {"has_more": False},
+    }
+    fake_bridge(root, {"ok": True, "type": "get_fx_parameters", "data": data})
+    resp = call("get_fx_parameters", {"track": "Guitar", "fx_index": 0,
+                                       "fx_scope": "track"})
+    body = json.loads(result_text(resp))
+    assert body["track"]["guid"] == "{TRACK-GUITAR}"
+    assert body["fx"]["guid"] == "{FX-AMP}"
+    assert body["fx"]["api_index"] == 0
+    assert body["parameters"][0]["name"] == "Gain"
+
+
 def test_bridge_error_becomes_is_error(root):
     fake_bridge(root, {"ok": False, "type": "get_track_routing",
                        "error": {"code": "NO_TARGET_TRACK", "details": "no track"}})

@@ -174,10 +174,18 @@ def test_eq_happy_path_still_reports_live(monkeypatch, root, capsys):
 # --- fix 9 (phase 2): paginated FX param scan with the field the bridge reads
 
 def test_scan_fx_parameters_paginates_past_bridge_cap(monkeypatch):
-    page1 = {"ok": True, "data": {"parameters": [{"index": i} for i in range(1000)],
-                                  "has_more": True}}
-    page2 = {"ok": True, "data": {"parameters": [{"index": 1000 + i} for i in range(200)],
-                                  "has_more": False}}
+    page1 = {"ok": True, "data": {
+        "track": {"guid": "{TRACK}"},
+        "fx": {"guid": "{FX}"},
+        "parameters": [{"index": i} for i in range(1000)],
+        "paging": {"has_more": True},
+    }}
+    page2 = {"ok": True, "data": {
+        "track": {"guid": "{TRACK}"},
+        "fx": {"guid": "{FX}"},
+        "parameters": [{"index": 1000 + i} for i in range(200)],
+        "paging": {"has_more": False},
+    }}
     seen = []
 
     def fake(cmd_type, payload, **kw):
@@ -191,6 +199,22 @@ def test_scan_fx_parameters_paginates_past_bridge_cap(monkeypatch):
     assert seen[0]["limit"] == 1000               # the field the bridge reads...
     assert "max_params" not in seen[0]            # ...not the one it ignores
     assert seen[0]["offset"] == 0 and seen[1]["offset"] == 1000
+
+
+def test_scan_fx_parameter_data_preserves_first_page_identity(monkeypatch):
+    reply = {"ok": True, "data": {
+        "track": {"name": "Bass", "guid": "{TRACK-BASS}"},
+        "fx": {"name": "VST3: EQ", "guid": "{FX-EQ}", "scope": "track"},
+        "parameters": [{"index": 0, "name": "Gain"}],
+        "paging": {"has_more": False},
+    }}
+    monkeypatch.setattr(reaperd, "send_type", lambda *a, **k: reply)
+    data, err = reaperd.scan_fx_parameter_data(
+        {"target_track_name": "Bass", "fx_name_contains": "EQ"}, None)
+    assert err is None
+    assert data["track"]["guid"] == "{TRACK-BASS}"
+    assert data["fx"]["guid"] == "{FX-EQ}"
+    assert data["parameters"] == [{"index": 0, "name": "Gain"}]
 
 
 def test_scan_fx_parameters_error_passthrough(monkeypatch):

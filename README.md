@@ -178,6 +178,10 @@ diagnose. Mutations are undoable with one Ctrl/Cmd+Z; destructive tools ask
 the model to confirm intent; audio capture stays behind the
 `allow_risk_level_3` config gate (restart REAPER after changing it).
 
+FX discovery returns REAPER's real track and FX GUIDs alongside names and
+indices. Use the GUIDs as stable identity when planning a later change: names
+can be duplicated, and indices move when a user edits the chain.
+
 ## Drum kits — any library, auto-discovered
 
 The DSL drum engine (`skills/drum-apparatus/`) ships a few built-in kit maps

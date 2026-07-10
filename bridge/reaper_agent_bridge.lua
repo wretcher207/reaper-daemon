@@ -927,6 +927,24 @@ local function command_solo_track(command)
   return { solo = payload.solo ~= false }
 end
 
+-- Build the identity block shared by every FX discovery response. `index` is
+-- the human-facing zero-based index within its scope; `api_index` is REAPER's
+-- encoded index (input FX carry the 0x1000000 offset). The GUID is the stable
+-- identity: names can be duplicated and indices shift when a chain is edited.
+local function fx_summary(track, api_index, display_fx_index, scope, name, extra)
+  local summary = {
+    index = display_fx_index or api_index,
+    api_index = api_index,
+    scope = scope or "track",
+    name = name,
+    guid = reaper.TrackFX_GetFXGUID(track, api_index),
+  }
+  if extra then
+    for key, value in pairs(extra) do summary[key] = value end
+  end
+  return summary
+end
+
 local function command_get_fx_parameters(command)
   local payload = command.payload or {}
   local track, track_index, api_index, fx_name, fx_scope, display_fx_index = find_fx(payload)
@@ -952,7 +970,9 @@ local function command_get_fx_parameters(command)
   end
   return {
     track = { index = track_index, name = track_name, guid = reaper.GetTrackGUID(track) },
-    fx = { index = display_fx_index or api_index, api_index = api_index, scope = fx_scope or "track", name = fx_name, parameter_count = param_count },
+    fx = fx_summary(track, api_index, display_fx_index, fx_scope, fx_name, {
+      parameter_count = param_count,
+    }),
     parameters = params,
     paging = {
       offset = offset,
@@ -1909,11 +1929,10 @@ local function scan_track_fx(track, include_values, max_params)
     for fx = 0, count - 1 do
       local api_index = api_offset + fx
       local _, fx_name = reaper.TrackFX_GetFXName(track, api_index, "")
-      local entry = {
-        index = fx, api_index = api_index, scope = scope, name = fx_name,
+      local entry = fx_summary(track, api_index, fx, scope, fx_name, {
         enabled = reaper.TrackFX_GetEnabled(track, api_index),
         parameter_count = reaper.TrackFX_GetNumParams(track, api_index),
-      }
+      })
       entry.parameters = {}
       local limit = math.min(entry.parameter_count, max_params)
       for p = 0, limit - 1 do
@@ -2096,6 +2115,16 @@ end
 
 -- batch replays sub-commands through run_command, so it's defined here (after
 -- run_command) and registered with the handlers below.
+local function batch_result(index, command_type, succeeded, data)
+  local result = { index = index, type = command_type, ok = succeeded }
+  if succeeded then
+    result.data = data
+  else
+    result.error = tostring(data)
+  end
+  return result
+end
+
 local function command_batch(command)
   local payload = command.payload or {}
   local commands = payload.commands or {}
@@ -2103,7 +2132,7 @@ local function command_batch(command)
   reaper.Undo_BeginBlock()
   for i, sub in ipairs(commands) do
     local ok, data = pcall(run_command, sub, true)
-    results[#results + 1] = { index = i, type = sub.type, ok = ok, data = ok and data or nil, error = ok and nil or tostring(data) }
+    results[#results + 1] = batch_result(i, sub.type, ok, data)
     if not ok and payload.stop_on_error ~= false then
       reaper.Undo_EndBlock(command.undo_label or payload.undo_label or "Agent: batch failed", -1)
       local inner = error_code_from(data, "BATCH_FAILED")
@@ -2402,6 +2431,8 @@ if _G.REAPER_BRIDGE_SELFTEST then
     lock_verdict = lock_verdict,
     ensure_render_autoclose = ensure_render_autoclose,
     restore_render_autoclose = restore_render_autoclose,
+    fx_summary = fx_summary,
+    batch_result = batch_result,
   }
 end
 

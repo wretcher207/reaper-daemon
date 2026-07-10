@@ -264,26 +264,43 @@ def send_type(cmd_type, payload, bridge_root=None, timeout_ms=10000,
         return {"ok": False, "error": {"code": "BAD_REPLY", "details": str(e)}}
 
 
-def scan_fx_parameters(base, bridge_root, include_values=False):
-    """Every parameter of one FX, paginated past the bridge's 1000-per-reply
-    cap (Kontakt-scale plugins) with the field the bridge actually reads
-    (`limit`; `max_params` was silently ignored, hiding EQ bands past index
-    200 on big plugins). Returns (params, None) or (None, error)."""
+def scan_fx_parameter_data(base, bridge_root, include_values=False):
+    """Full identity + every parameter of one FX across paginated replies.
+
+    The first page owns the resolved track/FX identity. Keeping that metadata
+    alongside the combined parameter list lets MCP and later structured clients
+    use real GUIDs instead of trying to reconstruct identity from names/indices.
+    Returns (data, None) or (None, error).
+    """
     payload = dict(base)
     if include_values:
         payload["include_values"] = True
     params, offset = [], 0
+    identity = {}
     while True:
         res = send_type("get_fx_parameters", {**payload, "limit": 1000, "offset": offset},
                         bridge_root=bridge_root, resolve=False, repair=False)
         if not res.get("ok"):
             return None, res.get("error")
         data = res.get("data", {})
+        if not identity:
+            identity = {key: data[key] for key in ("track", "fx") if key in data}
         chunk = data.get("parameters", [])
         params.extend(chunk)
-        if not data.get("has_more") or not chunk:
-            return params, None
+        # Current bridge replies nest paging metadata; tolerate the legacy
+        # top-level shape too so older installed bridges remain compatible.
+        paging = data.get("paging") or data
+        if not paging.get("has_more") or not chunk:
+            return {**identity, "parameters": params}, None
         offset += len(chunk)
+
+
+def scan_fx_parameters(base, bridge_root, include_values=False):
+    """Backward-compatible list-only wrapper used by the existing CLI."""
+    data, err = scan_fx_parameter_data(base, bridge_root, include_values)
+    if err:
+        return None, err
+    return data["parameters"], None
 
 
 # ---------------------------------------------------------------------------

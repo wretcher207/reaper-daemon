@@ -80,6 +80,21 @@ selection, every track (with FX names when `include_fx`), markers, regions.
   "fx_scope": "all", "param_name_contains": "Gain",
   "limit": 200, "offset": 0, "include_empty": false }
 ```
+The response identifies the resolved objects with stable REAPER GUIDs:
+```json
+{
+  "track": { "index": 4, "name": "Bass", "guid": "{TRACK-GUID}" },
+  "fx": {
+    "index": 0, "api_index": 0, "scope": "track",
+    "name": "VST3: Pro-Q 4", "guid": "{FX-GUID}",
+    "parameter_count": 347
+  },
+  "parameters": []
+}
+```
+`fx.index` is zero-based within `fx.scope`; `fx.api_index` is REAPER's encoded
+index. Use `track.guid` + `fx.guid` as stable identity. Names can be duplicated,
+and both indices can shift when a chain is edited.
 
 ### scan_fx
 Every FX and its parameters across the project. Omit the track selector to scan
@@ -89,6 +104,9 @@ all tracks.
 ```
 `include_values: true` adds current value / formatted value per parameter (much
 larger). With `include_values: false` you get parameter names and indices only.
+Every `tracks[]` entry carries its real track `guid`; every `tracks[].fx[]`
+entry carries its real FX `guid` plus `index`, `api_index`, and `scope` using the
+same identity rules as `get_fx_parameters`.
 
 ### discover_drum_map
 Dump a drum track's MIDI note names (the `.midnam` the drum library installed)
