@@ -199,6 +199,22 @@ eq(sid("x..y", "fb"), "fb", "dot-dot anywhere rejected")
 eq(sid(42, "fb"), "fb", "non-string rejected")
 eq(sid(nil, "fb"), "fb", "missing id falls back")
 
+-- Capture provenance is a machine-readable contract. Callers must be able to
+-- distinguish a verified isolated track from a master/full-mix fallback without
+-- parsing a human-facing note.
+local cp = B.capture_provenance
+local isolated = cp(true, false)
+eq(isolated.capture_scope, "isolated_track", "isolated capture scope")
+eq(isolated.isolation_verified, true, "isolated capture verified")
+
+local full_mix = cp(false, false)
+eq(full_mix.capture_scope, "full_mix", "item-track fallback scope")
+eq(full_mix.isolation_verified, false, "full-mix fallback is unverified")
+
+local master = cp(false, true)
+eq(master.capture_scope, "master_output", "master capture scope")
+eq(master.isolation_verified, false, "master output is not an isolated track")
+
 -- Fix 12 (2026-07-02 review): render locks reclaim after a generous bound.
 local lv = B.lock_verdict
 local lnow = os.time()
