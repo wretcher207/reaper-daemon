@@ -59,6 +59,35 @@ wrong plugin (→ `AMBIGUOUS_SCOPE`).
 
 **Parameter** — `param_index` (0-based) or `param_name_contains`.
 
+### Stable discovery identities
+
+Read-only discovery exposes REAPER's real identities; the bridge never derives
+them from display names or array positions:
+
+- `scan_fx.tracks[].guid`
+- `scan_fx.tracks[].fx[].guid`
+- `scan_fx.tracks[].fx[].index`
+- `scan_fx.tracks[].fx[].api_index`
+- `scan_fx.tracks[].fx[].scope`
+- `get_fx_parameters.track.guid`
+- `get_fx_parameters.fx.guid`
+- `get_fx_parameters.fx.index`
+- `get_fx_parameters.fx.api_index`
+- `get_fx_parameters.fx.scope`
+
+Track and FX GUIDs are the stable identity pair. `index` is zero-based within
+`scope`; `api_index` is REAPER's encoded index and is an implementation detail
+for clients that need to correlate raw API output. Names can be duplicated and
+indices can change whenever the project or FX chain is edited.
+
+These fields are additive to the existing response objects. Consumers should
+ignore fields they do not use and must not require a fixed object-key order.
+The bridge will not silently replace a GUID with a synthetic value. If REAPER
+does not provide an identity, a safety-sensitive consumer must fail closed
+rather than reconstructing one from a name or index. Before a later mutation,
+rescan and verify that the GUID, scope, index, and verified name still describe
+the same object.
+
 **Position object** — used by cursor, markers, automation, MIDI placement:
 
 ```json
