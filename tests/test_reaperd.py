@@ -27,6 +27,27 @@ def test_auto_id_has_real_entropy(root):
     assert len(cid.rsplit("-", 1)[-1]) == 16  # token_hex(8)
 
 
+@pytest.mark.parametrize("command_id", ["../escape", "subdir/name", "x..y"])
+def test_unsafe_command_id_is_rejected_before_queue_write(root, command_id):
+    with pytest.raises(ValueError, match="unsafe command id"):
+        reaperd.send_command(
+            {"id": command_id, "type": "ping", "payload": {}}, bridge_root=root
+        )
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_unsafe_command_id_cannot_delete_a_stale_reply_outside_outbox(root):
+    # `../escape` used to make the stale-reply cleanup target root/escape.json.
+    stale = os.path.join(root, "escape.json")
+    with open(stale, "w", encoding="utf-8") as f:
+        f.write("must survive invalid id rejection")
+    with pytest.raises(ValueError, match="unsafe command id"):
+        reaperd.send_command(
+            {"id": "../escape", "type": "ping", "payload": {}}, bridge_root=root
+        )
+    assert os.path.exists(stale)
+
+
 def test_stale_reply_is_not_answered_as_new_result(root):
     # Old bug: an unread reply with the same id was returned instantly as the
     # NEW command's result. It must be cleared before send, so with no bridge
@@ -74,6 +95,14 @@ def test_send_wait_exits_1_on_ok_false(root, tmp_path):
 def test_send_wait_exits_0_on_ok_true(root, tmp_path):
     fake_bridge(root, {"ok": True, "data": {}})
     assert reaperd.cmd_send(_send_args(root, tmp_path)) == 0
+
+
+def test_send_rejects_unsafe_command_id_cleanly(root, tmp_path, capsys):
+    args = _send_args(root, tmp_path, wait=False)
+    with open(args.file, "w", encoding="utf-8") as f:
+        json.dump({"id": "../escape", "type": "ping", "payload": {}}, f)
+    assert reaperd.cmd_send(args) == 1
+    assert "unsafe command id" in capsys.readouterr().err
 
 
 # --- fix 4: setparam honest verdicts ---------------------------------------

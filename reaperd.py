@@ -43,6 +43,7 @@ BRIDGE_ROOT = os.path.abspath(os.path.expanduser(
     os.environ.get("REAPER_DAEMON_ROOT")
     or os.path.dirname(os.path.abspath(__file__))
 ))
+COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 BEGIN_MARKER = "-- >>> reaper-agent-bridge (managed) >>>"
 END_MARKER = "-- <<< reaper-agent-bridge (managed) <<<"
@@ -165,6 +166,32 @@ def repair_set_fx_param(payload):
 # Core send / poll
 # ---------------------------------------------------------------------------
 
+def _command_id(value):
+    """Normalize a queue filename component or reject it before filesystem use."""
+    cid = str(value if value is not None else "").strip()
+    if not cid or cid == "<auto>":
+        return None
+    if not COMMAND_ID_RE.fullmatch(cid) or ".." in cid:
+        raise ValueError(
+            "unsafe command id; use letters, numbers, dot, underscore, or hyphen "
+            "without '..'"
+        )
+    return cid
+
+
+def _queue_file(bridge_root, queue_name, cid):
+    """Build a queue path and prove it remains inside its intended directory."""
+    queue_dir = os.path.abspath(os.path.join(bridge_root, queue_name))
+    path = os.path.abspath(os.path.join(queue_dir, cid + ".json"))
+    try:
+        contained = os.path.commonpath((queue_dir, path)) == queue_dir
+    except ValueError:
+        contained = False
+    if not contained:
+        raise ValueError("unsafe queue path")
+    return path
+
+
 def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=False):
     """Write one command JSON atomically to inbox/, optionally poll outbox/.
 
@@ -173,11 +200,11 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
     """
     bridge_root = bridge_root or BRIDGE_ROOT
     cmd = dict(cmd)
-    cid = str(cmd.get("id", "")).strip()
-    if not cid or cid == "<auto>":
+    cid = _command_id(cmd.get("id"))
+    if cid is None:
         stamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
         cid = f"cli-{stamp}-{secrets.token_hex(8)}"
-        cmd["id"] = cid
+    cmd["id"] = cid
     cmd.setdefault("version", 3)
     cmd.setdefault("created_at", datetime.datetime.now().astimezone().isoformat())
     cmd.setdefault("created_by", "cli")
@@ -186,8 +213,8 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
     if token:
         cmd.setdefault("token", token)
 
-    inbox = os.path.join(bridge_root, "inbox", cid + ".json")
-    outbox = os.path.join(bridge_root, "outbox", cid + ".json")
+    inbox = _queue_file(bridge_root, "inbox", cid)
+    outbox = _queue_file(bridge_root, "outbox", cid)
     os.makedirs(os.path.dirname(inbox), exist_ok=True)
 
     # A leftover reply with this id (fixed-id command file, or an unread reply
@@ -356,10 +383,11 @@ def cmd_send(args):
     try:
         cid, reply = send_command(cmd, wait=args.wait, timeout_ms=args.timeout,
                                   bridge_root=args.bridge_root, verbose=True)
-    except TimeoutError as e:
+    except (TimeoutError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
-        print("       (is the bridge running? try: python3 reaperd.py status)",
-              file=sys.stderr)
+        if isinstance(e, TimeoutError):
+            print("       (is the bridge running? try: python3 reaperd.py status)",
+                  file=sys.stderr)
         return 1
     if reply is not None:
         print(reply)

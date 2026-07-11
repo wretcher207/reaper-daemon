@@ -24,6 +24,11 @@ the project. Read-only commands ignore `dry_run` and execute normally.
 command must include a matching `token` or it's rejected with `AUTH_FAILED`.
 `reaperd.py` fills it in automatically from the same config. Off by default.
 
+`id` is a queue filename component: it must contain only letters, numbers,
+dot, underscore, and hyphen, and must not contain `..`. `reaperd.py` rejects
+unsafe supplied IDs before it reads or writes any queue path, then verifies the
+constructed path remains inside its intended queue directory.
+
 ## Result
 
 ```json
@@ -167,18 +172,22 @@ Gated — requires `allow_risk_level_3: true` in `bridge_config.json`.
   "output_file": "/tmp/reaper-diagnosis/rhythm-l-20260702T143000.wav",
   "sample_rate": 48000 }
 ```
-Renders ONE track's post-FX output to a WAV via the stems render source
-(`RENDER_SETTINGS=2`, selected tracks, pre-master — parent-bus and master-bus
-FX are NOT printed) with custom bounds (`RENDER_BOUNDSFLAG=0`); the user's
-solo states and time selection are never touched. Optional `start_seconds`
-overrides the default range (active time selection if any, else cursor +
-`duration_seconds`, max 600). Use a unique/timestamped `output_file` so
-REAPER never raises an overwrite prompt mid-render. Track selection and all
+Renders a track capture to WAV. For a verified isolated item-less routing track,
+it uses the stems render source (`RENDER_SETTINGS=2`, selected tracks,
+pre-master; parent-bus and master-bus FX are not printed) with custom bounds
+(`RENDER_BOUNDSFLAG=0`). Tracks with media items can fall back to a full-mix
+render because offline isolation may produce silence for their FX. Optional
+`start_seconds` overrides the default range (active time selection if any, else
+cursor + `duration_seconds`, max 600). Use a unique/timestamped `output_file`
+so REAPER never raises an overwrite prompt mid-render. Track selection and all
 render settings are captured before and restored after, even on error.
 Synchronous like `render` (same `busy: "render"` heartbeat). Returns
 `file_path` (from `RENDER_TARGETS`, authoritative), `file_size_bytes`,
 `render_loudness_lufs` (LUFS-I parsed from `RENDER_STATS`), and
-`render_stats_raw`. The client should verify the file's mtime is newer than
+`render_stats_raw`, plus capture provenance: `capture_scope` is one of
+`isolated_track`, `full_mix`, or `master_output`; `isolation_verified` is true
+only for `isolated_track`. Clients must use only that true/isolated combination
+as per-track evidence. The client should verify the file's mtime is newer than
 the command's `created_at` before trusting it. Same render-window auto-close
 handling as `render` (see above); `render_autoclose_warning` is present only
 when the bridge could not force auto-close.

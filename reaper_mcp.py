@@ -22,8 +22,8 @@ REAPER_DAEMON_ROOT environment variable.
 
 The analyze_track / compare_tracks tools additionally need Post Mortem
 (https://github.com/wretcher207/post-mortem) installed so the `postmortem`
-command is on PATH (or set POSTMORTEM_CMD). They return measured payloads;
-the model on the client side does the diagnosing.
+command is on PATH (or set POSTMORTEM_CMD). They return only verified-isolated
+payloads; the model on the client side does the diagnosing.
 """
 
 import json
@@ -397,7 +397,8 @@ treat null as "not measured", never as a value; this is ONE track, not the
 mix — do not diagnose frequency masking or claim anything about how it sits
 against other tracks; if silence_fraction is high, all level statistics are
 diluted by dead air — say so. Do not suggest moves you can't verify from the
-data. An honest "I'm not sure" beats a confident wrong answer."""
+data. The bridge verified this capture is an isolated track, not a full mix.
+An honest "I'm not sure" beats a confident wrong answer."""
 
 COMPARE_PREAMBLE = """\
 Below is MEASURED data for two or more tracks from the user's actual REAPER
@@ -410,7 +411,8 @@ single Hz. The louder track in a contested band is the likely masker.
 Propose ONE concrete move (prefer a complementary carve referencing a real
 EQ already in the relevant chain) with a confidence rating. If the tracks
 barely overlap, say the masking is minimal and stop — do not invent a
-problem to look useful."""
+problem to look useful. Every capture was verified isolated before this payload
+was returned."""
 
 
 def _postmortem_cmdline():
@@ -419,6 +421,43 @@ def _postmortem_cmdline():
         return override.split()
     exe = shutil.which("postmortem")
     return [exe] if exe else None
+
+
+def _capture_safety_error(payload):
+    """Return an explanation unless every Post Mortem capture is verified safe."""
+    if not isinstance(payload, dict):
+        return "Post Mortem returned a non-object payload, so capture safety cannot be verified."
+
+    if "tracks" in payload:
+        tracks = payload.get("tracks")
+        if not isinstance(tracks, list) or not tracks:
+            return "Post Mortem returned no track capture provenance."
+        captures = [
+            (track.get("name") or "unnamed track", track.get("capture"))
+            for track in tracks
+            if isinstance(track, dict)
+        ]
+        if len(captures) != len(tracks):
+            return "Post Mortem returned malformed track capture provenance."
+    else:
+        track = payload.get("track")
+        name = track.get("name") if isinstance(track, dict) else "track"
+        captures = [(name or "track", payload.get("capture"))]
+
+    unsafe = []
+    for name, capture in captures:
+        scope = capture.get("scope") if isinstance(capture, dict) else None
+        verified = isinstance(capture, dict) and capture.get("isolation_verified") is True
+        if scope != "isolated_track" or not verified:
+            unsafe.append(f"{name}: {scope or 'unknown'}")
+    if unsafe:
+        return (
+            "Post Mortem capture safety refusal: the following capture(s) are not "
+            "verified isolated tracks: "
+            + ", ".join(unsafe)
+            + ". No diagnostic payload was handed to the model."
+        )
+    return None
 
 
 def _run_postmortem(tracks, seconds, preamble):
@@ -442,23 +481,30 @@ def _run_postmortem(tracks, seconds, preamble):
         return _text(f"postmortem failed (exit {proc.returncode}):\n{detail}",
                      is_error=True)
     payload_text = proc.stdout.strip()
-    warnings = []
     try:
         payload = json.loads(payload_text)
-        audio_blocks = ([payload.get("audio")] if "audio" in payload
-                        else [t.get("audio") for t in payload.get("tracks", [])])
-        for block in audio_blocks:
-            if not block:
-                continue
-            frac = block.get("silence_fraction") or 0
-            rms = block.get("rms_db")
-            if frac >= 0.85 or (rms is not None and rms <= -60):
-                warnings.append(
-                    "WARNING: this capture is mostly silence "
-                    f"(rms_db={rms}, silence_fraction={frac}). Tell the user to "
-                    "park the edit cursor where the track is playing and rerun.")
     except ValueError:
-        pass  # not fatal; pass the raw payload through
+        return _text(
+            "Post Mortem returned invalid JSON, so capture safety cannot be verified.",
+            is_error=True,
+        )
+    safety_error = _capture_safety_error(payload)
+    if safety_error:
+        return _text(safety_error, is_error=True)
+
+    warnings = []
+    audio_blocks = ([payload.get("audio")] if "audio" in payload
+                    else [t.get("audio") for t in payload.get("tracks", [])])
+    for block in audio_blocks:
+        if not block:
+            continue
+        frac = block.get("silence_fraction") or 0
+        rms = block.get("rms_db")
+        if frac >= 0.85 or (rms is not None and rms <= -60):
+            warnings.append(
+                "WARNING: this capture is mostly silence "
+                f"(rms_db={rms}, silence_fraction={frac}). Tell the user to "
+                "park the edit cursor where the track is playing and rerun.")
     parts = [preamble]
     parts.extend(warnings)
     parts.append(payload_text)
@@ -722,9 +768,10 @@ TOOLS = [
     },
     {
         "name": "capture_track_audio",
-        "description": ("Render one track's post-FX output to a WAV (stems render, "
-                        "pre-master; user's selection/render settings restored "
-                        "after). Gated: needs allow_risk_level_3=true in "
+        "description": ("Render a track capture to WAV and return its evidence scope. "
+                        "Only isolated_track with isolation_verified=true is per-track "
+                        "audio; item-based tracks can report a full_mix fallback. "
+                        "Gated: needs allow_risk_level_3=true in "
                         "bridge/bridge_config.json AND a bridge restart (relaunch "
                         "REAPER) after changing it. Synchronous — blocks the "
                         "bridge for the render duration."),
@@ -738,12 +785,13 @@ TOOLS = [
     },
     {
         "name": "analyze_track",
-        "description": ("Post Mortem: capture a 30s post-FX stem of one track and "
+        "description": ("Post Mortem: capture one verified-isolated track and "
                         "return MEASURED mix data (FX chain with values, routing, "
                         "LUFS, true peak, crest, 1/3-octave spectrum, stereo "
                         "image, silence fraction) for YOU to diagnose. Requires "
                         "Post Mortem installed and capture enabled (see "
-                        "capture_track_audio gating). Park the edit cursor where "
+                        "capture_track_audio gating). Full-mix fallbacks are refused. "
+                        "Park the edit cursor where "
                         "the track is playing first."),
         "inputSchema": _schema({
             "track": {"type": "string", "description": "Track name (case-insensitive, unique substring ok)."},
@@ -753,9 +801,11 @@ TOOLS = [
     },
     {
         "name": "compare_tracks",
-        "description": ("Post Mortem cross-track masking: capture 2+ tracks' stems "
+        "description": ("Post Mortem cross-track masking: capture 2+ verified-isolated "
+                        "tracks "
                         "and return their spectra plus a contested-band masking "
-                        "table for YOU to diagnose. Same requirements as "
+                        "table for YOU to diagnose. Full-mix fallbacks are refused. "
+                        "Same requirements as "
                         "analyze_track."),
         "inputSchema": _schema({
             "tracks": {"type": "array", "items": {"type": "string"},

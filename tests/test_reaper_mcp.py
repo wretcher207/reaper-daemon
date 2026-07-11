@@ -262,8 +262,69 @@ def test_analyze_track_without_postmortem_installed(monkeypatch):
     assert "pipx install" in result_text(resp)
 
 
+def test_analyze_track_refuses_full_mix_payload(monkeypatch):
+    payload = {
+        "track": {"name": "Kick"},
+        "capture": {"scope": "full_mix", "isolation_verified": False},
+        "audio": {"rms_db": -12.0, "silence_fraction": 0.0},
+    }
+
+    def fake_run(cmd, capture_output, text, timeout, env):
+        class P:
+            returncode = 0
+            stdout = json.dumps(payload)
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(reaper_mcp, "_postmortem_cmdline", lambda: ["postmortem"])
+    monkeypatch.setattr(reaper_mcp.subprocess, "run", fake_run)
+    resp = call("analyze_track", {"track": "Kick"})
+    assert resp["result"]["isError"] is True
+    assert "full_mix" in result_text(resp)
+
+
+def test_analyze_track_refuses_missing_capture_provenance(monkeypatch):
+    payload = {"track": {"name": "Kick"}, "audio": {"rms_db": -12.0}}
+
+    def fake_run(cmd, capture_output, text, timeout, env):
+        class P:
+            returncode = 0
+            stdout = json.dumps(payload)
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(reaper_mcp, "_postmortem_cmdline", lambda: ["postmortem"])
+    monkeypatch.setattr(reaper_mcp.subprocess, "run", fake_run)
+    resp = call("analyze_track", {"track": "Kick"})
+    assert resp["result"]["isError"] is True
+    assert "Kick: unknown" in result_text(resp)
+
+
+def test_compare_tracks_refuses_any_unverified_capture(monkeypatch):
+    payload = {
+        "tracks": [
+            {"name": "Kick", "capture": {"scope": "isolated_track", "isolation_verified": True}},
+            {"name": "Bass", "capture": {"scope": "master_output", "isolation_verified": False}},
+        ]
+    }
+
+    def fake_run(cmd, capture_output, text, timeout, env):
+        class P:
+            returncode = 0
+            stdout = json.dumps(payload)
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(reaper_mcp, "_postmortem_cmdline", lambda: ["postmortem"])
+    monkeypatch.setattr(reaper_mcp.subprocess, "run", fake_run)
+    resp = call("compare_tracks", {"tracks": ["Kick", "Bass"]})
+    assert resp["result"]["isError"] is True
+    assert "Bass: master_output" in result_text(resp)
+
+
 def test_analyze_track_wraps_payload_with_hedge_preamble(root, monkeypatch):
     payload = {"track": {"name": "Kick"},
+               "capture": {"scope": "isolated_track", "isolation_verified": True},
                "audio": {"rms_db": -12.0, "silence_fraction": 0.0}}
 
     def fake_run(cmd, capture_output, text, timeout, env):
@@ -288,6 +349,7 @@ def test_analyze_track_wraps_payload_with_hedge_preamble(root, monkeypatch):
 
 def test_analyze_track_flags_mostly_silent_capture(root, monkeypatch):
     payload = {"track": {"name": "Kick"},
+               "capture": {"scope": "isolated_track", "isolation_verified": True},
                "audio": {"rms_db": -71.0, "silence_fraction": 0.97}}
 
     def fake_run(cmd, capture_output, text, timeout, env):

@@ -1619,6 +1619,32 @@ local function restore_render_autoclose(token)
   end
 end
 
+-- Capture provenance is part of the public result contract. A caller must never
+-- need to infer whether a WAV is a real isolated stem by parsing a prose note.
+-- `full_mix` is deliberately explicit: it is useful for debugging, but unsafe
+-- as evidence for a per-track diagnosis or cross-track masking claim.
+local function capture_provenance(isolate, is_master)
+  if isolate then
+    return {
+      capture_scope = "isolated_track",
+      isolation_verified = true,
+      note = "Isolated item-less routing track (e.g. a Kontakt multi-out stem): target exclusive-soloed and the FX on every downstream bus (parent folders + master) bypassed for the render, so this is the track's own signal and its own FX only. Sends silenced by the solo. All solo and FX states restored after.",
+    }
+  end
+  if is_master then
+    return {
+      capture_scope = "master_output",
+      isolation_verified = false,
+      note = "Master output capture: this WAV represents the project master, not an isolated track.",
+    }
+  end
+  return {
+    capture_scope = "full_mix",
+    isolation_verified = false,
+    note = "CAUTION: this track has media items and is NOT isolated. REAPER's stems render returns the full master mix here (isolation via solo silences tracks whose FX, e.g. some amp sims, don't render offline). Treat these measurements as the whole mix, not this track alone, until per-track isolation for item tracks is solved.",
+  }
+end
+
 local function command_render(command)
   if not config.allow_risk_level_3 then
     error("RENDER_BLOCKED: render is gated; set allow_risk_level_3 true in bridge_config.json")
@@ -1728,6 +1754,7 @@ local function command_capture_track_audio(command)
   -- (verified on track "L", 2026-07-03); soloing THEM makes the stems render
   -- output silence, so leave them on the plain stems path.
   local isolate = track ~= master_track and reaper.CountTrackMediaItems(track) == 0
+  local provenance = capture_provenance(isolate, track == master_track)
   local track_count = reaper.CountTracks(0)
   local saved_solo = {}
   -- Downstream FX would color an isolated capture: the master bus plus every
@@ -1815,9 +1842,9 @@ local function command_capture_track_audio(command)
       sample_rate = tonumber(payload.sample_rate) or 48000,
       render_loudness_lufs = finite_or_nil(lufs_i),
       render_stats_raw = stats ~= "" and stats or nil,
-      note = isolate
-        and "Isolated item-less routing track (e.g. a Kontakt multi-out stem): target exclusive-soloed and the FX on every downstream bus (parent folders + master) bypassed for the render, so this is the track's own signal and its own FX only. Sends silenced by the solo. All solo and FX states restored after."
-        or "CAUTION: this track has media items and is NOT isolated. REAPER's stems render returns the full master mix here (isolation via solo silences tracks whose FX, e.g. some amp sims, don't render offline). Treat these measurements as the whole mix, not this track alone, until per-track isolation for item tracks is solved.",
+      capture_scope = provenance.capture_scope,
+      isolation_verified = provenance.isolation_verified,
+      note = provenance.note,
       render_autoclose_warning = autoclose_token.guaranteed and nil or autoclose_token.reason,
     }
   end)
@@ -2433,6 +2460,7 @@ if _G.REAPER_BRIDGE_SELFTEST then
     restore_render_autoclose = restore_render_autoclose,
     fx_summary = fx_summary,
     batch_result = batch_result,
+    capture_provenance = capture_provenance,
   }
 end
 
