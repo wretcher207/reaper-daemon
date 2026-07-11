@@ -180,7 +180,15 @@ the model to confirm intent; audio capture stays behind the
 
 FX discovery returns REAPER's real track and FX GUIDs alongside names and
 indices. Use the GUIDs as stable identity when planning a later change: names
-can be duplicated, and indices move when a user edits the chain.
+can be duplicated, and indices move when a user edits the chain. The exact
+identity fields and compatibility rules are documented in
+[`bridge/command_schema.md`](bridge/command_schema.md#stable-discovery-identities).
+
+Post Mortem Phase 1 consumes these read-only identities to validate structured
+recommendations. Reaper Daemon does not preview or apply those recommendations;
+its existing mutation commands remain explicit, independently authorized bridge
+operations. Reaper Daemon stays MIT-licensed and local. Planned hosted Post
+Mortem services or UI do not move this bridge behind a commercial boundary.
 
 ## Drum kits — any library, auto-discovered
 
@@ -214,6 +222,21 @@ python3 reaperd.py add-map MyKontactKit --roles '{"KICK_R":36,"SNARE":38,"HH_OPE
 Read `AGENTS.md` for the workflow, `CLAUDE.md` for the fast operational
 protocol, and `bridge/command_schema.md` for every command. Working JSON
 examples are in `commands/examples/`.
+
+## Develop
+
+The CI matrix covers Windows, macOS, and Linux. From the repository root:
+
+```bash
+python -m pip install pytest
+python -m pytest tests skills/drum-apparatus/tests -q
+python -m py_compile reaperd.py reaper_mcp.py setup/install.py
+lua bridge/test_bridge.lua
+lua bridge/test_json.lua
+```
+
+The Lua checks require Lua 5.4. Live REAPER integration remains a separate
+manual gate because CI does not launch the DAW.
 
 ## Layout
 
