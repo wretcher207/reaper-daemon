@@ -50,6 +50,7 @@ DEFAULT_PROTOCOL = "2025-06-18"
 
 DEFAULT_TIMEOUT_MS = 15000
 CAPTURE_TIMEOUT_MS = 180000
+_POSTMORTEM_MCP_RECEIPT = None
 
 
 def _log(msg):
@@ -458,15 +459,16 @@ def _write_panel_json(filename, payload):
 
 
 def _record_panel_mcp_handoff(tracks, seconds):
-    """Best-effort proof that verified measurements reached an MCP client."""
-    _write_panel_json(
-        "mcp-handoff.json",
-        {
-            "delivered_at": datetime.now(timezone.utc).isoformat(),
-            "tracks": list(tracks),
-            "seconds": seconds,
-        },
-    )
+    """Keep process-local proof that verified measurements reached the client."""
+    global _POSTMORTEM_MCP_RECEIPT
+    if len(tracks) != 1 or seconds != 10:
+        return None
+    _POSTMORTEM_MCP_RECEIPT = {
+        "delivered_at": datetime.now(timezone.utc),
+        "tracks": list(tracks),
+        "seconds": seconds,
+    }
+    return _POSTMORTEM_MCP_RECEIPT
 
 
 def _submit_postmortem_job(job_type, payload):
@@ -484,17 +486,12 @@ def _submit_postmortem_job(job_type, payload):
 
 
 def _fresh_panel_handoff(track):
-    path = os.path.join(_postmortem_data_root(), "mcp-handoff.json")
-    try:
-        with open(path, encoding="utf-8") as file:
-            handoff = json.load(file)
-        delivered = datetime.fromisoformat(
-            str(handoff.get("delivered_at", "")).replace("Z", "+00:00")
-        )
-    except (OSError, ValueError, TypeError, AttributeError):
+    handoff = _POSTMORTEM_MCP_RECEIPT
+    if not isinstance(handoff, dict):
         return None
+    delivered = handoff.get("delivered_at")
     tracks = handoff.get("tracks")
-    if delivered.tzinfo is None:
+    if not isinstance(delivered, datetime) or delivered.tzinfo is None:
         return None
     age = (datetime.now(timezone.utc) - delivered).total_seconds()
     if age < 0 or age > 15 * 60:
@@ -628,7 +625,8 @@ def tool_complete_postmortem_onboarding(args):
         )
     saved = _submit_postmortem_job(
         "record_mcp_handoff",
-        {"tracks": [track], "diagnosis_summary": diagnosis.strip()},
+        {"tracks": [track], "seconds": 10,
+         "diagnosis_summary": diagnosis.strip()},
     )
     if not saved:
         return _text("The diagnosis could not be written to the Post Mortem panel.", is_error=True)

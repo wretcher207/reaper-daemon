@@ -26,6 +26,7 @@ def root(root, monkeypatch):
     at it (BRIDGE_ROOT is resolved at import time from the environment)."""
     monkeypatch.setattr(reaper_mcp, "BRIDGE_ROOT", root)
     monkeypatch.setenv("POSTMORTEM_DATA_DIR", os.path.join(root, "postmortem-data"))
+    monkeypatch.setattr(reaper_mcp, "_POSTMORTEM_MCP_RECEIPT", None)
     return root
 
 
@@ -350,20 +351,22 @@ def test_analyze_track_wraps_payload_and_records_panel_handoff(
     assert "ONE track" in text            # hedge contract preamble
     assert '"rms_db": -12.0' in text      # payload passed through
     assert "WARNING" not in text
-    handoff = json.loads((tmp_path / "mcp-handoff.json").read_text(encoding="utf-8"))
+    handoff = reaper_mcp._POSTMORTEM_MCP_RECEIPT
     assert handoff["tracks"] == ["Kick"]
     assert handoff["seconds"] == 10
-    assert handoff["delivered_at"]
+    assert handoff["delivered_at"].tzinfo is not None
     diagnosis = "The kick has a measured low-mid buildup around 200 Hz. Try a small cut."
     completed = call("complete_postmortem_onboarding", {
         "track": "Kick", "diagnosis": diagnosis,
     })
     assert "isError" not in completed["result"]
-    jobs = list((tmp_path / "jobs" / "inbox").glob("*.json"))
+    jobs = [json.loads(path.read_text(encoding="utf-8"))
+            for path in (tmp_path / "jobs" / "inbox").glob("*.json")]
     assert len(jobs) == 1
-    rendered = json.loads(jobs[0].read_text(encoding="utf-8"))
+    rendered = jobs[0]
     assert rendered["type"] == "record_mcp_handoff"
     assert rendered["payload"]["tracks"] == ["Kick"]
+    assert rendered["payload"]["seconds"] == 10
     assert rendered["payload"]["diagnosis_summary"] == diagnosis
 
 
