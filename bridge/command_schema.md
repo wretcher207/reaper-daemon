@@ -263,6 +263,34 @@ default to `true` when omitted.
 `{ "target_track_name": "Drums", "color": {"r":180,"g":20,"b":20} }` — `color`
 may also be a native REAPER color integer.
 
+### snapshot_track_state
+```json
+{ "target_track_guid": "{...}",
+  "parameters": [ { "fx_guid": "{...}", "parameter_index": 17 } ] }
+```
+Writes a crash-safe state file (`state/snapshots/<snapshot_id>.json`) BEFORE
+any mutation, covering exactly what the preview operations can change: track
+volume (raw `D_VOL` plus informational dB), pan, every FX's enabled state with
+its GUID/index/scope/name identity, and each named parameter's normalized
+value. `parameters[]` entries take `fx_guid` or `fx_index`+`fx_scope`; an
+entry that does not resolve fails the whole snapshot closed (`NO_FX`,
+`NO_FX_PARAM`) — nothing has been mutated yet, so refusing is free. Read-only
+with respect to the project (no undo block). Returns `snapshot_id`, `path`,
+and the full snapshot.
+
+### restore_track_state
+```json
+{ "snapshot_id": "snap-20260711T235959Z-a1b2c3", "delete_after": true }
+```
+Resolves the snapshot's track by GUID only — a deleted track fails closed with
+`NO_TARGET_TRACK` and nothing is written. FX are matched by GUID against the
+live chain; writes target the live API index, so a moved FX still restores
+correctly. State that no longer resolves is skipped and reported in
+`unrestored[]` with a typed reason (`FX_NOT_FOUND`) while everything else
+restores. Restore never touches state the snapshot does not contain.
+`delete_after` removes the state file only when `fully_restored` is true.
+Returns `restored[]`, `unrestored[]`, `fully_restored`, `deleted`.
+
 ---
 
 ## FX
