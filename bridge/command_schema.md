@@ -232,6 +232,35 @@ Returns `sends` and `receives` (per entry: target/source track name,
 `phase_inverted`, and `automation_mode`. All volumes are converted to dB in
 the bridge (`D_VOL` is linear); hardware outputs are excluded.
 
+### get_selected_track
+Read-only, no payload. The Post Mortem panel's Track-screen idle card
+(P3-002). With nothing selected returns `{ "selected": false,
+"selected_count": 0 }`. Otherwise returns the FIRST selected track:
+`track` (index/name/guid), `selected_count`, `fx_count`, `item_count`,
+`receive_count`, plus what a capture would do right now — `capture_source`
+(`time_selection` when one is active, else `edit_cursor`, the same
+resolution `capture_track_audio` uses), `capture_start_seconds`,
+`items_at_capture_start`, and `expected_capture_scope`
+(`isolated_track` | `full_mix` | `master_output`, the provenance a capture
+of this track would carry). The master track is not part of REAPER's
+selected-track enumeration and is never reported here.
+
+### get_capture_preflight
+Read-only. Everything that would gate or degrade a capture WITHOUT rendering
+(P3-002) — powers onboarding's checklist and "Test Again".
+```json
+{ "target_track_name": "Kick" }
+```
+All track selectors are optional (`target_track_name`, `target_track_guid`,
+`track_name_contains`, `use_selected_track`); with one, the reply's `target`
+carries that track's summary, `item_count`, and `expected_capture_scope`.
+Returns `capture_allowed` (false only for hard blockers), `blockers[]` and
+`warnings[]` (each `{ code, message }` — `capture_gated` blocks;
+`render_hang_risk` warns when auto-close can be neither observed on nor
+forced), `risk_gate` (`allow_risk_level_3`, `requires_restart_to_change`:
+the flag is read once at REAPER startup), `sws_installed`, and
+`render_autoclose` (true/false, or null when unreadable without SWS).
+
 ---
 
 ## Tracks

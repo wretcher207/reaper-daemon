@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.10.0
+-- @version 3.11.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -2258,6 +2258,135 @@ local function capture_provenance(isolate, is_master)
   }
 end
 
+-- ---------------------------------------------------------------------------
+-- Panel support (Post Mortem Phase 3, P3-002)
+-- ---------------------------------------------------------------------------
+
+-- What capture provenance a track WOULD get, without rendering anything: the
+-- same decision command_capture_track_audio makes (isolate = non-master track
+-- with zero media items). Pure so the selftest covers every combination.
+local function expected_capture_scope(is_master, item_count)
+  if is_master then return "master_output" end
+  if (item_count or 0) == 0 then return "isolated_track" end
+  return "full_mix"
+end
+
+-- Preflight verdict from plain values (pure, selftest-covered). autoclose is
+-- true/false when SWS can read renderclosewhendone bit 0, nil when it cannot
+-- (SWS absent or var missing). A hard blocker means capture would REFUSE; a
+-- warning means it would run but degrade (possible render-window hang).
+local function preflight_verdict(allow_risk, sws_installed, autoclose)
+  local blockers, warnings = {}, {}
+  if not allow_risk then
+    blockers[#blockers + 1] = {
+      code = "capture_gated",
+      message = "allow_risk_level_3 is false in bridge_config.json. It is read "
+        .. "once at REAPER startup: enable it, then restart REAPER (there is "
+        .. "no reload command).",
+    }
+  end
+  -- Auto-close is safe when it is already on, or when SWS can force it per
+  -- render. Warn only when we can neither observe it on nor force it.
+  local can_force = sws_installed and autoclose ~= nil
+  if autoclose ~= true and not can_force then
+    warnings[#warnings + 1] = {
+      code = "render_hang_risk",
+      message = "The bridge cannot force REAPER's render window to auto-close "
+        .. "(SWS missing or config var unreadable). Until 'Automatically close "
+        .. "when finished' is ticked once in the render window, the first "
+        .. "capture can hang until the window is closed by hand.",
+    }
+  end
+  return {
+    capture_allowed = #blockers == 0,
+    blockers = blockers,
+    warnings = warnings,
+  }
+end
+
+-- Read-only selected-track report for the panel's Track screen idle card.
+-- Uses the SAME capture-start resolution as capture_track_audio (active time
+-- selection's start when one exists, else the edit cursor) so what the panel
+-- shows is what a capture would do.
+local function command_get_selected_track(command)
+  local selected_count = reaper.CountSelectedTracks(0)
+  if selected_count == 0 then
+    return { selected = false, selected_count = 0 }
+  end
+  local track = reaper.GetSelectedTrack(0, 0)
+  local summary = track_summary(track)
+  local item_count = reaper.CountTrackMediaItems(track)
+
+  local ts_start, ts_end = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+  local has_time_selection = ts_end > ts_start
+  local probe = has_time_selection and ts_start or reaper.GetCursorPosition()
+  local items_at_start = 0
+  for i = 0, item_count - 1 do
+    local item = reaper.GetTrackMediaItem(track, i)
+    local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+    local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+    if probe >= pos and probe < pos + len then
+      items_at_start = items_at_start + 1
+    end
+  end
+
+  return {
+    selected = true,
+    selected_count = selected_count,
+    track = summary,
+    fx_count = reaper.TrackFX_GetCount(track),
+    item_count = item_count,
+    receive_count = reaper.GetTrackNumSends(track, -1),
+    capture_source = has_time_selection and "time_selection" or "edit_cursor",
+    capture_start_seconds = probe,
+    items_at_capture_start = items_at_start,
+    expected_capture_scope = expected_capture_scope(summary.is_master == true, item_count),
+  }
+end
+
+-- Everything that would gate or degrade a capture, WITHOUT rendering: risk
+-- gate state, SWS presence, render auto-close state, and (with any track
+-- selector) the provenance a capture of that track would carry. Powers the
+-- panel's onboarding checklist and "Test Again" without a render per check.
+local function command_get_capture_preflight(command)
+  local payload = command.payload or {}
+  local sws_installed = (reaper.SNM_GetIntConfigVar and reaper.SNM_SetIntConfigVar)
+    and true or false
+  local autoclose = nil
+  if sws_installed then
+    local cur = reaper.SNM_GetIntConfigVar(RENDER_AUTOCLOSE_VAR, -1)
+    if cur ~= -1 then autoclose = (cur & 1 == 1) end
+  end
+  local verdict = preflight_verdict(
+    config.allow_risk_level_3 == true, sws_installed, autoclose)
+
+  local target = nil
+  if payload.target_track_name or payload.target_track_guid
+    or payload.track_name_contains or payload.use_selected_track then
+    local track = find_track(payload)
+    local summary = track_summary(track)
+    local item_count = reaper.CountTrackMediaItems(track)
+    target = {
+      track = summary,
+      item_count = item_count,
+      expected_capture_scope = expected_capture_scope(summary.is_master == true, item_count),
+    }
+  end
+
+  return {
+    capture_allowed = verdict.capture_allowed,
+    blockers = verdict.blockers,
+    warnings = verdict.warnings,
+    risk_gate = {
+      allow_risk_level_3 = config.allow_risk_level_3 == true,
+      requires_restart_to_change = true,
+    },
+    sws_installed = sws_installed,
+    render_autoclose = autoclose,
+    target = target,
+  }
+end
+
 local function command_render(command)
   if not config.allow_risk_level_3 then
     error("RENDER_BLOCKED: render is gated; set allow_risk_level_3 true in bridge_config.json")
@@ -2715,6 +2844,9 @@ local NO_UNDO_BLOCK = {
   -- snapshot_track_state only reads project state; its write is a state file
   -- outside the project.
   snapshot_track_state = true,
+  -- Panel support (P3-002): both are pure reads.
+  get_selected_track = true,
+  get_capture_preflight = true,
   -- The preview lifecycle deliberately creates NO undo points except the one
   -- commit_preview manages itself (restore baseline, then apply inside a
   -- single named Undo block). Temporary preview state must never appear in
@@ -2819,6 +2951,10 @@ handlers.set_tempo = command_set_tempo
 handlers.render = command_render
 handlers.capture_track_audio = command_capture_track_audio
 handlers.get_track_routing = command_get_track_routing
+
+-- Panel support (Post Mortem Phase 3, P3-002)
+handlers.get_selected_track = command_get_selected_track
+handlers.get_capture_preflight = command_get_capture_preflight
 
 -- Track lifecycle
 handlers.add_track = command_add_track
@@ -3099,6 +3235,8 @@ if _G.REAPER_BRIDGE_SELFTEST then
     preview_state_verdict = preview_state_verdict,
     preview_target_verdict = preview_target_verdict,
     baseline_target_value = baseline_target_value,
+    expected_capture_scope = expected_capture_scope,
+    preflight_verdict = preflight_verdict,
   }
 end
 

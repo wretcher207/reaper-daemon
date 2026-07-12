@@ -410,5 +410,37 @@ local missing_fx2, mf_err = btv(snap, { fx_guid = "{GONE}" }, "set_fx_bypass")
 ok(missing_fx2 == nil and mf_err:find("SNAPSHOT_MISSING_TARGET", 1, true),
    "unrecorded FX refuses to commit")
 
+-- P3-002: expected_capture_scope mirrors command_capture_track_audio's
+-- isolate decision (isolate = non-master with zero media items).
+local ecs = B.expected_capture_scope
+eq(ecs(true, 0), "master_output", "master is master_output regardless of items")
+eq(ecs(true, 5), "master_output", "master with items still master_output")
+eq(ecs(false, 0), "isolated_track", "item-less routing track isolates")
+eq(ecs(false, nil), "isolated_track", "nil item count treated as zero")
+eq(ecs(false, 3), "full_mix", "item track renders the full mix")
+
+-- P3-002: preflight verdict covers every gate combination.
+local pv = B.preflight_verdict
+local v = pv(false, true, true)
+eq(v.capture_allowed, false, "risk gate off blocks capture")
+eq(v.blockers[1].code, "capture_gated", "risk gate blocker is typed")
+eq(#v.warnings, 0, "autoclose on: no warning")
+v = pv(true, true, true)
+eq(v.capture_allowed, true, "all green allows capture")
+eq(#v.blockers, 0, "all green: no blockers")
+eq(#v.warnings, 0, "all green: no warnings")
+v = pv(true, true, false)
+eq(v.capture_allowed, true, "SWS can force autoclose: allowed")
+eq(#v.warnings, 0, "SWS can force autoclose: no hang warning")
+v = pv(true, false, nil)
+eq(v.capture_allowed, true, "no SWS is a warning, not a block")
+eq(v.warnings[1].code, "render_hang_risk", "no SWS warns of the render hang")
+v = pv(true, true, nil)
+eq(v.warnings[1].code, "render_hang_risk",
+   "SWS present but config var unreadable still warns")
+v = pv(false, false, nil)
+eq(v.capture_allowed, false, "gated + no SWS: blocked")
+ok(#v.blockers == 1 and #v.warnings == 1, "gated + no SWS: blocker AND warning")
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))
