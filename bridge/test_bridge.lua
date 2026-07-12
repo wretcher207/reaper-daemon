@@ -269,5 +269,72 @@ tok = ear()
 eq(tok.guaranteed, false, "missing config var -> not guaranteed")
 ok(tok.restore == nil, "missing config var -> nothing to restore")
 
+-- P2-001: snapshot shape validation fails closed on anything malformed.
+local sv = B.snapshot_validate
+local good = {
+  schema_version = 1,
+  track = { guid = "{TRACK-A}", name = "Kick" },
+  values = {
+    volume = 0.5, pan = 0.0,
+    fx = {
+      { guid = "{FX-1}", api_index = 0, scope = "track", name = "EQ",
+        enabled = true,
+        parameters = { { index = 17, name = "Gain", normalized_value = 0.5 } } },
+    },
+  },
+}
+eq(sv(good), nil, "valid snapshot accepted")
+ok(sv(nil) ~= nil, "nil snapshot rejected")
+ok(sv({ schema_version = 2, track = good.track, values = good.values }) ~= nil,
+   "unknown schema_version rejected")
+ok(sv({ schema_version = 1, values = good.values }) ~= nil,
+   "missing track.guid rejected")
+ok(sv({ schema_version = 1, track = good.track }) ~= nil, "missing values rejected")
+ok(sv({ schema_version = 1, track = good.track,
+        values = { fx = { { name = "no guid" } } } }) ~= nil,
+   "fx entry without guid rejected")
+ok(sv({ schema_version = 1, track = good.track,
+        values = { fx = { { guid = "{FX-1}",
+                            parameters = { { index = 1 } } } } } }) ~= nil,
+   "parameter without normalized_value rejected")
+
+-- P2-001: restore planning restores what resolves, reports what does not, and
+-- refuses a snapshot taken from a different track.
+local rp = B.restore_plan
+local live = {
+  track_guid = "{TRACK-A}",
+  fx_by_guid = { ["{FX-1}"] = { api_index = 5 } },
+}
+local plan = rp(good, live)
+eq(#plan.unrestored, 0, "all snapshot state resolves")
+eq(plan.ops[1].kind, "volume", "volume restore planned")
+eq(plan.ops[1].value, 0.5, "raw D_VOL value round-trips")
+eq(plan.ops[2].kind, "pan", "pan restore planned")
+eq(plan.ops[3].kind, "fx_enabled", "fx enabled restore planned")
+eq(plan.ops[3].api_index, 5, "restore targets the LIVE api index, not the recorded one")
+eq(plan.ops[4].kind, "fx_param", "parameter restore planned")
+eq(plan.ops[4].parameter_index, 17, "parameter index carried")
+eq(plan.ops[4].value, 0.5, "parameter normalized value carried")
+
+local missing_fx = rp(good, { track_guid = "{TRACK-A}", fx_by_guid = {} })
+eq(#missing_fx.ops, 2, "volume and pan still restore when the FX is gone")
+eq(#missing_fx.unrestored, 1, "missing FX is reported, not silently dropped")
+eq(missing_fx.unrestored[1].reason, "FX_NOT_FOUND", "missing FX carries a typed reason")
+
+local wrong_track, wrong_err = rp(good, { track_guid = "{TRACK-B}", fx_by_guid = {} })
+ok(wrong_track == nil and wrong_err:find("SNAPSHOT_TRACK_MISMATCH", 1, true),
+   "snapshot for another track refuses to plan")
+
+-- A snapshot with no volume/pan recorded must not invent writes for them.
+local sparse = {
+  schema_version = 1,
+  track = { guid = "{TRACK-A}" },
+  values = { fx = {} },
+}
+eq(sv(sparse), nil, "sparse snapshot is valid")
+local sparse_plan = rp(sparse, live)
+eq(#sparse_plan.ops, 0, "nothing recorded, nothing written")
+eq(#sparse_plan.unrestored, 0, "nothing recorded, nothing to report")
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))

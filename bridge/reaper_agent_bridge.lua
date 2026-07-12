@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.8.3
+-- @version 3.9.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -1302,6 +1302,235 @@ local function command_set_track_pan(command)
   return { track = track_summary(track), pan = pan }
 end
 
+-- Phase 2 (Post Mortem Verified Fix Preview), P2-001: track state snapshot and
+-- restore. The snapshot is written to disk BEFORE any mutation happens (same
+-- crash-safety pattern as the render-settings state file), and covers exactly
+-- what the four supported preview operations can mutate: track volume, track
+-- pan, per-FX enabled state, and named FX parameter values.
+
+local SNAPSHOT_STATE_DIR = join(root, "state", "snapshots")
+
+local function enumerate_track_fx(track)
+  local fx = {}
+  for i = 0, reaper.TrackFX_GetCount(track) - 1 do
+    local _, name = reaper.TrackFX_GetFXName(track, i, "")
+    fx[#fx + 1] = {
+      guid = reaper.TrackFX_GetFXGUID(track, i),
+      index = i, api_index = i, scope = "track", name = name,
+      enabled = reaper.TrackFX_GetEnabled(track, i),
+    }
+  end
+  if reaper.TrackFX_GetRecCount then
+    for i = 0, reaper.TrackFX_GetRecCount(track) - 1 do
+      local api_index = 0x1000000 + i
+      local _, name = reaper.TrackFX_GetFXName(track, api_index, "")
+      fx[#fx + 1] = {
+        guid = reaper.TrackFX_GetFXGUID(track, api_index),
+        index = i, api_index = api_index, scope = "input", name = name,
+        enabled = reaper.TrackFX_GetEnabled(track, api_index),
+      }
+    end
+  end
+  return fx
+end
+
+-- Pure: shape-check a parsed snapshot file. Returns nil when valid, else a
+-- typed error string. A snapshot that fails here restores nothing.
+local function snapshot_validate(parsed)
+  if type(parsed) ~= "table" then return "BAD_SNAPSHOT: not an object" end
+  if parsed.schema_version ~= 1 then
+    return "BAD_SNAPSHOT: unsupported schema_version"
+  end
+  local track = parsed.track
+  if type(track) ~= "table" or type(track.guid) ~= "string" or track.guid == "" then
+    return "BAD_SNAPSHOT: missing track.guid"
+  end
+  local values = parsed.values
+  if type(values) ~= "table" then return "BAD_SNAPSHOT: missing values" end
+  if values.fx ~= nil and type(values.fx) ~= "table" then
+    return "BAD_SNAPSHOT: values.fx must be a list"
+  end
+  for _, entry in ipairs(values.fx or {}) do
+    if type(entry) ~= "table" or type(entry.guid) ~= "string" or entry.guid == "" then
+      return "BAD_SNAPSHOT: fx entry missing guid"
+    end
+    for _, param in ipairs(entry.parameters or {}) do
+      if type(param) ~= "table" or type(param.index) ~= "number"
+         or type(param.normalized_value) ~= "number" then
+        return "BAD_SNAPSHOT: fx parameter entry needs index and normalized_value"
+      end
+    end
+  end
+  return nil
+end
+
+-- Pure: given a validated snapshot and an index of the live FX chain
+-- (track_guid plus fx_by_guid = guid -> {api_index, ...}), plan the restore
+-- writes. Restores whatever still resolves and reports exactly what it could
+-- not restore; never invents a write for state the snapshot does not contain.
+local function restore_plan(snapshot, live)
+  if snapshot.track.guid ~= live.track_guid then
+    return nil, "SNAPSHOT_TRACK_MISMATCH: snapshot is for track "
+      .. snapshot.track.guid .. ", not " .. tostring(live.track_guid)
+  end
+  local ops, unrestored = {}, {}
+  local values = snapshot.values
+  if values.volume ~= nil then
+    ops[#ops + 1] = { kind = "volume", value = values.volume }
+  end
+  if values.pan ~= nil then
+    ops[#ops + 1] = { kind = "pan", value = values.pan }
+  end
+  for _, fx in ipairs(values.fx or {}) do
+    local live_fx = live.fx_by_guid[fx.guid]
+    if not live_fx then
+      unrestored[#unrestored + 1] = {
+        kind = "fx", guid = fx.guid, name = fx.name, reason = "FX_NOT_FOUND",
+      }
+    else
+      if fx.enabled ~= nil then
+        ops[#ops + 1] = {
+          kind = "fx_enabled", api_index = live_fx.api_index,
+          guid = fx.guid, value = fx.enabled,
+        }
+      end
+      for _, param in ipairs(fx.parameters or {}) do
+        ops[#ops + 1] = {
+          kind = "fx_param", api_index = live_fx.api_index, guid = fx.guid,
+          parameter_index = param.index, value = param.normalized_value,
+        }
+      end
+    end
+  end
+  return { ops = ops, unrestored = unrestored }
+end
+
+local function command_snapshot_track_state(command)
+  local payload = command.payload or {}
+  local track = find_track(payload)
+  local _, track_name = reaper.GetTrackName(track, "")
+  local fx = enumerate_track_fx(track)
+  local by_guid, by_api = {}, {}
+  for _, entry in ipairs(fx) do
+    by_guid[entry.guid] = entry
+    by_api[entry.api_index] = entry
+  end
+
+  -- Named parameters to capture (a preview touches one parameter; snapshot
+  -- exactly what the caller will mutate and fail closed on anything that
+  -- does not resolve — this runs BEFORE the mutation, so refusing is free).
+  for _, want in ipairs(payload.parameters or {}) do
+    local entry
+    if want.fx_guid then
+      entry = by_guid[want.fx_guid]
+      if not entry then error("NO_FX: no FX with guid " .. tostring(want.fx_guid)) end
+    elseif want.fx_index ~= nil then
+      local scope = want.fx_scope
+      if scope ~= "track" and scope ~= "input" then
+        error("AMBIGUOUS_SCOPE: parameters[].fx_index requires fx_scope \"track\" or \"input\"")
+      end
+      local api = (scope == "input" and 0x1000000 or 0) + tonumber(want.fx_index)
+      entry = by_api[api]
+      if not entry then
+        error("NO_FX: no " .. scope .. " FX at index " .. tostring(want.fx_index))
+      end
+    else
+      error("BAD_SNAPSHOT_REQUEST: parameters[] entries need fx_guid or fx_index+fx_scope")
+    end
+    local pidx = tonumber(want.parameter_index)
+    if not pidx or pidx < 0
+       or pidx >= reaper.TrackFX_GetNumParams(track, entry.api_index) then
+      error("NO_FX_PARAM: parameter_index " .. tostring(want.parameter_index)
+        .. " out of range for " .. entry.name)
+    end
+    local _, pname = reaper.TrackFX_GetParamName(track, entry.api_index, pidx, "")
+    entry.parameters = entry.parameters or {}
+    entry.parameters[#entry.parameters + 1] = {
+      index = pidx,
+      name = pname,
+      normalized_value = reaper.TrackFX_GetParamNormalized(track, entry.api_index, pidx),
+    }
+  end
+
+  local volume = reaper.GetMediaTrackInfo_Value(track, "D_VOL")
+  local snapshot = {
+    schema_version = 1,
+    snapshot_id = "snap-" .. os.date("!%Y%m%dT%H%M%SZ") .. "-"
+      .. string.format("%06x", math.floor((reaper.time_precise() % 1) * 0xffffff)),
+    created_at = now(),
+    track = { guid = reaper.GetTrackGUID(track), name = track_name },
+    values = {
+      volume = volume,
+      volume_db = db_from_volume(volume),
+      pan = reaper.GetMediaTrackInfo_Value(track, "D_PAN"),
+      fx = fx,
+    },
+  }
+  if reaper.RecursiveCreateDirectory then
+    reaper.RecursiveCreateDirectory(SNAPSHOT_STATE_DIR, 0)
+  end
+  local path = join(SNAPSHOT_STATE_DIR, snapshot.snapshot_id .. ".json")
+  atomic_write_json(path, snapshot)
+  return { snapshot_id = snapshot.snapshot_id, path = path, snapshot = snapshot }
+end
+
+local function command_restore_track_state(command)
+  local payload = command.payload or {}
+  local snapshot_id = safe_id(payload.snapshot_id, nil)
+  if not snapshot_id then
+    error("BAD_SNAPSHOT_REQUEST: Provide snapshot_id (from snapshot_track_state)")
+  end
+  local path = join(SNAPSHOT_STATE_DIR, snapshot_id .. ".json")
+  local text = read_file(path)
+  if not text then error("NO_SNAPSHOT: no snapshot " .. snapshot_id) end
+  local decoded_ok, parsed = pcall(json.decode, text)
+  if not decoded_ok then error("BAD_SNAPSHOT: snapshot file is not valid JSON") end
+  local invalid = snapshot_validate(parsed)
+  if invalid then error(invalid) end
+
+  -- Resolve by GUID only: a deleted track fails closed here (NO_TARGET_TRACK)
+  -- and nothing is written.
+  local track = find_track({ target_track_guid = parsed.track.guid })
+  local fx_by_guid = {}
+  for _, entry in ipairs(enumerate_track_fx(track)) do
+    fx_by_guid[entry.guid] = entry
+  end
+  local plan, plan_err = restore_plan(parsed, {
+    track_guid = reaper.GetTrackGUID(track),
+    fx_by_guid = fx_by_guid,
+  })
+  if not plan then error(plan_err) end
+
+  local restored = {}
+  for _, op in ipairs(plan.ops) do
+    if op.kind == "volume" then
+      reaper.SetMediaTrackInfo_Value(track, "D_VOL", op.value)
+    elseif op.kind == "pan" then
+      reaper.SetMediaTrackInfo_Value(track, "D_PAN", op.value)
+    elseif op.kind == "fx_enabled" then
+      reaper.TrackFX_SetEnabled(track, op.api_index, op.value)
+    elseif op.kind == "fx_param" then
+      reaper.TrackFX_SetParamNormalized(track, op.api_index, op.parameter_index, op.value)
+    end
+    restored[#restored + 1] = {
+      kind = op.kind, guid = op.guid, parameter_index = op.parameter_index,
+    }
+  end
+  local fully_restored = #plan.unrestored == 0
+  local deleted = false
+  if payload.delete_after == true and fully_restored then
+    deleted = os.remove(path) ~= nil
+  end
+  return {
+    track = track_summary(track),
+    snapshot_id = snapshot_id,
+    restored = restored,
+    unrestored = plan.unrestored,
+    fully_restored = fully_restored,
+    deleted = deleted,
+  }
+end
+
 local function command_mute_track(command)
   local payload = command.payload or {}
   local track = find_track(payload)
@@ -2099,6 +2328,9 @@ local NO_UNDO_BLOCK = {
   -- capture_track_audio restores everything it touches (selection, render
   -- settings), so there is no project state a user would want to Ctrl+Z.
   capture_track_audio = true,
+  -- snapshot_track_state only reads project state; its write is a state file
+  -- outside the project.
+  snapshot_track_state = true,
 }
 
 local function is_mutating(command_type)
@@ -2210,6 +2442,10 @@ handlers.set_track_pan = command_set_track_pan
 handlers.mute_track = command_mute_track
 handlers.solo_track = command_solo_track
 handlers.arm_track = command_arm_track
+
+-- Track state snapshot/restore (Post Mortem Verified Fix Preview, P2-001)
+handlers.snapshot_track_state = command_snapshot_track_state
+handlers.restore_track_state = command_restore_track_state
 
 -- FX
 handlers.add_fx = command_add_fx
@@ -2461,6 +2697,8 @@ if _G.REAPER_BRIDGE_SELFTEST then
     fx_summary = fx_summary,
     batch_result = batch_result,
     capture_provenance = capture_provenance,
+    snapshot_validate = snapshot_validate,
+    restore_plan = restore_plan,
   }
 end
 
