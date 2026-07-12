@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.11.0
+-- @version 3.11.1
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -13,6 +13,9 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.11.1: The managed startup watchdog now reads the bridge's JSON lock,
+--   respects long renders, and restarts only stale or missing instances. MCP
+--   Track Check can return a verified first-run diagnosis to the panel.
 --   3.3.0: Robust add_fx_chain splicer (correct chunk depth + restore-on-error);
 --   UI time-budget on the drain loop; singleton-lock race closed via owner
 --   token; fx_index now requires an explicit fx_scope; dropped the fake
