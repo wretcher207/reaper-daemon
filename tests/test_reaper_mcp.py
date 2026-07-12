@@ -322,7 +322,9 @@ def test_compare_tracks_refuses_any_unverified_capture(monkeypatch):
     assert "Bass: master_output" in result_text(resp)
 
 
-def test_analyze_track_wraps_payload_with_hedge_preamble(root, monkeypatch):
+def test_analyze_track_wraps_payload_and_records_panel_handoff(
+    root, monkeypatch, tmp_path
+):
     payload = {"track": {"name": "Kick"},
                "capture": {"scope": "isolated_track", "isolation_verified": True},
                "audio": {"rms_db": -12.0, "silence_fraction": 0.0}}
@@ -339,12 +341,16 @@ def test_analyze_track_wraps_payload_with_hedge_preamble(root, monkeypatch):
 
     monkeypatch.setattr(reaper_mcp, "_postmortem_cmdline", lambda: ["postmortem"])
     monkeypatch.setattr(reaper_mcp.subprocess, "run", fake_run)
+    monkeypatch.setenv("POSTMORTEM_DATA_DIR", str(tmp_path))
     resp = call("analyze_track", {"track": "Kick"})
     text = result_text(resp)
     assert "isError" not in resp["result"]
     assert "ONE track" in text            # hedge contract preamble
     assert '"rms_db": -12.0' in text      # payload passed through
     assert "WARNING" not in text
+    handoff = json.loads((tmp_path / "mcp-handoff.json").read_text(encoding="utf-8"))
+    assert handoff["tracks"] == ["Kick"]
+    assert handoff["delivered_at"]
 
 
 def test_analyze_track_flags_mostly_silent_capture(root, monkeypatch):

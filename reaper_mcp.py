@@ -423,6 +423,43 @@ def _postmortem_cmdline():
     return [exe] if exe else None
 
 
+def _postmortem_data_root():
+    override = os.environ.get("POSTMORTEM_DATA_DIR")
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/PostMortem")
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "PostMortem")
+    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(base, "postmortem")
+
+
+def _record_panel_mcp_handoff(tracks):
+    """Best-effort proof that verified measurements reached an MCP client."""
+    root = _postmortem_data_root()
+    path = os.path.join(root, "mcp-handoff.json")
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(root, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "delivered_at": datetime.now(timezone.utc).isoformat(),
+                    "tracks": list(tracks),
+                },
+                file,
+            )
+        os.replace(tmp, path)
+    except OSError as error:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        _log(f"could not record Post Mortem MCP handoff: {error}")
+
+
 def _capture_safety_error(payload):
     """Return an explanation unless every Post Mortem capture is verified safe."""
     if not isinstance(payload, dict):
@@ -491,6 +528,8 @@ def _run_postmortem(tracks, seconds, preamble):
     safety_error = _capture_safety_error(payload)
     if safety_error:
         return _text(safety_error, is_error=True)
+
+    _record_panel_mcp_handoff(tracks)
 
     warnings = []
     audio_blocks = ([payload.get("audio")] if "audio" in payload
