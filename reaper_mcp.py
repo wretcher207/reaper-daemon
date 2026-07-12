@@ -28,6 +28,7 @@ payloads; the model on the client side does the diagnosing.
 
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -464,10 +465,17 @@ def _record_panel_mcp_handoff(tracks, seconds):
     if len(tracks) != 1 or seconds != 10:
         return None
     _POSTMORTEM_MCP_RECEIPT = {
+        "receipt_id": secrets.token_hex(32),
         "delivered_at": datetime.now(timezone.utc),
         "tracks": list(tracks),
         "seconds": seconds,
     }
+    if not _submit_postmortem_job("record_mcp_measurement", {
+        "receipt_id": _POSTMORTEM_MCP_RECEIPT["receipt_id"],
+        "tracks": list(tracks),
+        "seconds": seconds,
+    }):
+        _POSTMORTEM_MCP_RECEIPT = None
     return _POSTMORTEM_MCP_RECEIPT
 
 
@@ -617,7 +625,8 @@ def tool_complete_postmortem_onboarding(args):
     if len(diagnosis) > 12000:
         return _text("the diagnosis is too long to render in the panel", is_error=True)
     track = track.strip()
-    if _fresh_panel_handoff(track) is None:
+    receipt = _fresh_panel_handoff(track)
+    if receipt is None:
         return _text(
             "No fresh 10-second single-track Post Mortem handoff matches this track. "
             "Run analyze_track first.",
@@ -625,7 +634,7 @@ def tool_complete_postmortem_onboarding(args):
         )
     saved = _submit_postmortem_job(
         "record_mcp_handoff",
-        {"tracks": [track], "seconds": 10,
+        {"receipt_id": receipt["receipt_id"], "tracks": [track],
          "diagnosis_summary": diagnosis.strip()},
     )
     if not saved:

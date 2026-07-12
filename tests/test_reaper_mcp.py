@@ -352,6 +352,7 @@ def test_analyze_track_wraps_payload_and_records_panel_handoff(
     assert '"rms_db": -12.0' in text      # payload passed through
     assert "WARNING" not in text
     handoff = reaper_mcp._POSTMORTEM_MCP_RECEIPT
+    assert len(handoff["receipt_id"]) == 64
     assert handoff["tracks"] == ["Kick"]
     assert handoff["seconds"] == 10
     assert handoff["delivered_at"].tzinfo is not None
@@ -362,11 +363,14 @@ def test_analyze_track_wraps_payload_and_records_panel_handoff(
     assert "isError" not in completed["result"]
     jobs = [json.loads(path.read_text(encoding="utf-8"))
             for path in (tmp_path / "jobs" / "inbox").glob("*.json")]
-    assert len(jobs) == 1
-    rendered = jobs[0]
+    assert len(jobs) == 2
+    measured = next(job for job in jobs if job["type"] == "record_mcp_measurement")
+    rendered = next(job for job in jobs if job["type"] == "record_mcp_handoff")
+    assert measured["payload"]["receipt_id"] == handoff["receipt_id"]
+    assert measured["payload"]["seconds"] == 10
     assert rendered["type"] == "record_mcp_handoff"
     assert rendered["payload"]["tracks"] == ["Kick"]
-    assert rendered["payload"]["seconds"] == 10
+    assert rendered["payload"]["receipt_id"] == handoff["receipt_id"]
     assert rendered["payload"]["diagnosis_summary"] == diagnosis
 
 
