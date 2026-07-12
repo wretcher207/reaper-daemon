@@ -398,7 +398,9 @@ mix — do not diagnose frequency masking or claim anything about how it sits
 against other tracks; if silence_fraction is high, all level statistics are
 diluted by dead air — say so. Do not suggest moves you can't verify from the
 data. The bridge verified this capture is an isolated track, not a full mix.
-An honest "I'm not sure" beats a confident wrong answer."""
+An honest "I'm not sure" beats a confident wrong answer. After writing the
+diagnosis, call complete_postmortem_onboarding with the track name and that
+exact diagnosis so Post Mortem can render it in the panel."""
 
 COMPARE_PREAMBLE = """\
 Below is MEASURED data for two or more tracks from the user's actual REAPER
@@ -436,28 +438,72 @@ def _postmortem_data_root():
     return os.path.join(base, "postmortem")
 
 
-def _record_panel_mcp_handoff(tracks):
-    """Best-effort proof that verified measurements reached an MCP client."""
+def _write_panel_json(filename, payload):
     root = _postmortem_data_root()
-    path = os.path.join(root, "mcp-handoff.json")
+    path = os.path.join(root, filename)
     tmp = path + ".tmp"
     try:
-        os.makedirs(root, exist_ok=True)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as file:
-            json.dump(
-                {
-                    "delivered_at": datetime.now(timezone.utc).isoformat(),
-                    "tracks": list(tracks),
-                },
-                file,
-            )
+            json.dump(payload, file)
         os.replace(tmp, path)
+        return True
     except OSError as error:
         try:
             os.unlink(tmp)
         except OSError:
             pass
-        _log(f"could not record Post Mortem MCP handoff: {error}")
+        _log(f"could not write Post Mortem panel state: {error}")
+        return False
+
+
+def _record_panel_mcp_handoff(tracks, seconds):
+    """Best-effort proof that verified measurements reached an MCP client."""
+    _write_panel_json(
+        "mcp-handoff.json",
+        {
+            "delivered_at": datetime.now(timezone.utc).isoformat(),
+            "tracks": list(tracks),
+            "seconds": seconds,
+        },
+    )
+
+
+def _submit_postmortem_job(job_type, payload):
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    job_id = f"mcp-{stamp}-{os.getpid()}"
+    return _write_panel_json(
+        os.path.join("jobs", "inbox", job_id + ".json"),
+        {
+            "id": job_id,
+            "type": job_type,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "payload": payload,
+        },
+    )
+
+
+def _fresh_panel_handoff(track):
+    path = os.path.join(_postmortem_data_root(), "mcp-handoff.json")
+    try:
+        with open(path, encoding="utf-8") as file:
+            handoff = json.load(file)
+        delivered = datetime.fromisoformat(
+            str(handoff.get("delivered_at", "")).replace("Z", "+00:00")
+        )
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    tracks = handoff.get("tracks")
+    if delivered.tzinfo is None:
+        return None
+    age = (datetime.now(timezone.utc) - delivered).total_seconds()
+    if age < 0 or age > 15 * 60:
+        return None
+    if handoff.get("seconds") != 10 or not isinstance(tracks, list) or len(tracks) != 1:
+        return None
+    if str(tracks[0]).casefold() != track.casefold():
+        return None
+    return handoff
 
 
 def _capture_safety_error(payload):
@@ -529,7 +575,7 @@ def _run_postmortem(tracks, seconds, preamble):
     if safety_error:
         return _text(safety_error, is_error=True)
 
-    _record_panel_mcp_handoff(tracks)
+    _record_panel_mcp_handoff(tracks, seconds)
 
     warnings = []
     audio_blocks = ([payload.get("audio")] if "audio" in payload
@@ -554,7 +600,7 @@ def tool_analyze_track(args):
     track = args.get("track")
     if not track or not isinstance(track, str):
         return _text("analyze_track needs a 'track' name", is_error=True)
-    return _run_postmortem([track], args.get("seconds", 30), ANALYZE_PREAMBLE)
+    return _run_postmortem([track], args.get("seconds", 10), ANALYZE_PREAMBLE)
 
 
 def tool_compare_tracks(args):
@@ -562,6 +608,31 @@ def tool_compare_tracks(args):
     if len(tracks) < 2:
         return _text("compare_tracks needs at least two track names", is_error=True)
     return _run_postmortem(tracks, args.get("seconds", 30), COMPARE_PREAMBLE)
+
+
+def tool_complete_postmortem_onboarding(args):
+    track = args.get("track")
+    diagnosis = args.get("diagnosis")
+    if not isinstance(track, str) or not track.strip():
+        return _text("complete_postmortem_onboarding needs the analyzed track name", is_error=True)
+    if not isinstance(diagnosis, str) or len(diagnosis.strip()) < 20:
+        return _text("complete_postmortem_onboarding needs the full diagnosis", is_error=True)
+    if len(diagnosis) > 12000:
+        return _text("the diagnosis is too long to render in the panel", is_error=True)
+    track = track.strip()
+    if _fresh_panel_handoff(track) is None:
+        return _text(
+            "No fresh 10-second single-track Post Mortem handoff matches this track. "
+            "Run analyze_track first.",
+            is_error=True,
+        )
+    saved = _submit_postmortem_job(
+        "record_mcp_handoff",
+        {"tracks": [track], "diagnosis_summary": diagnosis.strip()},
+    )
+    if not saved:
+        return _text("The diagnosis could not be written to the Post Mortem panel.", is_error=True)
+    return _text("Diagnosis sent to the Post Mortem panel.")
 
 
 # ---------------------------------------------------------------------------
@@ -834,7 +905,7 @@ TOOLS = [
                         "the track is playing first."),
         "inputSchema": _schema({
             "track": {"type": "string", "description": "Track name (case-insensitive, unique substring ok)."},
-            "seconds": {"type": "integer", "description": "Capture length, default 30."},
+            "seconds": {"type": "integer", "description": "Capture length, default 10."},
         }, required=["track"]),
         "handler": tool_analyze_track,
     },
@@ -852,6 +923,18 @@ TOOLS = [
             "seconds": {"type": "integer", "description": "Capture length per track, default 30."},
         }, required=["tracks"]),
         "handler": tool_compare_tracks,
+    },
+    {
+        "name": "complete_postmortem_onboarding",
+        "description": ("After analyze_track, send the exact diagnosis you wrote "
+                        "to the Post Mortem panel. Requires a fresh matching "
+                        "10-second single-track handoff; comparisons cannot complete "
+                        "first-run onboarding."),
+        "inputSchema": _schema({
+            "track": {"type": "string", "description": "The track analyzed by analyze_track."},
+            "diagnosis": {"type": "string", "description": "The full diagnosis to render in the panel."},
+        }, required=["track", "diagnosis"]),
+        "handler": tool_complete_postmortem_onboarding,
     },
     {
         "name": "raw_command",

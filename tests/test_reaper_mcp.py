@@ -25,6 +25,7 @@ def root(root, monkeypatch):
     """Overrides conftest's root: same folders, plus the MCP module pointed
     at it (BRIDGE_ROOT is resolved at import time from the environment)."""
     monkeypatch.setattr(reaper_mcp, "BRIDGE_ROOT", root)
+    monkeypatch.setenv("POSTMORTEM_DATA_DIR", os.path.join(root, "postmortem-data"))
     return root
 
 
@@ -65,7 +66,8 @@ def test_tools_list_names_and_schemas():
     tools = {t["name"]: t for t in resp["result"]["tools"]}
     for expected in ("get_status", "get_context", "scan_fx", "track", "fx",
                      "set_fx_param", "batch", "capture_track_audio",
-                     "analyze_track", "compare_tracks", "raw_command"):
+                     "analyze_track", "compare_tracks",
+                     "complete_postmortem_onboarding", "raw_command"):
         assert expected in tools
         assert tools[expected]["inputSchema"]["type"] == "object"
         assert tools[expected]["description"]
@@ -350,7 +352,30 @@ def test_analyze_track_wraps_payload_and_records_panel_handoff(
     assert "WARNING" not in text
     handoff = json.loads((tmp_path / "mcp-handoff.json").read_text(encoding="utf-8"))
     assert handoff["tracks"] == ["Kick"]
+    assert handoff["seconds"] == 10
     assert handoff["delivered_at"]
+    diagnosis = "The kick has a measured low-mid buildup around 200 Hz. Try a small cut."
+    completed = call("complete_postmortem_onboarding", {
+        "track": "Kick", "diagnosis": diagnosis,
+    })
+    assert "isError" not in completed["result"]
+    jobs = list((tmp_path / "jobs" / "inbox").glob("*.json"))
+    assert len(jobs) == 1
+    rendered = json.loads(jobs[0].read_text(encoding="utf-8"))
+    assert rendered["type"] == "record_mcp_handoff"
+    assert rendered["payload"]["tracks"] == ["Kick"]
+    assert rendered["payload"]["diagnosis_summary"] == diagnosis
+
+
+def test_mcp_onboarding_completion_requires_a_fresh_matching_handoff(
+    root, monkeypatch
+):
+    resp = call("complete_postmortem_onboarding", {
+        "track": "Kick",
+        "diagnosis": "The kick diagnosis is long enough but has no measured handoff.",
+    })
+    assert resp["result"]["isError"] is True
+    assert "Run analyze_track first" in result_text(resp)
 
 
 def test_analyze_track_flags_mostly_silent_capture(root, monkeypatch):
