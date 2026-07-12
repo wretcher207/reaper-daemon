@@ -336,5 +336,79 @@ local sparse_plan = rp(sparse, live)
 eq(#sparse_plan.ops, 0, "nothing recorded, nothing written")
 eq(#sparse_plan.unrestored, 0, "nothing recorded, nothing to report")
 
+-- P2-002: preview state verdicts drive the whole lifecycle (active refusal,
+-- token gating, expiry recovery).
+local psv = B.preview_state_verdict
+local pstate = { preview_token = "pv-1", expires_epoch = 1000 }
+eq(psv(nil, nil, 500), "none", "no state file means no preview")
+eq(psv({}, nil, 500), "none", "state without a token is no preview")
+eq(psv(pstate, nil, 500), "active", "live preview with no token supplied is active")
+eq(psv(pstate, "pv-1", 500), "active", "matching token is active")
+eq(psv(pstate, "pv-2", 500), "token_mismatch", "wrong token is typed, not ignored")
+eq(psv(pstate, "pv-1", 1001), "expired", "past expires_epoch is expired")
+eq(psv(pstate, "pv-2", 1001), "expired", "expiry outranks token mismatch (restore first)")
+
+-- P2-002: every identity field the diagnosis supplied must still match, or
+-- the preview refuses with STALE_IDENTITY and mutates nothing.
+local ptv = B.preview_target_verdict
+local target = {
+  track_guid = "{T}", track_name = "Kick",
+  fx_guid = "{F}", fx_index = 2, fx_scope = "track", fx_name = "EQ",
+  parameter_index = 17, parameter_name = "Gain",
+}
+local live_ok = {
+  track_name = "Kick",
+  fx = { index = 2, scope = "track", name = "EQ" },
+  parameter_name = "Gain",
+}
+eq(ptv(target, live_ok), nil, "matching identities pass")
+ok(ptv(target, { track_name = "Kick Copy", fx = live_ok.fx, parameter_name = "Gain" })
+     :find("STALE_IDENTITY", 1, true),
+   "renamed track refuses")
+ok(ptv(target, { track_name = "Kick", fx = nil }):find("STALE_IDENTITY", 1, true),
+   "deleted FX refuses")
+ok(ptv(target, { track_name = "Kick",
+                 fx = { index = 3, scope = "track", name = "EQ" },
+                 parameter_name = "Gain" }):find("STALE_IDENTITY", 1, true),
+   "moved FX refuses")
+ok(ptv(target, { track_name = "Kick",
+                 fx = { index = 2, scope = "input", name = "EQ" },
+                 parameter_name = "Gain" }):find("STALE_IDENTITY", 1, true),
+   "scope change refuses")
+ok(ptv(target, { track_name = "Kick",
+                 fx = { index = 2, scope = "track", name = "Compressor" },
+                 parameter_name = "Gain" }):find("STALE_IDENTITY", 1, true),
+   "renamed FX refuses")
+ok(ptv(target, { track_name = "Kick", fx = live_ok.fx, parameter_name = "Q" })
+     :find("STALE_IDENTITY", 1, true),
+   "renamed parameter refuses")
+local volume_target = { track_guid = "{T}", track_name = "Kick" }
+eq(ptv(volume_target, { track_name = "Kick" }), nil,
+   "track-level target needs no FX identity")
+
+-- P2-002: commit restores the baseline value from the snapshot, then
+-- re-applies inside one undo block; the baseline lookup is pure.
+local btv = B.baseline_target_value
+local snap = {
+  values = {
+    volume = 0.5, pan = -0.1,
+    fx = {
+      { guid = "{F}", enabled = true,
+        parameters = { { index = 17, normalized_value = 0.44 } } },
+    },
+  },
+}
+eq(btv(snap, {}, "set_track_volume"), 0.5, "volume baseline from raw D_VOL")
+eq(btv(snap, {}, "set_track_pan"), -0.1, "pan baseline")
+eq(btv(snap, { fx_guid = "{F}" }, "set_fx_bypass"), true, "bypass baseline is enabled state")
+eq(btv(snap, { fx_guid = "{F}", parameter_index = 17 }, "set_fx_param"), 0.44,
+   "parameter baseline by fx guid + index")
+local missing_param, mp_err = btv(snap, { fx_guid = "{F}", parameter_index = 3 }, "set_fx_param")
+ok(missing_param == nil and mp_err:find("SNAPSHOT_MISSING_TARGET", 1, true),
+   "unrecorded parameter refuses to commit")
+local missing_fx2, mf_err = btv(snap, { fx_guid = "{GONE}" }, "set_fx_bypass")
+ok(missing_fx2 == nil and mf_err:find("SNAPSHOT_MISSING_TARGET", 1, true),
+   "unrecorded FX refuses to commit")
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))

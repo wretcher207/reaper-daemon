@@ -291,6 +291,44 @@ restores. Restore never touches state the snapshot does not contain.
 `delete_after` removes the state file only when `fully_restored` is true.
 Returns `restored[]`, `unrestored[]`, `fully_restored`, `deleted`.
 
+### preview_change
+```json
+{ "operation": "set_fx_param",
+  "target": { "track_guid": "{...}", "track_name": "Kick",
+              "fx_guid": "{...}", "fx_index": 2, "fx_scope": "track",
+              "fx_name": "VST3: Pro-Q 4",
+              "parameter_index": 17, "parameter_name": "Band 3 Gain" },
+  "proposed_value": 0.42 }
+```
+Applies ONE temporary change after snapshotting (P2-001) and persisting the
+preview state to `state/preview.json`. Operations: `set_track_volume`
+(`proposed_value` in dB), `set_track_pan` (-1..1), `set_fx_param` (normalized
+0..1), `set_fx_bypass` (boolean, true = bypassed). Every identity field the
+caller supplies (`track_name`, `fx_index`, `fx_scope`, `fx_name`,
+`parameter_name`) is re-verified against the live project; any mismatch
+refuses with `STALE_IDENTITY` and mutates nothing. Only one preview may be
+active (`PREVIEW_ACTIVE`); an expired one (30 min) is restored first. Creates
+NO undo point. Returns `preview_token`, `snapshot_id`, `applied`
+(before/after), `expires_at`.
+
+### cancel_preview
+`{ "preview_token": "pv-..." }` — restores the full snapshot and deletes the
+preview state. Token required and must match (`BAD_PREVIEW_TOKEN`,
+`NO_ACTIVE_PREVIEW`). Creates no undo point.
+
+### commit_preview
+`{ "preview_token": "pv-..." }` — re-verifies identities (an FX-chain edit
+mid-preview refuses, restores baseline, and errors `STALE_IDENTITY`), restores
+the baseline value, then re-applies the proposed value inside EXACTLY ONE
+named undo block ("Post Mortem: <operation> on <track>"). Undoing that single
+point returns the user to their pre-preview state. Expired previews restore
+and refuse (`PREVIEW_EXPIRED`). Deletes the snapshot and preview state.
+
+Crash recovery: a leftover `state/preview.json` (crash, killed bridge, REAPER
+restart) is restored with cancel semantics at bridge startup, logged, and
+surfaced in the heartbeat as `preview_recovered_at`; an active preview's token
+and expiry ride the heartbeat as `active_preview_token` / `preview_expires_at`.
+
 ---
 
 ## FX
