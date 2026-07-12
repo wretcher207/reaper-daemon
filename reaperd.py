@@ -82,7 +82,11 @@ def reaper_running():
             return "reaper.exe" in (r.stdout or "").lower()
         if system == "Darwin":
             r = subprocess.run(["pgrep", "-x", "REAPER"], capture_output=True, timeout=6)
-            return r.returncode == 0
+            if r.returncode == 0:
+                return True
+            # pgrep uses 1 for a clean no-match. Any other failure means the
+            # process table could not be queried, so let the heartbeat decide.
+            return False if r.returncode == 1 else None
         # Linux: the binary is lowercase `reaper`, and packaging varies (wine,
         # flatpak wrappers), so match both cases and treat a miss as UNKNOWN
         # rather than dead — the heartbeat is the authority there.

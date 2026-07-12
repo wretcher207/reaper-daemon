@@ -286,6 +286,12 @@ def test_reaper_running_macos_miss_is_still_false(monkeypatch):
     assert reaperd.reaper_running() is False
 
 
+def test_reaper_running_macos_probe_error_defers_to_heartbeat(monkeypatch):
+    monkeypatch.setattr(reaperd.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(reaperd.subprocess, "run", lambda *a, **k: _Ret(3))
+    assert reaperd.reaper_running() is None
+
+
 def test_status_falls_back_to_fresh_heartbeat_when_process_unknown(root, monkeypatch):
     monkeypatch.setattr(reaperd, "reaper_running", lambda: None)
     hb = os.path.join(root, "bridge", "heartbeat.json")
