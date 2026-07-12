@@ -2333,6 +2333,10 @@ local function command_get_selected_track(command)
   return {
     selected = true,
     selected_count = selected_count,
+    -- Top-level name/guid kept for compatibility with the pre-3.11 minimal
+    -- reply shape; track{} is the canonical location.
+    name = summary.name,
+    guid = summary.guid,
     track = summary,
     fx_count = reaper.TrackFX_GetCount(track),
     item_count = item_count,
@@ -2925,15 +2929,11 @@ local function command_batch(command)
   return { results = results }
 end
 
-local function command_get_selected_track()
-  local track = reaper.GetSelectedTrack(0, 0)
-  if not track then error("NO_TARGET_TRACK: No track selected") end
-  local _, name = reaper.GetTrackName(track)
-  return { name = name, guid = reaper.GetTrackGUID(track) }
-end
-
 -- Read / context
-handlers.get_selected_track = command_get_selected_track
+-- get_selected_track is registered in the panel-support block below; the
+-- P3-002 command replaced the old minimal {name, guid} reply (kept as
+-- top-level compat fields) and returns selected=false instead of erroring
+-- when nothing is selected.
 handlers.get_context = command_get_context
 handlers.get_fx_parameters = command_get_fx_parameters
 handlers.scan_fx = command_scan_fx

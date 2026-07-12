@@ -234,8 +234,11 @@ the bridge (`D_VOL` is linear); hardware outputs are excluded.
 
 ### get_selected_track
 Read-only, no payload. The Post Mortem panel's Track-screen idle card
-(P3-002). With nothing selected returns `{ "selected": false,
-"selected_count": 0 }`. Otherwise returns the FIRST selected track:
+(P3-002; replaces the pre-3.11 undocumented minimal reply — top-level
+`name`/`guid` are kept for compatibility, and no-selection now returns a
+result instead of erroring). With nothing selected returns
+`{ "selected": false, "selected_count": 0 }`. Otherwise returns the FIRST
+selected track:
 `track` (index/name/guid), `selected_count`, `fx_count`, `item_count`,
 `receive_count`, plus what a capture would do right now — `capture_source`
 (`time_selection` when one is active, else `edit_cursor`, the same
