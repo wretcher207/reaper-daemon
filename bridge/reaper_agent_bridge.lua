@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.9.0
+-- @version 3.10.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -229,6 +229,11 @@ do
 end
 
 local in_flight_command = nil
+-- Active preview (P2-002): mirrors state/preview.json so the heartbeat and the
+-- expiry sweep don't re-read the file every tick. Startup recovery repopulates
+-- consistency after a crash.
+local active_preview = nil
+local preview_recovered_at = nil
 local last_poll = 0
 local poll_interval = tonumber(config.poll_interval_seconds or 0.25)
 local heartbeat_interval = 5
@@ -384,6 +389,11 @@ local function heartbeat_payload(extra)
     project_name = get_project_name(),
     in_flight_command = in_flight_command,
   }
+  if active_preview then
+    hb.active_preview_token = active_preview.preview_token
+    hb.preview_expires_at = active_preview.expires_at
+  end
+  if preview_recovered_at then hb.preview_recovered_at = preview_recovered_at end
   if extra then for k, v in pairs(extra) do hb[k] = v end end
   return hb
 end
@@ -1531,6 +1541,380 @@ local function command_restore_track_state(command)
   }
 end
 
+-- Phase 2 (Post Mortem Verified Fix Preview), P2-002: preview lifecycle.
+-- preview_change snapshots first (P2-001), persists the preview state to disk,
+-- then applies ONE temporary change. cancel_preview restores the snapshot.
+-- commit_preview restores the baseline value, then re-applies the proposed
+-- value inside exactly one named undo block — the only undo point the whole
+-- lifecycle creates. A leftover preview (crash, restart, expiry) restores
+-- automatically with cancel semantics.
+
+local PREVIEW_STATE_PATH = join(root, "state", "preview.json")
+local PREVIEW_MAX_AGE = 30 * 60
+
+local PREVIEW_OPERATIONS = {
+  set_track_volume = true, set_track_pan = true,
+  set_fx_param = true, set_fx_bypass = true,
+}
+
+-- Pure: classify the stored preview state against a supplied token and clock.
+local function preview_state_verdict(state, token, now_epoch)
+  if type(state) ~= "table" or type(state.preview_token) ~= "string" then
+    return "none"
+  end
+  if tonumber(state.expires_epoch) and now_epoch > tonumber(state.expires_epoch) then
+    return "expired"
+  end
+  if token ~= nil and token ~= state.preview_token then
+    return "token_mismatch"
+  end
+  return "active"
+end
+
+-- Pure: every identity field the caller supplied must still describe the same
+-- live object. `live` carries the current names/indices; a nil live.fx means
+-- the FX no longer exists. Returns nil when everything matches, else a typed
+-- STALE_IDENTITY string that names the first mismatch.
+local function preview_target_verdict(target, live)
+  if target.track_name ~= nil and target.track_name ~= live.track_name then
+    return "STALE_IDENTITY: track is now named " .. tostring(live.track_name)
+      .. ", diagnosis said " .. tostring(target.track_name)
+  end
+  local needs_fx = target.fx_guid ~= nil
+  if needs_fx then
+    if not live.fx then
+      return "STALE_IDENTITY: no FX with guid " .. tostring(target.fx_guid)
+    end
+    if target.fx_index ~= nil and target.fx_index ~= live.fx.index then
+      return "STALE_IDENTITY: FX moved to index " .. tostring(live.fx.index)
+        .. ", diagnosis said " .. tostring(target.fx_index)
+    end
+    if target.fx_scope ~= nil and target.fx_scope ~= live.fx.scope then
+      return "STALE_IDENTITY: FX scope is " .. tostring(live.fx.scope)
+        .. ", diagnosis said " .. tostring(target.fx_scope)
+    end
+    if target.fx_name ~= nil and target.fx_name ~= live.fx.name then
+      return "STALE_IDENTITY: FX is now named " .. tostring(live.fx.name)
+        .. ", diagnosis said " .. tostring(target.fx_name)
+    end
+    if target.parameter_index ~= nil and target.parameter_name ~= nil
+       and live.parameter_name ~= nil
+       and target.parameter_name ~= live.parameter_name then
+      return "STALE_IDENTITY: parameter " .. tostring(target.parameter_index)
+        .. " is now named " .. tostring(live.parameter_name)
+        .. ", diagnosis said " .. tostring(target.parameter_name)
+    end
+  end
+  return nil
+end
+
+-- Pure: pull the baseline value for the preview target out of a P2-001
+-- snapshot so commit can restore-then-reapply exactly one value.
+local function baseline_target_value(snapshot, target, operation)
+  local values = snapshot.values or {}
+  if operation == "set_track_volume" then
+    if values.volume == nil then return nil, "SNAPSHOT_MISSING_TARGET: no volume recorded" end
+    return values.volume
+  end
+  if operation == "set_track_pan" then
+    if values.pan == nil then return nil, "SNAPSHOT_MISSING_TARGET: no pan recorded" end
+    return values.pan
+  end
+  for _, fx in ipairs(values.fx or {}) do
+    if fx.guid == target.fx_guid then
+      if operation == "set_fx_bypass" then
+        if fx.enabled == nil then return nil, "SNAPSHOT_MISSING_TARGET: no enabled state recorded" end
+        return fx.enabled
+      end
+      for _, param in ipairs(fx.parameters or {}) do
+        if param.index == target.parameter_index then
+          return param.normalized_value
+        end
+      end
+      return nil, "SNAPSHOT_MISSING_TARGET: parameter " .. tostring(target.parameter_index)
+        .. " not in snapshot"
+    end
+  end
+  return nil, "SNAPSHOT_MISSING_TARGET: FX " .. tostring(target.fx_guid) .. " not in snapshot"
+end
+
+local function read_preview_state()
+  local text = read_file(PREVIEW_STATE_PATH)
+  if not text then return nil end
+  local ok, parsed = pcall(json.decode, text)
+  if ok and type(parsed) == "table" then return parsed end
+  return nil
+end
+
+-- Resolve and verify the preview target against the LIVE project. Returns the
+-- track and (for FX operations) the live FX entry; throws typed errors and
+-- mutates nothing.
+local function resolve_preview_target(target, operation)
+  if type(target) ~= "table" or type(target.track_guid) ~= "string" then
+    error("BAD_PREVIEW_REQUEST: target.track_guid is required")
+  end
+  local track = find_track({ target_track_guid = target.track_guid })
+  local _, track_name = reaper.GetTrackName(track, "")
+  local live = { track_name = track_name }
+  local fx_entry
+  if operation == "set_fx_param" or operation == "set_fx_bypass" then
+    if type(target.fx_guid) ~= "string" then
+      error("BAD_PREVIEW_REQUEST: " .. operation .. " requires target.fx_guid")
+    end
+    for _, entry in ipairs(enumerate_track_fx(track)) do
+      if entry.guid == target.fx_guid then fx_entry = entry break end
+    end
+    live.fx = fx_entry
+    if operation == "set_fx_param" then
+      local pidx = tonumber(target.parameter_index)
+      if not pidx then
+        error("BAD_PREVIEW_REQUEST: set_fx_param requires target.parameter_index")
+      end
+      if fx_entry then
+        if pidx < 0 or pidx >= reaper.TrackFX_GetNumParams(track, fx_entry.api_index) then
+          error("STALE_IDENTITY: parameter_index " .. tostring(pidx)
+            .. " out of range for " .. fx_entry.name)
+        end
+        local _, pname = reaper.TrackFX_GetParamName(track, fx_entry.api_index, pidx, "")
+        live.parameter_name = pname
+      end
+    end
+  end
+  local stale = preview_target_verdict(target, live)
+  if stale then error(stale) end
+  return track, fx_entry
+end
+
+-- Apply one preview value. Returns { before = ..., after = ... } in the
+-- operation's natural unit (dB, normalized pan, normalized 0..1, bypassed).
+local function apply_preview_value(track, fx_entry, target, operation, proposed)
+  if operation == "set_track_volume" then
+    local db = tonumber(proposed)
+    if not db then error("BAD_PREVIEW_REQUEST: proposed_value must be dB for set_track_volume") end
+    local before = db_from_volume(reaper.GetMediaTrackInfo_Value(track, "D_VOL"))
+    reaper.SetMediaTrackInfo_Value(track, "D_VOL", volume_from_db(db))
+    return { before = before, after = db, unit = "db" }
+  end
+  if operation == "set_track_pan" then
+    local pan = tonumber(proposed)
+    if not pan then error("BAD_PREVIEW_REQUEST: proposed_value must be -1..1 for set_track_pan") end
+    if pan < -1 then pan = -1 end
+    if pan > 1 then pan = 1 end
+    local before = reaper.GetMediaTrackInfo_Value(track, "D_PAN")
+    reaper.SetMediaTrackInfo_Value(track, "D_PAN", pan)
+    return { before = before, after = pan, unit = "normalized_pan" }
+  end
+  if operation == "set_fx_param" then
+    local value = tonumber(proposed)
+    if not value then error("BAD_PREVIEW_REQUEST: proposed_value must be normalized 0..1") end
+    if value < 0 then value = 0 end
+    if value > 1 then value = 1 end
+    local pidx = tonumber(target.parameter_index)
+    local before = reaper.TrackFX_GetParamNormalized(track, fx_entry.api_index, pidx)
+    reaper.TrackFX_SetParamNormalized(track, fx_entry.api_index, pidx, value)
+    return { before = before, after = value, unit = "normalized" }
+  end
+  if operation == "set_fx_bypass" then
+    if type(proposed) ~= "boolean" then
+      error("BAD_PREVIEW_REQUEST: proposed_value must be a boolean (true = bypassed)")
+    end
+    local before_enabled = reaper.TrackFX_GetEnabled(track, fx_entry.api_index)
+    reaper.TrackFX_SetEnabled(track, fx_entry.api_index, not proposed)
+    return { before = not before_enabled, after = proposed, unit = "bypassed" }
+  end
+  error("BAD_PREVIEW_REQUEST: unsupported operation " .. tostring(operation))
+end
+
+-- Cancel semantics shared by cancel_preview, expiry, and startup recovery:
+-- restore the full snapshot, then delete the preview state. Never throws; a
+-- track that no longer exists has nothing left to restore.
+local function restore_preview(state, reason)
+  local ok, err = pcall(function()
+    command_restore_track_state({
+      payload = { snapshot_id = state.snapshot_id, delete_after = true },
+    })
+  end)
+  if not ok then
+    log_line("preview restore failed (" .. reason .. "): " .. tostring(err))
+  end
+  os.remove(PREVIEW_STATE_PATH)
+  active_preview = nil
+  log_line("preview " .. tostring(state.preview_token) .. " restored (" .. reason .. ")")
+  return ok
+end
+
+local function command_preview_change(command)
+  -- NO_UNDO_BLOCK commands skip run_command's dry_run short-circuit, but this
+  -- one really mutates: honor dry_run here.
+  if command.dry_run then
+    return { dry_run = true, would_run = "preview_change", payload = command.payload or {} }
+  end
+  local payload = command.payload or {}
+  local operation = payload.operation
+  if not PREVIEW_OPERATIONS[operation] then
+    error("BAD_PREVIEW_REQUEST: operation must be one of set_track_volume, "
+      .. "set_track_pan, set_fx_param, set_fx_bypass")
+  end
+  if payload.proposed_value == nil then
+    error("BAD_PREVIEW_REQUEST: proposed_value is required")
+  end
+
+  local existing = read_preview_state()
+  local verdict = preview_state_verdict(existing, nil, os.time())
+  if verdict == "active" then
+    error("PREVIEW_ACTIVE: preview " .. existing.preview_token
+      .. " is active; commit or cancel it first")
+  elseif verdict == "expired" then
+    restore_preview(existing, "expired")
+  end
+
+  local target = payload.target or {}
+  local track, fx_entry = resolve_preview_target(target, operation)
+
+  -- Snapshot BEFORE the mutation (P2-001). For a parameter preview, name the
+  -- parameter so its baseline value is recorded.
+  local snapshot_request = { payload = { target_track_guid = target.track_guid } }
+  if operation == "set_fx_param" then
+    snapshot_request.payload.parameters = {
+      { fx_guid = target.fx_guid, parameter_index = target.parameter_index },
+    }
+  end
+  local snapshot = command_snapshot_track_state(snapshot_request)
+
+  local state = {
+    schema_version = 1,
+    preview_token = "pv-" .. os.date("!%Y%m%dT%H%M%SZ") .. "-"
+      .. string.format("%06x", math.floor((reaper.time_precise() % 1) * 0xffffff)),
+    created_at = now(),
+    created_epoch = os.time(),
+    expires_epoch = os.time() + PREVIEW_MAX_AGE,
+    expires_at = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time() + PREVIEW_MAX_AGE),
+    operation = operation,
+    target = target,
+    proposed_value = payload.proposed_value,
+    snapshot_id = snapshot.snapshot_id,
+    project_name = get_project_name(),
+  }
+  -- Persist the preview state before applying: a crash between this write and
+  -- the apply recovers to a restore of an unchanged track — harmless.
+  atomic_write_json(PREVIEW_STATE_PATH, state)
+
+  local applied = apply_preview_value(track, fx_entry, target, operation, payload.proposed_value)
+  active_preview = state
+  return {
+    preview_token = state.preview_token,
+    snapshot_id = snapshot.snapshot_id,
+    operation = operation,
+    applied = applied,
+    expires_at = state.expires_at,
+    track = track_summary(track),
+  }
+end
+
+local function command_cancel_preview(command)
+  if command.dry_run then
+    return { dry_run = true, would_run = "cancel_preview", payload = command.payload or {} }
+  end
+  local payload = command.payload or {}
+  local state = read_preview_state()
+  local verdict = preview_state_verdict(state, payload.preview_token, os.time())
+  if verdict == "none" then error("NO_ACTIVE_PREVIEW: nothing to cancel") end
+  if verdict == "token_mismatch" then
+    error("BAD_PREVIEW_TOKEN: token does not match the active preview")
+  end
+  if payload.preview_token == nil then
+    error("BAD_PREVIEW_REQUEST: preview_token is required")
+  end
+  local restored = restore_preview(state, "cancelled")
+  return { preview_token = state.preview_token, restored = restored }
+end
+
+local function command_commit_preview(command)
+  if command.dry_run then
+    return { dry_run = true, would_run = "commit_preview", payload = command.payload or {} }
+  end
+  local payload = command.payload or {}
+  local state = read_preview_state()
+  local verdict = preview_state_verdict(state, payload.preview_token, os.time())
+  if verdict == "none" then error("NO_ACTIVE_PREVIEW: nothing to commit") end
+  if verdict == "token_mismatch" then
+    error("BAD_PREVIEW_TOKEN: token does not match the active preview")
+  end
+  if verdict == "expired" then
+    restore_preview(state, "expired")
+    error("PREVIEW_EXPIRED: the preview expired and the baseline was restored")
+  end
+  if payload.preview_token == nil then
+    error("BAD_PREVIEW_REQUEST: preview_token is required")
+  end
+
+  -- Re-verify identities: an FX chain edit mid-preview refuses, restores, and
+  -- leaves the project at baseline rather than committing against the wrong
+  -- object.
+  local resolve_ok, track_or_err, fx_entry = pcall(
+    resolve_preview_target, state.target, state.operation)
+  if not resolve_ok then
+    restore_preview(state, "stale identity at commit")
+    error(track_or_err)
+  end
+  local track = track_or_err
+
+  local snapshot_path = join(SNAPSHOT_STATE_DIR, state.snapshot_id .. ".json")
+  local snapshot_text = read_file(snapshot_path)
+  if not snapshot_text then
+    error("NO_SNAPSHOT: preview snapshot " .. tostring(state.snapshot_id) .. " is missing")
+  end
+  local decoded_ok, snapshot = pcall(json.decode, snapshot_text)
+  if not decoded_ok or snapshot_validate(snapshot) then
+    error("BAD_SNAPSHOT: preview snapshot is unreadable")
+  end
+  local baseline, baseline_err = baseline_target_value(snapshot, state.target, state.operation)
+  if baseline == nil and baseline_err then error(baseline_err) end
+
+  -- Restore the baseline value silently, then re-apply the proposed value
+  -- inside ONE named undo block: undoing that single point returns the user
+  -- to their pre-preview state.
+  local pidx = tonumber(state.target.parameter_index)
+  if state.operation == "set_track_volume" then
+    reaper.SetMediaTrackInfo_Value(track, "D_VOL", baseline)
+  elseif state.operation == "set_track_pan" then
+    reaper.SetMediaTrackInfo_Value(track, "D_PAN", baseline)
+  elseif state.operation == "set_fx_param" then
+    reaper.TrackFX_SetParamNormalized(track, fx_entry.api_index, pidx, baseline)
+  elseif state.operation == "set_fx_bypass" then
+    reaper.TrackFX_SetEnabled(track, fx_entry.api_index, baseline)
+  end
+
+  local _, track_name = reaper.GetTrackName(track, "")
+  local undo_name = "Post Mortem: " .. state.operation .. " on " .. tostring(track_name)
+  reaper.Undo_BeginBlock()
+  local apply_ok, applied = pcall(
+    apply_preview_value, track, fx_entry, state.target, state.operation, state.proposed_value)
+  reaper.Undo_EndBlock(undo_name, -1)
+  if not apply_ok then error(applied) end
+
+  os.remove(snapshot_path)
+  os.remove(PREVIEW_STATE_PATH)
+  active_preview = nil
+  log_line("preview " .. state.preview_token .. " committed: " .. undo_name)
+  return {
+    preview_token = state.preview_token,
+    committed = applied,
+    undo_point = undo_name,
+    track = track_summary(track),
+  }
+end
+
+-- Expire an overdue preview from the defer loop (rule 6). Cheap: file reads
+-- only happen while a preview is active.
+local function maybe_expire_preview(now_epoch)
+  if not active_preview then return end
+  if tonumber(active_preview.expires_epoch)
+     and now_epoch > tonumber(active_preview.expires_epoch) then
+    restore_preview(active_preview, "expired")
+  end
+end
+
 local function command_mute_track(command)
   local payload = command.payload or {}
   local track = find_track(payload)
@@ -2331,6 +2715,13 @@ local NO_UNDO_BLOCK = {
   -- snapshot_track_state only reads project state; its write is a state file
   -- outside the project.
   snapshot_track_state = true,
+  -- The preview lifecycle deliberately creates NO undo points except the one
+  -- commit_preview manages itself (restore baseline, then apply inside a
+  -- single named Undo block). Temporary preview state must never appear in
+  -- the user's undo history.
+  preview_change = true,
+  cancel_preview = true,
+  commit_preview = true,
 }
 
 local function is_mutating(command_type)
@@ -2446,6 +2837,11 @@ handlers.arm_track = command_arm_track
 -- Track state snapshot/restore (Post Mortem Verified Fix Preview, P2-001)
 handlers.snapshot_track_state = command_snapshot_track_state
 handlers.restore_track_state = command_restore_track_state
+
+-- Preview lifecycle (Post Mortem Verified Fix Preview, P2-002)
+handlers.preview_change = command_preview_change
+handlers.cancel_preview = command_cancel_preview
+handlers.commit_preview = command_commit_preview
 
 -- FX
 handlers.add_fx = command_add_fx
@@ -2640,6 +3036,7 @@ local function loop()
         if reaper.time_precise() - tick_start >= DRAIN_BUDGET then break end
       end
       maybe_sweep()
+      maybe_expire_preview(os.time())
     end)
     if not ok then
       log_line("loop error " .. tostring(err))
@@ -2699,6 +3096,9 @@ if _G.REAPER_BRIDGE_SELFTEST then
     capture_provenance = capture_provenance,
     snapshot_validate = snapshot_validate,
     restore_plan = restore_plan,
+    preview_state_verdict = preview_state_verdict,
+    preview_target_verdict = preview_target_verdict,
+    baseline_target_value = baseline_target_value,
   }
 end
 
@@ -2722,6 +3122,18 @@ for _, filename in ipairs(list_json_files(paths.processing)) do
     pcall(write_result, { id = id, type = "requeue" }, false,
       "STALE_COMMAND: stranded in processing/ past the requeue age gate; not re-run")
     move_file(processing_path, join(paths.failed, filename))
+  end
+end
+
+-- Preview crash recovery (P2-002): a preview left behind by a crash, a killed
+-- bridge, or a REAPER restart restores its baseline before any new command
+-- runs. Cancel semantics; the recovery is logged and surfaced in the
+-- heartbeat as preview_recovered_at.
+do
+  local leftover = read_preview_state()
+  if leftover then
+    restore_preview(leftover, "recovered at startup")
+    preview_recovered_at = now()
   end
 end
 
