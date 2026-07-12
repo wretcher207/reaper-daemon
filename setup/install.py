@@ -56,18 +56,61 @@ def block_text(bridge_dir):
         "do\n"
         f'  local BRIDGE_DIR = "{esc}"\n'
         '  local bridge_file = BRIDGE_DIR .. "/reaper_agent_bridge.lua"\n'
-        '  local f = io.open(bridge_file, "r")\n'
-        "  if f then\n"
+        '  local repo_root = BRIDGE_DIR:match("^(.+)[/\\\\][^/\\\\]+$") or BRIDGE_DIR\n'
+        '  local lockfile = repo_root .. "/logs/bridge.lock"\n'
+        "  local RENDER_LOCK_MAX_AGE = 6 * 3600\n"
+        "\n"
+        "  local function read_lock()\n"
+        '    local f = io.open(lockfile, "r")\n'
+        "    if not f then return nil end\n"
+        '    local content = f:read("*a")\n'
         "    f:close()\n"
-        "    REAPER_AGENT_BRIDGE_DIR = BRIDGE_DIR\n"
-        "    local ok, err = pcall(dofile, bridge_file)\n"
-        "    if not ok then\n"
-        '      reaper.ShowConsoleMsg("[agent-bridge] startup load failed: " .. tostring(err) .. "\\n")\n'
-        "    end\n"
-        "  else\n"
-        '    reaper.ShowConsoleMsg("[agent-bridge] startup: bridge NOT found at " .. bridge_file ..\n'
-        '      " -- repo moved/renamed? re-run setup/install.py from the bridge folder.\\n")\n'
+        "    -- v3.1+ writes JSON; accept the old bare epoch during upgrades.\n"
+        '    local started = tonumber(content:match(\'"started"%s*:%s*(%d+)\'))\n'
+        '      or tonumber(content:match("^%s*(%d+)%s*$"))\n'
+        '    local busy = content:match(\'"busy"%s*:%s*"([^\"]+)"\') or "none"\n'
+        "    if not started then return nil end\n"
+        "    return { started = started, busy = busy }\n"
         "  end\n"
+        "\n"
+        "  local function lock_is_stale(lock, now)\n"
+        "    if not lock then return true end\n"
+        "    local age = now - lock.started\n"
+        '    if lock.busy == "render" then return age > RENDER_LOCK_MAX_AGE end\n'
+        "    return age >= 60\n"
+        "  end\n"
+        "\n"
+        "  local function load_bridge()\n"
+        '  local f = io.open(bridge_file, "r")\n'
+        "    if f then\n"
+        "      f:close()\n"
+        "      REAPER_AGENT_BRIDGE_DIR = BRIDGE_DIR\n"
+        "      local ok, err = pcall(dofile, bridge_file)\n"
+        "      if not ok then\n"
+        '        reaper.ShowConsoleMsg("[agent-bridge] startup load failed: " .. tostring(err) .. "\\n")\n'
+        "      end\n"
+        "    else\n"
+        '      reaper.ShowConsoleMsg("[agent-bridge] startup: bridge NOT found at " .. bridge_file ..\n'
+        '        " -- repo moved/renamed? re-run setup/install.py from the bridge folder.\\n")\n'
+        "    end\n"
+        "  end\n"
+        "\n"
+        "  load_bridge()\n"
+        "\n"
+        "  local watchdog_interval = 10\n"
+        "  local watchdog_last = reaper.time_precise()\n"
+        "  local function watchdog()\n"
+        "    local now = reaper.time_precise()\n"
+        "    if now - watchdog_last >= watchdog_interval then\n"
+        "      watchdog_last = now\n"
+        "      if lock_is_stale(read_lock(), os.time()) then\n"
+        '        reaper.ShowConsoleMsg("[agent-bridge] watchdog: bridge stopped, restarting...\\n")\n'
+        "        load_bridge()\n"
+        "      end\n"
+        "    end\n"
+        "    reaper.defer(watchdog)\n"
+        "  end\n"
+        "  reaper.defer(watchdog)\n"
         "end\n"
         f"{END}\n"
     )

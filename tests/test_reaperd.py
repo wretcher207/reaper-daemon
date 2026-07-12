@@ -340,3 +340,19 @@ def test_strip_block_aborts_on_begin_without_end():
         install.strip_block(text)
     intact = f"a\n{install.BEGIN}\nx\n{install.END}\nb\n"
     assert install.strip_block(intact) == "a\nb\n"
+
+
+def test_startup_block_watchdog_understands_json_locks():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "rd_install_watchdog", os.path.join(REPO, "setup", "install.py"))
+    install = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(install)
+
+    block = install.block_text(os.path.join(REPO, "bridge"))
+
+    assert 'content:match(\'"started"%s*:%s*(%d+)\')' in block
+    assert 'content:match(\'"busy"%s*:%s*"([^\"]+)"\')' in block
+    assert "RENDER_LOCK_MAX_AGE = 6 * 3600" in block
+    assert "reaper.defer(watchdog)" in block
+    assert "os.remove(lockfile)" not in block
