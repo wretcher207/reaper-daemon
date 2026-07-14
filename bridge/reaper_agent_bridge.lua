@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.11.2
+-- @version 3.11.3
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -13,6 +13,9 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.11.3: First-run captures temporarily enable REAPER 7.75+'s render-stats
+--   retention bit as well as auto-close, preventing a modal from blocking the
+--   bridge, then restore the user's exact render preference.
 --   3.11.2: A fresh bridge heartbeat is authoritative when a packaged macOS
 --   sidecar cannot see REAPER through the best-effort process probe.
 --   3.11.1: The managed startup watchdog now reads the bridge's JSON lock,
@@ -2204,16 +2207,15 @@ local function command_delete_items_in_range(command)
   return { removed_count = removed, range = { start = start_time, ["end"] = end_time } }
 end
 
--- REAPER's render action (42230) is synchronous AND leaves the "Rendering to
--- File" progress window open until it is dismissed, UNLESS the window's
--- "Automatically close when finished" checkbox is ticked. That checkbox is the
--- config var `renderclosewhendone` bit 0 (&1); on a fresh install it is off, so
--- Main_OnCommand(42230) never returns and the whole defer loop hangs (observed
--- ~11 min) until the window is closed by hand. Force the bit on for our render
--- and restore the user's setting afterward. This is the bridge's ONLY use of
--- SWS (SNM_*), so degrade gracefully when SWS is absent: we cannot force the
--- checkbox, so the caller surfaces a warning instead of silently risking a hang.
+-- REAPER's synchronous render path has two first-run modal hazards in the
+-- `renderclosewhendone` bitfield. Bit 0 controls "Automatically close when
+-- finished". REAPER 7.75 added bit 21 for retaining render statistics; when it
+-- is off, our first RENDER_STATS read opens a Yes/No dialog and blocks the defer
+-- loop. Force both bits only for our render, read the statistics, then restore
+-- the user's exact setting. This is the bridge's ONLY use of SWS (SNM_*), so
+-- degrade gracefully when SWS is absent.
 local RENDER_AUTOCLOSE_VAR = "renderclosewhendone"
+local RENDER_REQUIRED_BITS = 1 | (1 << 21)
 
 local function ensure_render_autoclose()
   if not (reaper.SNM_GetIntConfigVar and reaper.SNM_SetIntConfigVar) then
@@ -2224,10 +2226,10 @@ local function ensure_render_autoclose()
     -- -1 is the "var not found" sentinel; the real bitfield is never negative.
     return { guaranteed = false, reason = "renderclosewhendone unavailable" }
   end
-  if cur & 1 == 1 then
-    return { guaranteed = true }  -- already auto-closing; leave it, nothing to restore
+  if cur & RENDER_REQUIRED_BITS == RENDER_REQUIRED_BITS then
+    return { guaranteed = true }  -- already safe; leave it, nothing to restore
   end
-  reaper.SNM_SetIntConfigVar(RENDER_AUTOCLOSE_VAR, cur | 1)
+  reaper.SNM_SetIntConfigVar(RENDER_AUTOCLOSE_VAR, cur | RENDER_REQUIRED_BITS)
   return { guaranteed = true, restore = cur }
 end
 

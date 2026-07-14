@@ -256,11 +256,23 @@ eq(store.renderclosewhendone, 2097157, "only bit0 flipped, other bits preserved"
 rar(tok)
 eq(store.renderclosewhendone, 2097156, "user's setting restored after render")
 
--- bit0 already set -> leave it alone, nothing to restore.
+-- A fresh REAPER 7.75+ install can already auto-close but still has the new
+-- save-render-statistics preference off. RENDER_STATS then opens a modal after
+-- the render and blocks the bridge. Force that bit for the same bounded render.
+store.renderclosewhendone = 5
+tok = ear()
+eq(tok.guaranteed, true, "fresh config -> render preferences guaranteed")
+eq(tok.restore, 5, "fresh config captured for restore")
+eq(store.renderclosewhendone, 2097157,
+   "save-render-statistics and auto-close enabled together")
+rar(tok)
+eq(store.renderclosewhendone, 5, "fresh render preferences restored")
+
+-- Both required bits already set -> leave the setting alone, nothing to restore.
 store.renderclosewhendone = 2097157
 tok = ear()
-eq(tok.guaranteed, true, "SWS + bit already set -> guaranteed")
-ok(tok.restore == nil, "already auto-closing -> no restore needed")
+eq(tok.guaranteed, true, "SWS + required bits already set -> guaranteed")
+ok(tok.restore == nil, "render preferences already safe -> no restore needed")
 eq(store.renderclosewhendone, 2097157, "already-on value untouched")
 
 -- config var missing (SNM returns the error sentinel) -> degrade, don't touch.
