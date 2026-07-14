@@ -226,11 +226,12 @@ ok(lv({ started = lnow - 3600, busy = "render" }, lnow) ~= nil,
 eq(lv({ started = lnow - 7 * 3600, busy = "render" }, lnow), nil,
    "ancient render lock reclaimed (power loss no longer bricks the bridge)")
 
--- Render-dialog-hang fix: force renderclosewhendone bit0 (auto-close) on for a
--- render, restore the user's setting after. Needs SWS (SNM_*); must degrade,
--- never hang, when SWS is absent.
+-- Render-dialog-hang fix: force both required renderclosewhendone preferences
+-- for a render, restore the user's setting after, and fail closed when SWS
+-- cannot guarantee that no first-run modal will block the bridge.
 local ear = B.ensure_render_autoclose
 local rar = B.restore_render_autoclose
+local rpe = B.render_preferences_error
 
 -- No SWS -> cannot force auto-close; degrade to "not guaranteed" (caller warns).
 _G.reaper.SNM_GetIntConfigVar = nil
@@ -238,7 +239,13 @@ _G.reaper.SNM_SetIntConfigVar = nil
 local tok = ear()
 eq(tok.guaranteed, false, "no SWS -> not guaranteed")
 ok(tok.restore == nil, "no SWS -> nothing to restore")
-rar(tok) -- must be a harmless no-op, not an error
+ok(tok.reason:find("Automatically close when finished", 1, true) ~= nil,
+   "no SWS remediation names auto-close")
+ok(tok.reason:find("Save render statistics", 1, true) ~= nil,
+   "no SWS remediation names render statistics")
+ok(rpe(tok):find("RENDER_PREFERENCES_UNSAFE", 1, true) ~= nil,
+   "no SWS capture refuses before opening the render window")
+eq(rar(tok), true, "no SWS restore is a harmless no-op")
 
 -- SWS present: back the config var with a table so get/set round-trips.
 local store = { renderclosewhendone = 2097156 } -- real on-disk value: bit0 clear (auto-close OFF)
@@ -267,6 +274,31 @@ eq(store.renderclosewhendone, 2097157,
    "save-render-statistics and auto-close enabled together")
 rar(tok)
 eq(store.renderclosewhendone, 5, "fresh render preferences restored")
+
+-- A failed SWS setter must never be reported as safe.
+store.renderclosewhendone = 5
+_G.reaper.SNM_SetIntConfigVar = function() return false end
+tok = ear()
+eq(tok.guaranteed, false, "failed render preference write is not guaranteed")
+ok(rpe(tok):find("could not enable", 1, true) ~= nil,
+   "failed render preference write refuses capture")
+
+-- A failed exact restore is surfaced to the caller instead of silently
+-- leaving the user's preferences changed.
+store.renderclosewhendone = 5
+_G.reaper.SNM_SetIntConfigVar = function(name, val)
+  if val == 5 then return false end
+  store[name] = val
+  return true
+end
+tok = ear()
+eq(tok.guaranteed, true, "preference write succeeds before restore failure")
+local restored, restore_error = rar(tok)
+eq(restored, false, "failed preference restore is reported")
+ok(restore_error:find("restore", 1, true) ~= nil,
+   "failed preference restore explains the invariant violation")
+
+_G.reaper.SNM_SetIntConfigVar = function(name, val) store[name] = val; return true end
 
 -- Both required bits already set -> leave the setting alone, nothing to restore.
 store.renderclosewhendone = 2097157
@@ -445,14 +477,16 @@ v = pv(true, true, false)
 eq(v.capture_allowed, true, "SWS can force autoclose: allowed")
 eq(#v.warnings, 0, "SWS can force autoclose: no hang warning")
 v = pv(true, false, nil)
-eq(v.capture_allowed, true, "no SWS is a warning, not a block")
-eq(v.warnings[1].code, "render_hang_risk", "no SWS warns of the render hang")
+eq(v.capture_allowed, false, "no SWS fails closed before capture")
+eq(v.blockers[1].code, "render_preferences_unavailable",
+   "no SWS reports the render preference blocker")
 v = pv(true, true, nil)
-eq(v.warnings[1].code, "render_hang_risk",
-   "SWS present but config var unreadable still warns")
+eq(v.capture_allowed, false, "unreadable render preferences fail closed")
+eq(v.blockers[1].code, "render_preferences_unavailable",
+   "unreadable render preferences report a blocker")
 v = pv(false, false, nil)
 eq(v.capture_allowed, false, "gated + no SWS: blocked")
-ok(#v.blockers == 1 and #v.warnings == 1, "gated + no SWS: blocker AND warning")
+ok(#v.blockers == 2 and #v.warnings == 0, "gated + no SWS: both blockers")
 
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))

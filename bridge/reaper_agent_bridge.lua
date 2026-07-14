@@ -2217,26 +2217,60 @@ end
 local RENDER_AUTOCLOSE_VAR = "renderclosewhendone"
 local RENDER_REQUIRED_BITS = 1 | (1 << 21)
 
+local RENDER_PREFERENCES_REMEDIATION =
+  "enable both 'Automatically close when finished' and 'Save render statistics' "
+  .. "in REAPER's render window"
+
 local function ensure_render_autoclose()
   if not (reaper.SNM_GetIntConfigVar and reaper.SNM_SetIntConfigVar) then
-    return { guaranteed = false, reason = "SWS not installed: cannot force render-window auto-close" }
+    return {
+      guaranteed = false,
+      reason = "SWS not installed: cannot safely force render preferences; "
+        .. RENDER_PREFERENCES_REMEDIATION,
+    }
   end
   local cur = reaper.SNM_GetIntConfigVar(RENDER_AUTOCLOSE_VAR, -1)
   if cur == -1 then
     -- -1 is the "var not found" sentinel; the real bitfield is never negative.
-    return { guaranteed = false, reason = "renderclosewhendone unavailable" }
+    return {
+      guaranteed = false,
+      reason = "renderclosewhendone unavailable; " .. RENDER_PREFERENCES_REMEDIATION,
+    }
   end
   if cur & RENDER_REQUIRED_BITS == RENDER_REQUIRED_BITS then
     return { guaranteed = true }  -- already safe; leave it, nothing to restore
   end
-  reaper.SNM_SetIntConfigVar(RENDER_AUTOCLOSE_VAR, cur | RENDER_REQUIRED_BITS)
+  local wanted = cur | RENDER_REQUIRED_BITS
+  local set_ok = reaper.SNM_SetIntConfigVar(RENDER_AUTOCLOSE_VAR, wanted)
+  local observed = reaper.SNM_GetIntConfigVar(RENDER_AUTOCLOSE_VAR, -1)
+  if not set_ok or observed ~= wanted then
+    return {
+      guaranteed = false,
+      restore = cur,
+      reason = "SWS could not enable the required render preferences; "
+        .. RENDER_PREFERENCES_REMEDIATION,
+    }
+  end
   return { guaranteed = true, restore = cur }
 end
 
 local function restore_render_autoclose(token)
-  if token and token.restore ~= nil and reaper.SNM_SetIntConfigVar then
-    reaper.SNM_SetIntConfigVar(RENDER_AUTOCLOSE_VAR, token.restore)
+  if not token or token.restore == nil then return true end
+  if not (reaper.SNM_GetIntConfigVar and reaper.SNM_SetIntConfigVar) then
+    return false, "RENDER_PREFERENCES_RESTORE_FAILED: SWS became unavailable"
   end
+  local set_ok = reaper.SNM_SetIntConfigVar(RENDER_AUTOCLOSE_VAR, token.restore)
+  local observed = reaper.SNM_GetIntConfigVar(RENDER_AUTOCLOSE_VAR, -1)
+  if not set_ok or observed ~= token.restore then
+    return false, "RENDER_PREFERENCES_RESTORE_FAILED: could not restore the user's exact renderclosewhendone value"
+  end
+  return true
+end
+
+local function render_preferences_error(token)
+  if token and token.guaranteed then return nil end
+  return "RENDER_PREFERENCES_UNSAFE: "
+    .. tostring(token and token.reason or "render preferences were not checked")
 end
 
 -- Capture provenance is part of the public result contract. A caller must never
@@ -2278,11 +2312,11 @@ local function expected_capture_scope(is_master, item_count)
   return "full_mix"
 end
 
--- Preflight verdict from plain values (pure, selftest-covered). autoclose is
--- true/false when SWS can read renderclosewhendone bit 0, nil when it cannot
--- (SWS absent or var missing). A hard blocker means capture would REFUSE; a
--- warning means it would run but degrade (possible render-window hang).
-local function preflight_verdict(allow_risk, sws_installed, autoclose)
+-- Preflight verdict from plain values (pure, selftest-covered).
+-- render_preferences is true only when both modal-prevention bits are already
+-- enabled, false when SWS can read and force them, and nil when SWS cannot
+-- guarantee a non-blocking render. Unknown preferences fail closed.
+local function preflight_verdict(allow_risk, sws_installed, render_preferences)
   local blockers, warnings = {}, {}
   if not allow_risk then
     blockers[#blockers + 1] = {
@@ -2292,16 +2326,13 @@ local function preflight_verdict(allow_risk, sws_installed, autoclose)
         .. "no reload command).",
     }
   end
-  -- Auto-close is safe when it is already on, or when SWS can force it per
-  -- render. Warn only when we can neither observe it on nor force it.
-  local can_force = sws_installed and autoclose ~= nil
-  if autoclose ~= true and not can_force then
-    warnings[#warnings + 1] = {
-      code = "render_hang_risk",
-      message = "The bridge cannot force REAPER's render window to auto-close "
-        .. "(SWS missing or config var unreadable). Until 'Automatically close "
-        .. "when finished' is ticked once in the render window, the first "
-        .. "capture can hang until the window is closed by hand.",
+  local can_force = sws_installed and render_preferences ~= nil
+  if render_preferences ~= true and not can_force then
+    blockers[#blockers + 1] = {
+      code = "render_preferences_unavailable",
+      message = "The bridge cannot guarantee a non-blocking render because SWS "
+        .. "is missing or renderclosewhendone is unreadable. Install SWS, or "
+        .. RENDER_PREFERENCES_REMEDIATION .. ", then run the preflight again.",
     }
   end
   return {
@@ -2364,12 +2395,16 @@ local function command_get_capture_preflight(command)
   local sws_installed = (reaper.SNM_GetIntConfigVar and reaper.SNM_SetIntConfigVar)
     and true or false
   local autoclose = nil
+  local render_preferences = nil
   if sws_installed then
     local cur = reaper.SNM_GetIntConfigVar(RENDER_AUTOCLOSE_VAR, -1)
-    if cur ~= -1 then autoclose = (cur & 1 == 1) end
+    if cur ~= -1 then
+      autoclose = (cur & 1 == 1)
+      render_preferences = (cur & RENDER_REQUIRED_BITS == RENDER_REQUIRED_BITS)
+    end
   end
   local verdict = preflight_verdict(
-    config.allow_risk_level_3 == true, sws_installed, autoclose)
+    config.allow_risk_level_3 == true, sws_installed, render_preferences)
 
   local target = nil
   if payload.target_track_name or payload.target_track_guid
@@ -2394,6 +2429,7 @@ local function command_get_capture_preflight(command)
     },
     sws_installed = sws_installed,
     render_autoclose = autoclose,
+    render_preferences_ready = render_preferences,
     target = target,
   }
 end
@@ -2422,8 +2458,16 @@ local function command_render(command)
   -- Render with the project's most recent render settings (format, sample rate,
   -- etc. must be configured once in REAPER's Render dialog).
   local autoclose = ensure_render_autoclose()
-  reaper.Main_OnCommand(42230, 0) -- 42230 = File: Render project
-  restore_render_autoclose(autoclose)
+  local preference_error = render_preferences_error(autoclose)
+  if preference_error then
+    local restored, restore_error = restore_render_autoclose(autoclose)
+    if not restored then preference_error = preference_error .. "; " .. restore_error end
+    error(preference_error)
+  end
+  local render_ok, render_error = pcall(reaper.Main_OnCommand, 42230, 0)
+  local restored, restore_error = restore_render_autoclose(autoclose)
+  if not restored then error(restore_error) end
+  if not render_ok then error(render_error) end
   return {
     rendered = true,
     output_file = select(2, reaper.GetSetProjectInfo_String(0, "RENDER_FILE", "", false)),
@@ -2569,6 +2613,8 @@ local function command_capture_track_audio(command)
     atomic_write_json(paths.heartbeat, heartbeat_payload({ busy = "render" }))
     write_lock("render")
     autoclose_token = ensure_render_autoclose()
+    local preference_error = render_preferences_error(autoclose_token)
+    if preference_error then error(preference_error) end
     reaper.Main_OnCommand(42230, 0) -- File: Render project
 
     local f = io.open(target, "rb")
@@ -2611,7 +2657,7 @@ local function command_capture_track_audio(command)
   reaper.GetSetProjectInfo_String(0, "RENDER_FILE", saved.file, true)
   reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", saved.pattern, true)
   reaper.GetSetProjectInfo_String(0, "RENDER_FORMAT", saved.format, true)
-  restore_render_autoclose(autoclose_token)
+  local preferences_restored, restore_error = restore_render_autoclose(autoclose_token)
   if isolate then
     for i = 0, track_count - 1 do
       reaper.SetMediaTrackInfo_Value(reaper.GetTrack(0, i), "I_SOLO", saved_solo[i] or 0)
@@ -2630,6 +2676,7 @@ local function command_capture_track_audio(command)
     reaper.SetTrackSelected(track, false)
   end
 
+  if not preferences_restored then error(restore_error) end
   if not ok then error(result) end
   return result
 end
@@ -3234,6 +3281,7 @@ if _G.REAPER_BRIDGE_SELFTEST then
     lock_verdict = lock_verdict,
     ensure_render_autoclose = ensure_render_autoclose,
     restore_render_autoclose = restore_render_autoclose,
+    render_preferences_error = render_preferences_error,
     fx_summary = fx_summary,
     batch_result = batch_result,
     capture_provenance = capture_provenance,
