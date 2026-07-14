@@ -300,6 +300,16 @@ def test_status_falls_back_to_fresh_heartbeat_when_process_unknown(root, monkeyp
     assert reaperd.status_ok(root, quiet=True) is True
 
 
+def test_status_trusts_fresh_heartbeat_over_false_negative_process_probe(
+    root, monkeypatch
+):
+    monkeypatch.setattr(reaperd, "reaper_running", lambda: False)
+    hb = os.path.join(root, "bridge", "heartbeat.json")
+    with open(hb, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"project_name": "x", "alive_at": "t", "busy": "none"}))
+    assert reaperd.status_ok(root, quiet=True) is True
+
+
 def test_status_dead_when_process_definitely_gone(root, monkeypatch):
     monkeypatch.setattr(reaperd, "reaper_running", lambda: False)
     assert reaperd.status_ok(root, quiet=True) is False

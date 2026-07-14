@@ -432,11 +432,11 @@ def status_ok(bridge_root=None, quiet=False):
         if not quiet:
             print(msg)
 
-    running = reaper_running()
-    if running is False:
-        say("DEAD: REAPER is not running. Launch REAPER (auto-start will load the bridge).")
-        return False
     if not os.path.isfile(hb):
+        running = reaper_running()
+        if running is False:
+            say("DEAD: REAPER is not running. Launch REAPER (auto-start will load the bridge).")
+            return False
         if running:
             say("DEAD: REAPER is up but no heartbeat file. Bridge never loaded.")
         else:
@@ -462,6 +462,10 @@ def status_ok(bridge_root=None, quiet=False):
         say(f"BUSY: {busy} in progress | heartbeat {age:.0f}s old | project: {proj}")
         say(f"      A synchronous {busy} blocks the loop on purpose; this is not a death.")
         return True
+    running = reaper_running()
+    if running is False:
+        say("DEAD: REAPER is not running. Launch REAPER (auto-start will load the bridge).")
+        return False
     if busy != "none":
         say(f"STALE: heartbeat says busy={busy} but is {age:.0f}s old (>{busy_cap}s) —")
         say("       that is a bridge that died mid-operation, not a live one.")
