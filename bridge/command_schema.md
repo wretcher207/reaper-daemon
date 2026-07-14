@@ -186,13 +186,15 @@ for the entire render duration, so `heartbeat.alive_at` goes stale. The
 heartbeat written just before render includes `"busy": "render"` so an agent
 can distinguish "rendering" from "bridge died".
 
-REAPER's render-progress window blocks the bridge until it is dismissed unless
-its "Automatically close when finished" checkbox is ticked (config var
-`renderclosewhendone` bit 0). The bridge forces that bit on for the render and
-restores it afterward, which needs SWS (`SNM_*`) — the bridge's only SWS use.
-Without SWS it can't force it, so the reply carries `render_autoclose_warning`
-and the first render will hang until the window is closed by hand unless the
-user ticks that checkbox once themselves.
+Two REAPER render preferences can block the bridge behind modal UI:
+"Automatically close when finished" (`renderclosewhendone` bit 0) and, on
+REAPER 7.75+, "Save render statistics" (bit 21). The bridge temporarily forces
+both bits for the render, verifies the write, then restores and verifies the
+user's exact prior value. This needs SWS (`SNM_*`), the bridge's only SWS use.
+If SWS is missing, the setting cannot be read, or either write fails, the
+bridge refuses before opening the render window with
+`RENDER_PREFERENCES_UNSAFE` or `RENDER_PREFERENCES_RESTORE_FAILED`. Install
+SWS, or enable both preferences manually, then rerun capture preflight.
 
 ### capture_track_audio
 Gated — requires `allow_risk_level_3: true` in `bridge_config.json`.
