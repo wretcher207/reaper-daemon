@@ -6,9 +6,27 @@ both suites break together instead of one passing against stale behavior.
 """
 
 import json
+import math
 import os
+import struct
 import threading
 import time
+import wave
+
+
+def write_test_wav(path, seconds=0.05, rate=8000, amplitude=0.5):
+    """A small real WAV (440 Hz sine) for fakes that must honor the capture
+    contract: the reply's file_path must point at an actual fresh file."""
+    n = int(rate * seconds)
+    frames = b"".join(
+        struct.pack("<h", int(amplitude * 32767
+                              * math.sin(2 * math.pi * 440 * i / rate)))
+        for i in range(n))
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(frames)
 
 
 def fake_bridge(root, reply_body, record=None, delay=0.0):

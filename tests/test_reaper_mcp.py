@@ -17,7 +17,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import reaper_mcp  # noqa: E402
-from bridge_fakes import fake_bridge  # noqa: E402
+from bridge_fakes import fake_bridge, fake_bridge_script, write_test_wav  # noqa: E402
 
 
 @pytest.fixture
@@ -67,11 +67,15 @@ def test_tools_list_names_and_schemas():
     tools = {t["name"]: t for t in resp["result"]["tools"]}
     for expected in ("get_status", "get_context", "scan_fx", "track", "fx",
                      "set_fx_param", "batch", "capture_track_audio",
+                     "verify_change", "tune_param",
                      "analyze_track", "compare_tracks",
                      "complete_postmortem_onboarding", "raw_command"):
         assert expected in tools
         assert tools[expected]["inputSchema"]["type"] == "object"
         assert tools[expected]["description"]
+    assert tools["verify_change"]["inputSchema"]["required"] == [
+        "track", "command_type", "payload"]
+    assert tools["tune_param"]["inputSchema"]["required"] == ["track", "target"]
 
 
 def test_unknown_method_is_32601():
@@ -416,6 +420,203 @@ def test_analyze_track_surfaces_postmortem_failure(monkeypatch):
     resp = call("analyze_track", {"track": "Kik"})
     assert resp["result"]["isError"] is True
     assert "Did you mean" in result_text(resp)
+
+
+# --- verify_change / tune_param (closed-loop tools) --------------------------
+
+PRE_OK = {"ok": True, "data": {
+    "capture_allowed": True, "blockers": [], "warnings": [],
+    "risk_gate": {"allow_risk_level_3": True, "requires_restart_to_change": True},
+    "sws_installed": True, "render_autoclose": True}}
+PRE_GATED = {"ok": True, "data": {
+    "capture_allowed": False,
+    "blockers": [{"code": "capture_gated", "message": "risk gate off"}],
+    "warnings": [],
+    "risk_gate": {"allow_risk_level_3": False, "requires_restart_to_change": True},
+    "sws_installed": True, "render_autoclose": True}}
+CTX = {"ok": True, "data": {"cursor": {"seconds": 2.0, "bar": 1},
+                            "time_selection": {"active": False, "start": 0,
+                                               "end": 0}}}
+
+
+def _auto_bridge(root, lufs_fn, n0=0.5, count=40, record=None):
+    """A stateful scripted bridge: set_fx_param updates the 'knob', captures
+    report LUFS as a function of the current knob value. Mimics the real
+    feedback loop the tuner drives."""
+    state = {"n": n0}
+
+    def respond(cmd):
+        t, p = cmd["type"], cmd.get("payload", {})
+        if t == "get_capture_preflight":
+            return PRE_OK
+        if t == "get_context":
+            return CTX
+        if t == "set_fx_param":
+            state["n"] = p["normalized_value"]
+            return {"ok": True, "data": {"applied": True}}
+        if t == "get_fx_parameters":
+            return {"ok": True, "data": {
+                "track": {"index": 2, "name": "Bass", "guid": "{B}"},
+                "fx": {"index": 0, "api_index": 0, "scope": "track",
+                       "name": "VST: TestGain", "guid": "{F}",
+                       "parameter_count": 4},
+                "parameters": [
+                    {"index": 3, "name": "Gain",
+                     "normalized_value": state["n"],
+                     "formatted_value": f"norm {state['n']:.4f}"},
+                    {"index": 0, "name": "Bypass",
+                     "normalized_value": 0.0, "formatted_value": "Off"},
+                ],
+                "paging": {"has_more": False}}}
+        if t == "capture_track_audio":
+            out = p["output_file"]
+            write_test_wav(out)
+            lufs = lufs_fn(state["n"])
+            return {"ok": True, "data": {
+                "track": {"index": 2, "name": "Bass", "guid": "{B}"},
+                "file_path": out, "file_size_bytes": os.path.getsize(out),
+                "render_loudness_lufs": lufs,
+                "render_stats_raw": f"LUFSI:{lufs}",
+                "capture_scope": "isolated_track", "isolation_verified": True,
+                "start_seconds": p.get("start_seconds"),
+                "duration_seconds": p.get("duration_seconds")}}
+        return {"ok": False, "error": {"code": "UNEXPECTED_COMMAND",
+                                       "details": t}}
+
+    return fake_bridge_script(root, [respond] * count, record=record)
+
+
+def test_verify_change_happy_path(root):
+    # The mutation moves the auto bridge's knob from 0.5 to 0.2; captures
+    # before/after report the LUFS for the current knob value.
+    record = []
+    _auto_bridge(root, lambda n: -14.1 if n == 0.5 else -14.9, count=6,
+                 record=record)
+    resp = call("verify_change", {
+        "track": "Bass", "command_type": "set_fx_param",
+        "payload": {"target_track_name": "Bass", "param_index": 3,
+                    "normalized_value": 0.2}})
+    body = json.loads(result_text(resp))
+    assert body["status"] == "VERIFIED"
+    assert body["exit_code"] == 0
+    assert body["deltas"]["lufs_i_delta"] == -0.8
+    assert resp["result"].get("isError") is not True
+    # post-capture was GUID-pinned to the pre-resolved track
+    post_capture = [c for c in record if c["type"] == "capture_track_audio"][-1]
+    assert post_capture["payload"]["target_track_guid"] == "{B}"
+
+
+def test_verify_change_refused_is_tool_error(root):
+    fake_bridge_script(root, [PRE_GATED])
+    resp = call("verify_change", {
+        "track": "Bass", "command_type": "set_fx_param",
+        "payload": {"param_index": 3, "normalized_value": 0.2}})
+    assert resp["result"]["isError"] is True
+    body = json.loads(result_text(resp))
+    assert body["status"] == "REFUSED"
+
+
+@pytest.mark.parametrize("bad_args", [
+    {},                                     # nothing
+    {"track": "Bass"},                      # no command_type/payload
+    {"track": "Bass", "command_type": "set_fx_param", "payload": "oops"},
+])
+def test_verify_change_schema_validation(root, bad_args):
+    resp = call("verify_change", bad_args)
+    assert resp["result"]["isError"] is True
+
+
+@pytest.mark.parametrize("bad_args", [
+    {},                                                       # nothing
+    {"track": "Bass"},                                        # no target
+    {"track": "Bass", "target": {"metric": "lufs_i", "delta": -3}},  # no fx
+    {"track": "Bass", "fx_name_contains": "Gain",
+     "target": {"metric": "lufs_i", "delta": -3}},            # no param
+])
+def test_tune_param_schema_validation(root, bad_args):
+    resp = call("tune_param", bad_args)
+    assert resp["result"]["isError"] is True
+
+
+def test_tune_param_bad_target_rejected(root):
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "Gain", "param_index": 3,
+        "target": {"metric": "sparkle", "delta": -3}})
+    assert resp["result"]["isError"] is True
+    assert "BAD_TARGET" in result_text(resp)
+
+
+def test_tune_param_converges(root):
+    # metric = -20 + 12n: baseline at n0=0.5 is -14; delta -3 -> target -17,
+    # which sits exactly at n=0.25. Boundary probe (n=0) then one bisection.
+    record = []
+    _auto_bridge(root, lambda n: round(-20 + 12 * n, 4), count=12,
+                 record=record)
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
+        "target": {"metric": "lufs_i", "delta": -3.0, "tolerance": 0.5}})
+    body = json.loads(result_text(resp))
+    assert body["status"] == "CONVERGED"
+    assert body["iterations_used"] == 2
+    assert body["baseline"] == -14.0
+    assert body["target_value"] == -17.0
+    assert body["final"]["normalized"] == 0.25
+    assert body["final"]["metric"] == -17.0
+    assert body["final"]["formatted_value"] == "norm 0.2500"
+    assert resp["result"].get("isError") is not True
+    # every set was pinned: GUID + fx index/scope + param index
+    sets = [c["payload"] for c in record if c["type"] == "set_fx_param"]
+    assert sets and all(
+        s["target_track_guid"] == "{B}" and s["fx_index"] == 0
+        and s["fx_scope"] == "track" and s["param_index"] == 3 for s in sets)
+
+
+def test_tune_param_iteration_cap_and_unconverged_report(root):
+    # metric = -20 + 12n^2: baseline -17 at n0=0.5; delta -2 -> target -19.
+    # With a 0.02 tolerance, five iterations get close but not inside.
+    _auto_bridge(root, lambda n: round(-20 + 12 * n * n, 6), count=24)
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
+        "target": {"metric": "lufs_i", "delta": -2.0, "tolerance": 0.02}})
+    body = json.loads(result_text(resp))
+    assert body["status"] == "UNCONVERGED"
+    assert body["iterations_used"] == 5
+    assert "not within tolerance" in body["note"]
+    # honest report: best-observed value left applied, error stated
+    assert abs(body["final"]["error_from_target"]) <= 0.1
+    assert resp["result"].get("isError") is not True
+
+
+def test_tune_param_non_monotone_aborts_and_restores(root):
+    # metric peaks at n0=0.5 and falls toward both boundaries: both probe
+    # directions contradict a monotone map -> abort, restore initial value.
+    def peaked(n):
+        return round(-20 + 20 * (n if n <= 0.5 else 1.0 - n), 4)
+
+    record = []
+    _auto_bridge(root, peaked, count=14, record=record)
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
+        "target": {"metric": "lufs_i", "delta": 3.0, "tolerance": 0.5}})
+    body = json.loads(result_text(resp))
+    assert body["status"] == "NON_MONOTONE"
+    assert "refusing to thrash" in body["note"].lower()
+    assert body["final"]["normalized"] == 0.5  # initial value restored
+    sets = [c["payload"]["normalized_value"] for c in record
+            if c["type"] == "set_fx_param"]
+    assert sets[-1] == 0.5
+    assert resp["result"].get("isError") is not True
+
+
+def test_tune_param_refused_on_gated_capture(root):
+    fake_bridge_script(root, [PRE_GATED])
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
+        "target": {"metric": "lufs_i", "delta": -3.0}})
+    assert resp["result"]["isError"] is True
+    body = json.loads(result_text(resp))
+    assert body["status"] == "REFUSED"
+    assert "nothing was changed" in body["note"].lower()
 
 
 # --- stdio subprocess smoke test ---------------------------------------------

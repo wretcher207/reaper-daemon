@@ -228,12 +228,17 @@ Claude Desktop (`claude_desktop_config.json`):
 Then just ask: *"add a ReaEQ to the bass and carve 2 dB at 300 Hz"*, *"what
 plugins are on the master?"*, *"program a d-beat groove at bar 33"*.
 
-18 tools: project/FX discovery (`get_context`, `scan_fx`,
+20 tools: project/FX discovery (`get_context`, `scan_fx`,
 `get_fx_parameters`, `get_track_routing`), transport, tracks, FX chains,
 `set_fx_param` (formatted values like `"-16.00 dB"` work), automation
 envelopes, markers/regions, MIDI insertion, `batch` (one undo block),
-post-FX stem capture, and — with
-[Post Mortem](https://github.com/wretcher207/post-mortem) installed —
+post-FX stem capture, the closed-loop pair — `verify_change` (run one
+mutation with measured pre/post proof, see
+[Closed-loop verify](#closed-loop-verify--mix-moves-with-measured-proof))
+and `tune_param` (iteratively search a parameter until a measured target
+like "bass LUFS-I down 3 dB" is hit; up to 5 renders, honest
+converged/unconverged/non-monotone reporting) — and, with
+[Post Mortem](https://github.com/wretcher207/post-mortem) installed,
 `analyze_track` / `compare_tracks`, which hand the calling model measured
 mix data (LUFS, true peak, spectrum, stereo image, masking table) to
 diagnose. Mutations are undoable with one Ctrl/Cmd+Z; destructive tools ask

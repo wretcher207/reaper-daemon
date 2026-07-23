@@ -40,6 +40,7 @@ SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SERVER_DIR)
 
 import reaperd  # noqa: E402  (single-file CLI next to this script; import is safe)
+import verifyloop  # noqa: E402  (closed-loop measure/verify/tune primitives)
 
 BRIDGE_ROOT = os.path.abspath(os.path.expanduser(
     os.environ.get("REAPER_DAEMON_ROOT") or SERVER_DIR
@@ -383,6 +384,89 @@ def tool_raw_command(args):
         cmd_type, args.get("payload") or {},
         timeout_ms=timeout_ms,
         dry_run=bool(args.get("dry_run"))))
+
+
+# --- Closed-loop verify / tune ----------------------------------------------
+
+def _verify_sender(cmd_type, payload, timeout_ms=DEFAULT_TIMEOUT_MS):
+    """Read/capture transport for verifyloop: no name resolution, honors the
+    per-call timeout (captures pass their own long render timeout)."""
+    return reaperd.send_type(cmd_type, payload, bridge_root=BRIDGE_ROOT,
+                             timeout_ms=timeout_ms, resolve=False, repair=False)
+
+
+def _verify_mutator(cmd_type, payload):
+    """Mutation transport: the same path the `cmd`/tool handlers use (add_fx
+    name resolution, set_fx_param alias repair). 30 s: a premature TIMEOUT
+    means 'outcome unknown' (exit 2), not a cheap retry."""
+    return reaperd.send_type(cmd_type, payload, bridge_root=BRIDGE_ROOT,
+                             timeout_ms=30000, resolve=True, repair=True)
+
+
+def _verify_result_text(res, error_statuses):
+    try:
+        body = json.dumps(res, indent=1, allow_nan=False)
+    except ValueError:
+        body = json.dumps(verifyloop._sanitize_nonfinite(res), indent=1,
+                          allow_nan=False)
+    return _text(body, is_error=res.get("status") in error_statuses)
+
+
+def tool_verify_change(args):
+    track = args.get("track")
+    cmd_type = args.get("command_type")
+    payload = args.get("payload")
+    if not track or not isinstance(track, str):
+        return _text("verify_change needs a 'track' name", is_error=True)
+    if not cmd_type or not isinstance(cmd_type, str):
+        return _text("verify_change needs a 'command_type'", is_error=True)
+    if not isinstance(payload, dict):
+        return _text("verify_change needs 'payload' as an object", is_error=True)
+    res = verifyloop.verify(_verify_sender, _verify_mutator, track, cmd_type,
+                            payload, seconds=args.get("seconds"))
+    # REFUSED/MUTATION_FAILED achieved nothing -> tool error. VERIFIED and
+    # UNVERIFIED are real outcomes the model must read and relay (UNVERIFIED
+    # means the project may already be changed).
+    return _verify_result_text(res, ("REFUSED", "MUTATION_FAILED"))
+
+
+def tool_tune_param(args):
+    track = args.get("track")
+    if not track or not isinstance(track, str):
+        return _text("tune_param needs a 'track' name", is_error=True)
+    fx_selector = {}
+    if args.get("fx_name_contains") is not None:
+        fx_selector["fx_name_contains"] = args["fx_name_contains"]
+    if args.get("fx_index") is not None:
+        fx_selector["fx_index"] = args["fx_index"]
+        fx_selector["fx_scope"] = args.get("fx_scope") or "track"
+    if not fx_selector:
+        return _text("tune_param needs fx_name_contains or fx_index",
+                     is_error=True)
+    param_selector = {}
+    if args.get("param_index") is not None:
+        param_selector["param_index"] = args["param_index"]
+    elif args.get("param_name_contains") is not None:
+        param_selector["param_name_contains"] = args["param_name_contains"]
+    else:
+        return _text("tune_param needs param_index or param_name_contains",
+                     is_error=True)
+    target = args.get("target")
+    if not isinstance(target, dict):
+        return _text("tune_param needs 'target' as an object like "
+                     '{"metric":"lufs_i","delta":-3.0,"tolerance":0.5}',
+                     is_error=True)
+
+    def scanner(base):
+        return reaperd.scan_fx_parameter_data(base, BRIDGE_ROOT,
+                                              include_values=True)
+
+    res = verifyloop.tune_param(_verify_sender, scanner, track, fx_selector,
+                                param_selector, target,
+                                seconds=args.get("seconds"))
+    if res.get("error") and not res.get("status"):
+        return _text(json.dumps(res, indent=1, allow_nan=False), is_error=True)
+    return _verify_result_text(res, ("REFUSED", "SET_FAILED", "MEASURE_FAILED"))
 
 
 # --- Post Mortem integration -------------------------------------------------
@@ -899,6 +983,77 @@ TOOLS = [
             "output_file": {"type": "string", "description": "Optional; defaults to a unique temp path."},
         }),
         "handler": tool_capture_track_audio,
+    },
+    {
+        "name": "verify_change",
+        "description": ("Run ONE mutating bridge command with MEASURED proof: "
+                        "capture the track, apply the command, capture the "
+                        "same frozen window again (track pinned by GUID), and "
+                        "report audio deltas (LUFS-I always; spectrum/peak/"
+                        "stereo with Post Mortem). This REALLY mutates the "
+                        "project (undo-block wrapped; one Ctrl/Cmd+Z reverts) "
+                        "— confirm intent first for destructive command types "
+                        "(delete_track, delete_items_in_range, remove_fx). "
+                        "Costs TWO renders; each blocks REAPER's UI for the "
+                        "capture duration. Statuses: VERIFIED (deltas are "
+                        "real measurements), MUTATION_FAILED/REFUSED (nothing "
+                        "changed), UNVERIFIED (the project MAY have changed — "
+                        "applied, partial batch, or unknown outcome — but "
+                        "could not be measured; NOT rolled back; do NOT "
+                        "retry blindly). Relay the status honestly; never "
+                        "present UNVERIFIED as success. Needs "
+                        "allow_risk_level_3 (see capture_track_audio)."),
+        "inputSchema": _schema({
+            "track": {"type": "string",
+                      "description": "Exact track name (case-insensitive) or 'master'."},
+            "command_type": {"type": "string",
+                             "description": "Bridge command to run (set_fx_param, set_track_volume, batch, ...)."},
+            "payload": {"type": "object",
+                        "description": "The command's payload, as for raw_command."},
+            "seconds": {"type": "number",
+                        "description": "Capture length 1-60 (default 10)."},
+        }, required=["track", "command_type", "payload"]),
+        "handler": tool_verify_change,
+    },
+    {
+        "name": "tune_param",
+        "description": ("Outcome-driven parameter search: iteratively set ONE "
+                        "FX parameter and re-measure until a target audio "
+                        "outcome is hit (e.g. bass LUFS-I down 3 dB), then "
+                        "report the measured result. Target: {\"metric\": "
+                        "\"lufs_i\"|\"band_db\", \"delta\": -3.0, "
+                        "\"tolerance\": 0.5, \"band_hz\": [lo,hi] for "
+                        "band_db (needs Post Mortem)}. delta is relative to "
+                        "the baseline measurement. ASSUMES the metric moves "
+                        "monotonically with the parameter (gain-like params); "
+                        "stops with NON_MONOTONE and restores the initial "
+                        "value when that is violated. EXPENSIVE: baseline + "
+                        "up to 5 iterations, each a render that blocks "
+                        "REAPER's UI — warn the user before calling. Each "
+                        "set is one undo point. On UNCONVERGED/UNREACHABLE "
+                        "the best-observed value stays applied and the "
+                        "result says so honestly. Needs allow_risk_level_3."),
+        "inputSchema": _schema({
+            "track": {"type": "string",
+                      "description": "Exact track name (case-insensitive)."},
+            "fx_name_contains": {"type": "string",
+                                 "description": "FX selector by substring."},
+            "fx_index": {"type": "integer",
+                         "description": "FX selector by index (with fx_scope)."},
+            "fx_scope": {"type": "string", "enum": ["track", "input"],
+                         "description": "Required meaning for fx_index (default track)."},
+            "param_index": {"type": "integer",
+                            "description": "Parameter index (preferred; scan first)."},
+            "param_name_contains": {"type": "string",
+                                    "description": "Parameter by unique substring."},
+            "target": {"type": "object",
+                       "description": ("{\"metric\":\"lufs_i\"|\"band_db\","
+                                       "\"delta\":number,\"tolerance\":number,"
+                                       "\"band_hz\":[low,high]}")},
+            "seconds": {"type": "number",
+                        "description": "Capture length 1-60 (default 10)."},
+        }, required=["track", "target"]),
+        "handler": tool_tune_param,
     },
     {
         "name": "analyze_track",

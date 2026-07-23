@@ -7,9 +7,10 @@ CLI is a single Python 3 file (`reaperd.py`) with no third-party deps.
 
 If your environment supports MCP, prefer the MCP server over the raw CLI:
 `reaper_mcp.py` (stdio, zero deps, same repo root) exposes these same commands
-as typed tools, plus `analyze_track` / `compare_tracks` mix diagnosis when
-Post Mortem is installed. Wiring instructions are in the README. Everything
-below still applies when you use the CLI directly.
+as typed tools, plus the closed-loop `verify_change` / `tune_param` tools and
+`analyze_track` / `compare_tracks` mix diagnosis when Post Mortem is
+installed. Wiring instructions are in the README. Everything below still
+applies when you use the CLI directly.
 
 This bridge is plugin-agnostic. It knows nothing about any specific synth, amp
 sim, or drum tool. You discover what a project contains, then act on it. If a

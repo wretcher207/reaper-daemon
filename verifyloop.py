@@ -664,6 +664,341 @@ def verify(sender, mutator, track, cmd_type, payload, seconds=None,
 
 
 # ---------------------------------------------------------------------------
+# tune_param: outcome-driven parameter search
+# ---------------------------------------------------------------------------
+
+TUNE_MAX_ITERATIONS = 5   # each iteration is a render; hard cap by spec
+TUNE_METRICS = ("lufs_i", "band_db")
+
+
+def band_energy_db(spectrum, band_hz):
+    """Power-sum of the 1/3-octave bands whose center lies in [lo, hi] Hz.
+    Arithmetic over Post Mortem's already-computed band levels — no new DSP.
+    None when no band center falls in the range or no level is finite."""
+    lo, hi = band_hz
+    levels = []
+    for band in spectrum or []:
+        freq, level = band.get("freq_hz"), band.get("level_db")
+        if (isinstance(freq, (int, float)) and lo <= freq <= hi
+                and isinstance(level, (int, float)) and math.isfinite(level)):
+            levels.append(level)
+    if not levels:
+        return None
+    return round(10.0 * math.log10(sum(10.0 ** (db / 10.0) for db in levels)), 2)
+
+
+def _tune_metric(m, target):
+    """Extract the target metric's value from a measure dict, or None."""
+    if target["metric"] == "lufs_i":
+        value = m.get("lufs_i")
+        return value if isinstance(value, (int, float)) else None
+    return band_energy_db(m.get("spectrum_third_octave"), target["band_hz"])
+
+
+def _resolve_tune_param(scanner, base, param_selector):
+    """Resolve the target parameter once: (pin, identity, param, None) or
+    (None, None, None, error_dict). pin is the exact selector every set uses
+    (track GUID + fx index/scope + param index) so renames and chain edits
+    mid-tune cannot retarget the sets."""
+    data, err = scanner(base)
+    if err is not None:
+        return None, None, None, _error(err.get("code") or "SCAN_FAILED",
+                                        f"parameter scan failed: {err}")
+    params = data.get("parameters") or []
+    if "param_index" in param_selector:
+        idx = param_selector["param_index"]
+        matches = [p for p in params if p.get("index") == idx]
+    else:
+        query = str(param_selector.get("param_name_contains", "")).lower()
+        matches = [p for p in params if query in (p.get("name") or "").lower()]
+    if not matches:
+        return None, None, None, _error(
+            "NO_PARAM", f"no parameter matches {param_selector!r}")
+    if len(matches) > 1:
+        names = ", ".join(f"#{p.get('index')} {p.get('name')}" for p in matches[:8])
+        return None, None, None, _error(
+            "AMBIGUOUS_PARAM",
+            f"{param_selector!r} matches {len(matches)} parameters ({names}); "
+            "narrow the selector or use param_index")
+    param = matches[0]
+    track_id = data.get("track") or {}
+    fx_id = data.get("fx") or {}
+    pin = {"param_index": param.get("index")}
+    if track_id.get("guid"):
+        pin["target_track_guid"] = track_id["guid"]
+    if fx_id.get("index") is not None and fx_id.get("scope"):
+        pin["fx_index"] = fx_id["index"]
+        pin["fx_scope"] = fx_id["scope"]
+    return pin, {"track": track_id, "fx": fx_id}, param, None
+
+
+def tune_param(sender, scanner, track, fx_selector, param_selector, target,
+               seconds=None, start_seconds=None, output_dir=None,
+               progress=None, _analyzer_loader=_load_analyzer):
+    """Search a parameter's normalized value until a MEASURED audio outcome
+    hits the target, or report honestly why it could not.
+
+    scanner: callable(base_payload) -> (data, error) in the shape of
+    reaperd.scan_fx_parameter_data (identity + full parameter list).
+    target: {"metric": "lufs_i"|"band_db", "delta": float,
+             "tolerance": float (default 0.5), "band_hz": [lo, hi]} —
+    delta is relative to the pre-measure baseline.
+
+    ASSUMPTION (documented, enforced): the metric is monotone in the
+    normalized value over the searched range — true for gain-like params.
+    The search stops with status NON_MONOTONE on the first observation that
+    contradicts it; it never silently thrashes.
+
+    Every iteration is one render (hard cap 5 after the baseline). Each
+    set_fx_param lands as its own undo point; values are deliberately left
+    applied between iterations (each set overwrites the same parameter).
+    On non-convergence the best-observed value is left set and reported.
+    """
+    def report(msg):
+        if progress is not None:
+            progress(msg)
+
+    # -- validate the target ------------------------------------------------
+    if not isinstance(target, dict) or target.get("metric") not in TUNE_METRICS:
+        return _error("BAD_TARGET",
+                      f"target.metric must be one of {TUNE_METRICS}")
+    target = dict(target)
+    delta = target.get("delta")
+    if not isinstance(delta, (int, float)) or isinstance(delta, bool) \
+            or not math.isfinite(delta) or delta == 0:
+        return _error("BAD_TARGET", "target.delta must be a nonzero finite number")
+    tolerance = target.get("tolerance", 0.5)
+    if not isinstance(tolerance, (int, float)) or isinstance(tolerance, bool) \
+            or not math.isfinite(tolerance) or tolerance <= 0:
+        return _error("BAD_TARGET", "target.tolerance must be a positive number")
+    target["tolerance"] = tolerance
+    if target["metric"] == "band_db":
+        band = target.get("band_hz")
+        if (not isinstance(band, (list, tuple)) or len(band) != 2
+                or not all(isinstance(v, (int, float)) and math.isfinite(v)
+                           for v in band) or not band[0] < band[1]):
+            return _error("BAD_TARGET",
+                          "band_db needs band_hz: [low, high] with low < high")
+        target["band_hz"] = [float(band[0]), float(band[1])]
+
+    # -- baseline measure ---------------------------------------------------
+    report("baseline capture...")
+    pre = measure(sender, track, seconds=seconds, start_seconds=start_seconds,
+                  output_dir=output_dir, _analyzer_loader=_analyzer_loader)
+    if not pre.get("ok"):
+        return {"status": "REFUSED", "pre": pre,
+                "note": "baseline measure failed; nothing was changed."}
+    if pre.get("silent"):
+        return {"status": "REFUSED", "pre": pre,
+                "note": ("baseline capture is SILENT "
+                         f"({pre.get('silence_reason')}); tuning against dead "
+                         "air is meaningless. Nothing was changed.")}
+    if target["metric"] == "band_db" and pre.get("metrics_source") != "postmortem":
+        return {"status": "REFUSED", "pre": pre,
+                "note": ("band_db needs Post Mortem's spectrum analysis, "
+                         "which is not available; only lufs_i works without "
+                         "it. Nothing was changed.")}
+    baseline = _tune_metric(pre, target)
+    if baseline is None:
+        return {"status": "REFUSED", "pre": pre,
+                "note": (f"metric {target['metric']} is unavailable in the "
+                         "baseline capture; cannot tune against it. Nothing "
+                         "was changed.")}
+    goal = baseline + delta
+    frozen = {"start_seconds": pre["bounds"]["start_seconds"],
+              "duration_seconds": pre["bounds"]["duration_seconds"],
+              "bounds_source": "frozen_from_pre"}
+    track_guid = (pre.get("track") or {}).get("guid")
+
+    # -- resolve the parameter once, pin it ---------------------------------
+    base = {"target_track_guid": track_guid} if track_guid \
+        else {"target_track_name": track}
+    base.update(fx_selector or {})
+    pin, identity, param, err = _resolve_tune_param(scanner, base, param_selector or {})
+    if err is not None:
+        err["status"] = "REFUSED"
+        err["note"] = "parameter did not resolve; nothing was changed."
+        return err
+    n0 = param.get("normalized_value")
+    if not isinstance(n0, (int, float)) or not 0.0 <= n0 <= 1.0:
+        return {"status": "REFUSED",
+                "note": f"parameter has no usable normalized_value ({n0!r}); "
+                        "nothing was changed."}
+
+    result = {"status": None, "target": target, "baseline": baseline,
+              "target_value": round(goal, 2), "pre": pre, "param": {
+                  **identity, "param_index": param.get("index"),
+                  "param_name": param.get("name"),
+                  "initial_normalized": n0,
+                  "initial_formatted": param.get("formatted_value")},
+              "metrics_source": pre.get("metrics_source"),
+              "iterations": [{"normalized": n0, "metric": baseline,
+                              "source": "baseline"}]}
+    observations = [(n0, baseline)]
+    # Measurement slack for the monotonicity check: below this, disagreement
+    # is noise, not evidence of a non-monotone parameter.
+    slack = max(0.1, tolerance / 2.0)
+    iterations_used = 0
+
+    def set_and_measure(n):
+        nonlocal iterations_used
+        iterations_used += 1
+        report(f"iteration {iterations_used}/{TUNE_MAX_ITERATIONS}: "
+               f"normalized={n:.4f}, rendering...")
+        set_reply = sender("set_fx_param", {**pin, "normalized_value": n})
+        if not set_reply.get("ok"):
+            return None, {"status": "SET_FAILED",
+                          "note": f"set_fx_param failed on iteration "
+                                  f"{iterations_used}: {set_reply.get('error')}. "
+                                  "The parameter keeps its last applied value."}
+        m = measure(sender, track, output_dir=output_dir,
+                    track_guid=track_guid, _analyzer_loader=_analyzer_loader,
+                    _bounds=frozen)
+        if not m.get("ok") or m.get("silent"):
+            why = (m.get("error") or {}).get("code") if not m.get("ok") \
+                else f"silent ({m.get('silence_reason')})"
+            return None, {"status": "MEASURE_FAILED",
+                          "note": f"iteration {iterations_used} capture "
+                                  f"unusable ({why}). The parameter keeps its "
+                                  "last applied value (one undo point per "
+                                  "set)."}
+        value = _tune_metric(m, target)
+        if value is None:
+            return None, {"status": "MEASURE_FAILED",
+                          "note": f"metric {target['metric']} vanished from "
+                                  f"iteration {iterations_used}'s capture. "
+                                  "The parameter keeps its last applied value."}
+        observations.append((n, value))
+        result["iterations"].append({"normalized": round(n, 6),
+                                     "metric": value})
+        return value, None
+
+    def finish(status, note, current_n, current_m):
+        # UNCONVERGED/UNREACHABLE: leave the best-observed value applied
+        # (never walk away from a better-known setting). NON_MONOTONE: the
+        # metric/parameter relationship is untrustworthy, so restore the
+        # INITIAL value rather than leaving a random probe point set.
+        if status == "NON_MONOTONE":
+            restore_n, restore_m, why = n0, baseline, "initial"
+        else:
+            best = min(observations, key=lambda o: abs(o[1] - goal))
+            restore_n, restore_m, why = best[0], best[1], "best observed"
+        if status in ("UNCONVERGED", "UNREACHABLE", "NON_MONOTONE") \
+                and restore_n != current_n:
+            set_reply = sender("set_fx_param", {**pin, "normalized_value": restore_n})
+            if set_reply.get("ok"):
+                current_n, current_m = restore_n, restore_m
+                note += (f" The {why} value (normalized {restore_n:.4f}, "
+                         f"metric {restore_m:.2f}) was re-applied.")
+            else:
+                note += (f" Re-applying the {why} value FAILED "
+                         f"({(set_reply.get('error') or {}).get('code')}); "
+                         f"the last iteration's value remains set.")
+        final_formatted = None
+        data, _scan_err = scanner(base)
+        if data:
+            for p in data.get("parameters") or []:
+                if p.get("index") == pin["param_index"]:
+                    final_formatted = p.get("formatted_value")
+                    break
+        result.update({
+            "status": status, "note": note, "iterations_used": iterations_used,
+            "final": {"normalized": round(current_n, 6),
+                      "metric": current_m,
+                      "formatted_value": final_formatted,
+                      "delta_achieved": (round(current_m - baseline, 2)
+                                         if current_m is not None else None),
+                      "error_from_target": (round(current_m - goal, 2)
+                                            if current_m is not None else None)},
+        })
+        return result
+
+    # -- direction probe: assume increasing normalized raises the metric ----
+    boundary = 1.0 if delta > 0 else 0.0
+    if abs(boundary - n0) < 1e-9:
+        return finish("UNREACHABLE",
+                      f"the parameter already sits at normalized {n0:g}; it "
+                      f"cannot move further {'up' if delta > 0 else 'down'} "
+                      "under the gain-like monotonicity assumption.", n0, baseline)
+    m_b, failure = set_and_measure(boundary)
+    if failure:
+        result.update(failure)
+        result["iterations_used"] = iterations_used
+        return result
+    moved_as_assumed = (m_b - baseline) * (boundary - n0) > 0
+    if not moved_as_assumed and abs(m_b - baseline) <= slack:
+        return finish("NON_MONOTONE",
+                      f"driving the parameter to normalized {boundary:g} "
+                      f"changed {target['metric']} by only "
+                      f"{m_b - baseline:+.2f} (within noise); this parameter "
+                      "does not control the metric in a usable way.",
+                      boundary, m_b)
+    if not moved_as_assumed:
+        # First contradiction = wrong direction guess, not proven
+        # non-monotonicity: probe the other boundary once.
+        boundary2 = 0.0 if boundary == 1.0 else 1.0
+        if iterations_used >= TUNE_MAX_ITERATIONS:
+            return finish("UNCONVERGED", "iteration budget exhausted during "
+                          "the direction probe.", boundary, m_b)
+        m_b2, failure = set_and_measure(boundary2)
+        if failure:
+            result.update(failure)
+            result["iterations_used"] = iterations_used
+            return result
+        if (m_b2 - baseline) * (boundary2 - n0) * -1 <= 0:
+            # Under a decreasing map, moving opposite to `boundary` must move
+            # the metric the other way; if not, the map is not monotone.
+            return finish("NON_MONOTONE",
+                          "both probe directions contradict a monotone "
+                          f"metric/parameter relationship (baseline "
+                          f"{baseline:.2f}, at norm {boundary:g}: {m_b:.2f}, "
+                          f"at norm {boundary2:g}: {m_b2:.2f}); refusing to "
+                          "thrash.", boundary2, m_b2)
+        boundary, m_b = boundary2, m_b2
+
+    if abs(m_b - goal) <= tolerance:
+        return finish("CONVERGED", "target reached at the range boundary.",
+                      boundary, m_b)
+    if (goal - baseline) * (goal - m_b) > 0:
+        # goal lies outside [baseline, boundary metric]: unreachable.
+        return finish("UNREACHABLE",
+                      f"the target ({goal:.2f}) lies beyond what this "
+                      f"parameter can reach (full range moved the metric to "
+                      f"{m_b:.2f}).", boundary, m_b)
+
+    # -- bisection inside the bracket --------------------------------------
+    lo_n, lo_m = n0, baseline
+    hi_n, hi_m = boundary, m_b
+    current_n, current_m = boundary, m_b
+    while iterations_used < TUNE_MAX_ITERATIONS:
+        mid_n = (lo_n + hi_n) / 2.0
+        mid_m, failure = set_and_measure(mid_n)
+        if failure:
+            result.update(failure)
+            result["iterations_used"] = iterations_used
+            return result
+        current_n, current_m = mid_n, mid_m
+        low, high = min(lo_m, hi_m), max(lo_m, hi_m)
+        if not (low - slack <= mid_m <= high + slack):
+            return finish("NON_MONOTONE",
+                          f"the metric at normalized {mid_n:.4f} ({mid_m:.2f}) "
+                          f"fell outside its bracket [{low:.2f}, {high:.2f}] "
+                          "(± noise); the parameter is not monotone here. "
+                          "Refusing to thrash.", mid_n, mid_m)
+        if abs(mid_m - goal) <= tolerance:
+            return finish("CONVERGED",
+                          f"target hit within tolerance after "
+                          f"{iterations_used} iteration(s).", mid_n, mid_m)
+        if (mid_m < goal) == (lo_m < goal):
+            lo_n, lo_m = mid_n, mid_m
+        else:
+            hi_n, hi_m = mid_n, mid_m
+    return finish("UNCONVERGED",
+                  f"not within tolerance after {TUNE_MAX_ITERATIONS} "
+                  "iterations.", current_n, current_m)
+
+
+# ---------------------------------------------------------------------------
 # Human-readable formatting (the CLI's default output)
 # ---------------------------------------------------------------------------
 
