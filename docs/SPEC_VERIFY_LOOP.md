@@ -315,3 +315,168 @@ Protocol per phase:
 | Date | Phase | Commit | Status | Notes |
 |---|---|---|---|---|
 | 2026-07-23 | spec | — | Spec written, baseline verified (124 tests pass, main@8358a9a) | Authored by prior session; no code yet |
+| 2026-07-23 | 0 | 2af3a92 | DONE | See "Phase 0 findings" below. Environment: remote Linux session, not David's Windows machine. Branch is `claude/status-last-pushed-h4l7un` (session-mandated), not `feat/verify-loop` — same role, one PR at the end (#25). Codex CLI unavailable here; per David, the per-phase gate is an independent adversarial review by fresh agent sessions hunting the template's seven failure categories (David can re-run real Codex on his machine before merge). |
+| 2026-07-23 | 1 | 0b3fba3 → b90d370 | Gate PASSED (2 rounds) | Three independent reviewers (protocol/bounds: clean, 6 MINOR; honesty: 1 MAJOR; Windows/lifecycle: 1 MAJOR). Round 1 findings all fixed (b90d370, see below). Round 2 (scoped re-review of the fixes, incl. mutation-testing the new tests): all CLOSED, zero BLOCKER/MAJOR; its 5 MINORs fixed in the pass-cleanup commit (narrow time-stub in the interrupt test so lingering fake threads can't be killed, direct NaN-rms guard test, honest PRE_MEASURE_UNMEASURABLE wording, bool rejected in bounds dicts, preflight warnings carried on capture-error returns). Gate green. |
+
+### Phase 1 gate round 1 (2026-07-23, reviewed 0b3fba3)
+
+**MAJOR (both fixed):**
+
+- **Evidence WAV deleted on the analysis-degrade path** (honesty reviewer;
+  Windows reviewer found it independently as MINOR): `measure` deleted the
+  capture whenever it wasn't silent, including when `analyze_wav` raised —
+  destroying the only artifact that could show why analysis failed,
+  contradicting AGENTS.md's "kept on failure" contract. FIX: `degraded` flag;
+  the WAV now survives silence, analysis failure, and every error path;
+  deletion happens only for a clean fully-analyzed success without
+  `--keep-wav`.
+- **Orphaned inbox command after Ctrl+C/kill during the wait** (Windows/
+  lifecycle reviewer): `send_command`'s inbox withdrawal ran only on the
+  timeout fall-through; an interrupt during the up-to-180 s capture wait left
+  the command in `inbox/`, which the bridge dispatches with NO age gate —
+  hours later, opening REAPER on a different project would execute a
+  risk-level-3 render against it. FIX: withdrawal moved to a `finally` that
+  fires whenever the wait ends without a delivered reply (timeout, Ctrl+C,
+  any exception). SIGKILL still leaks — unhandleable from user code; noted in
+  the code comment.
+
+**MINOR (all fixed):** non-finite `--start`/seconds refused before any
+command (previously became invalid JSON the bridge can't parse + a full
+timeout); caller-supplied bounds dicts validated (`BAD_BOUNDS`) preserving
+measure's never-raises contract; NaN LUFS/RMS treated as unassessable, not
+clean; degrade-warning wording no longer blames a missing Post Mortem when
+analysis failed; `format_measure` prints "silent: unassessed" when no basis
+exists; truncated renders (WAV duration vs requested window) warn;
+`CAPTURE_BLOCKED` carries structured `blockers[]`/`risk_gate` for machine
+callers and drops the Python-repr leak; preflight `warnings[]` bubble into
+the result; AGENTS.md repeatability claim scoped honestly (frozen within one
+verify / explicit `--start`, not across bare CLI runs); fake `capture_reply`
+refreshes mtime like the real bridge (kills a latent >2 s CI flake) with a
+`touch=False` opt-out for the stale tests; stale test comment corrected.
+
+**MINOR accepted with justification:** a backward wall-clock step >2 s
+mid-render can false-positive `STALE_CAPTURE_FILE` — mtime vs wall clock is
+inherent to the freshness check, the failure mode is safe (refuse + keep
+file), and NTP step-backs of that size mid-render are rare. `--json` may
+emit non-RFC NaN for NaN-sample WAVs — the Phase-3 consumer is Python
+(`json.loads` accepts it); scrubbing the whole result tree is deferred to
+Phase 3 where the MCP boundary is defined.
+
+**Reconciled with Phase 2 (already fixed there before these reports
+arrived):** "verify must key on silence_basis, not the silent bool" — Phase 2
+gate round 1 M3 added exactly that (`PRE_MEASURE_UNMEASURABLE` /
+UNVERIFIED); "check whether the reused-bounds path validates" — round 1 of
+this gate added `_check_bounds_dict`.
+| 2026-07-23 | 2 | c876f5d → 7497a68 | DONE, gate PASSED (3 rounds) | Two independent reviewers. Round 1: 1 BLOCKER + 4 MAJOR, all fixed (54d7106). Round 2 (scoped re-review): all closed, 2 new findings, fixed (7497a68). Round 3 (scoped verification): both fixes CLOSED, zero BLOCKER/MAJOR; 3 MINORs fixed in the pass-cleanup commit (NaN LUFS sanitized to "not measured", dead formatter branch removed, imprecise message reworded). Gate green. |
+
+### Phase 2 gate round 1 (2026-07-23, reviewed c876f5d)
+
+Findings and resolutions — reviewers: 2 independent agents, lenses per the
+review template. **BLOCKER/MAJOR: 5 (1 shared pair collapsed), all fixed.**
+
+- **B1 (BLOCKER)** Mutation TIMEOUT reported as definite `mutation_applied:
+  false` / "nothing to roll back", but the bridge moves inbox→processing
+  before executing, so a timed-out command may still run. FIX: TIMEOUT /
+  NO_REPLY / BAD_REPLY → verdict `MUTATION_UNKNOWN`, `mutation_applied: null`,
+  exit 2, message says re-scan before deciding and never blindly resend.
+- **M1 (MAJOR)** `batch` partial execution reported as "nothing to roll
+  back" (stop_on_error leaves sub-commands 1..k-1 applied). FIX: failed batch
+  → `mutation_applied: null`, exit 2, message states applied sub-commands
+  share one undo point.
+- **M2 (MAJOR)** argparse usage errors exit 2 = the UNVERIFIED verdict. FIX:
+  verify usage errors remap to 64 (EX_USAGE).
+- **M3 (MAJOR, found independently by both)** Unassessable silence (no
+  LUFS-I, no Post Mortem) still produced VERIFIED exit 0 with empty deltas.
+  FIX: verdict-grade rule — pre-capture without an assessable level basis
+  refuses (`PRE_MEASURE_UNMEASURABLE`, exit 1, nothing mutated); post-capture
+  without one is UNVERIFIED exit 2. VERIFIED now always carries ≥1 delta.
+- **M4 (MAJOR, found independently by both)** The argv `--` split applied to
+  every subcommand, silently discarding tails (`fxload ReaEQ -- Bass` added
+  the FX to the MASTER bus). FIX: split only when the subcommand is `verify`;
+  everything else keeps argparse's native `--`.
+
+**Round 2 (scoped re-review of the fixes, commit 54d7106):** all five round-1
+findings verified CLOSED; two new findings, both fixed:
+
+- **NEW-1 (MAJOR)** `_subcommand` ignored argparse prefix abbreviation
+  (`--bridge`, `--b` alias `--bridge-root`), making abbreviated verify calls
+  unusable and exiting an unremapped 2. FIX: prefix-aware `_subcommand`, and
+  the usage-error remap (2 → 64) now covers ALL subcommands — exit 2 is also
+  meaningful for `discover-map`, so no argparse error may collide with any
+  semantic exit anywhere.
+- **NEW-2** VERIFIED with empty deltas was still reachable (mixed metric
+  modes with asymmetric LUFS). FIX: a clean run whose delta set is empty is
+  UNVERIFIED exit 2 — VERIFIED now structurally requires ≥1 measured delta.
+- **NEW-3 (MINOR, accepted)** `main`'s `argv.index("--")` would mis-split if
+  the bridge root were literally named `--`. Justification: not a realistic
+  path, and argparse itself would misparse it identically.
+
+MINOR fixes: non-dict payload refused before the pre-render (`BAD_PAYLOAD`);
+per-measure warnings bubble into the verify report; pre/post format drift
+(sample_rate/channels/duration) restricts deltas to LUFS-I with a warning;
+dead double-strip removed; README/tests payloads carry an explicit track
+selector (the real bridge has no selected-track fallback); `-0` delta display
+normalized. MINOR accepted with justification: WAVs kept on failure/silence
+accumulate in `<tmp>/reaper-verify` unbounded (deliberate — they are debug
+evidence; OS temp cleaning reaps them); a reply arriving after the capture
+deadline leaves an unread outbox file (pre-existing send_command semantics,
+not Phase 2 scope); the ≥1 dB spectrum display filter operates on deltas
+rounded to source precision (0.1 dB).
+
+### Phase 0 findings (2026-07-23)
+
+**Baseline re-verified in this environment:** `main` @ `24b39ab` (spec commit on
+top of `8358a9a`; no code drift). Full CI parity green: 124 pytest, `py_compile`
+OK on all three entry points, `lua bridge/test_bridge.lua` OK (149 checks),
+`lua bridge/test_json.lua` 40 passed (must run from repo root, not `bridge/`).
+Post Mortem installed editable from a fresh clone; `postmortem --help` and
+`from postmortem.analysis import analyze_wav` both work.
+
+**Open question 1 — `analyze_wav` shape → decision (a) CONFIRMED.**
+`analyze_wav(path)` (`postmortem/analysis.py:335`) is a pure function over an
+existing WAV: returns a `TrackStats` dataclass with `duration_seconds`,
+`sample_rate`, `channels`, `sample_peak_db`, `rms_db`, `crest_factor_db`,
+`spectrum_third_octave` (list of `{freq_hz, level_db}`, 31 ISO bands),
+`silence_fraction`, and `stereo` (correlation/mid-side/balance, None for mono).
+Notes that shape the report format: it does NOT compute LUFS (comes from
+RENDER_STATS — which `capture_track_audio` already returns) and has no true
+peak, only sample peak — `verify` must label it `sample_peak_db`, never claim
+true peak. Masking (`masking_overlap`) is a separate pure function over
+multiple tracks' spectra — not applicable to single-track pre/post verify;
+per-band spectrum deltas cover the same ground. So: import
+`postmortem.analysis` guarded in try/except (it needs numpy; this repo stays
+stdlib-only — Post Mortem is an optional external), do our own captures via
+`capture_track_audio`, analyze the WAVs directly. No cross-repo change needed.
+
+**Open question 2 — bounds freezing CONFIRMED safe.** In
+`command_capture_track_audio` (Lua ~2504–2515): when `start_seconds` is
+present, the time-selection branch is never consulted and `duration_seconds`
+is used as-is (the `min(duration, ts_end - ts_start)` clamp lives only in the
+no-`start_seconds` branch). Therefore `verify` freezes bounds by ALWAYS
+passing explicit `start_seconds` + `duration_seconds` on both captures; the
+user moving the time selection or cursor between pre and post cannot shift
+them. `measure` resolves initial bounds client-side from `get_context`
+(`cursor.seconds`, `time_selection.start/end/active`), mirroring the bridge's
+own resolution order.
+
+**Open question 3 — `band_db` metric (Phase 3).** Maps to
+`spectrum_third_octave`: select the 1/3-octave bands whose center `freq_hz`
+lies within the requested range and power-average their `level_db`
+(`10*log10(mean(10^(db/10)))`). Post Mortem computes the bands; no new DSP.
+
+**Open question 4 — temp file convention.** `reaper_mcp.py` already uses
+`tempfile.gettempdir()/reaper-mcp/capture-<UTC stamp>.wav` for captures;
+`reaperd.py` uses `tempfile.NamedTemporaryFile` for scratch MIDI. Convention
+adopted: capture WAVs go to `tempfile.gettempdir()/reaper-verify/` with
+timestamped names, deleted on success, kept on failure for debugging.
+
+**Module placement decision:** new file `verifyloop.py` at repo root
+(measure + verify + formatters will clearly exceed the ~200-line threshold the
+spec set for inlining into `reaperd.py`). `reaperd.py` gains thin `measure` /
+`verify` subcommands delegating to it; all transport through `send_type`.
+
+**Silence thresholds** copied from `reaper_mcp.py::_run_postmortem`:
+silent when `silence_fraction >= 0.85` or `rms_db <= -60`. Without Post
+Mortem (no numpy), RMS/silence-fraction are unavailable; the fallback silence
+signal is `render_loudness_lufs` missing or absurdly low — the report must
+carry `metrics_source: "render_stats"` and say what it could not check.

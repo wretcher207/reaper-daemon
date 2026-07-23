@@ -147,6 +147,48 @@ they shift between plugin versions. Query with `scan_fx` or
    you the current normalized value; interpolate from there. When unsure, set
    a value, re-scan, read the `formatted_value`, and adjust.
 
+## Measuring
+
+`python3 reaperd.py measure <track> [--seconds N] [--start S] [--json]`
+captures one track and prints measured audio metrics. Use it before and after
+a mix move to know what actually changed, instead of trusting `ok: true`.
+
+- Gated like `render`: `allow_risk_level_3` must be true in
+  `bridge/bridge_config.json` (read once at REAPER startup — changing it
+  requires a REAPER restart). `measure` runs `get_capture_preflight` first and
+  refuses with the blocker list when a capture cannot succeed.
+- The capture window is frozen client-side (explicit `--start`, else the
+  active time selection, else the edit cursor; default 10 s, max 60) and sent
+  as explicit bounds. Within one `verify` run the pre and post captures are
+  guaranteed identical; across separate CLI invocations the window is only
+  reproducible with an explicit `--start` — a bare `measure` re-resolves it
+  from the current cursor/selection each run. Reuse the `--json` bounds
+  (full precision), not the rounded human output.
+- Metrics: LUFS-I always (from REAPER's render stats). With Post Mortem
+  installed you also get RMS, sample peak, crest factor, 1/3-octave spectrum,
+  silence fraction, and stereo image. `metrics_source` says which mode ran.
+- Honesty rules baked in: a mostly-silent capture is flagged `silent: true`
+  (never base a verdict on it), and a capture whose scope is not a verified
+  `isolated_track` carries a warning that the numbers describe the capture
+  scope, not the track alone.
+- `--json` prints the full machine-readable result; the capture WAV is
+  deleted on success unless `--keep-wav` (kept automatically on failure or
+  silence, for debugging).
+
+To prove what a mix move actually did, wrap it in `verify` instead of `cmd`:
+
+```bash
+python3 reaperd.py verify <track> [--seconds N] [--start S] [--json] \
+  -- <type> '<payload-json>'
+```
+
+It measures, applies the one mutation (same resolution/repair as `cmd`),
+re-measures the identical frozen window, and reports measured deltas
+(ΔLUFS-I always; per-band spectrum, ΔRMS, Δstereo with Post Mortem). Branch
+on the exit code: `0` VERIFIED, `1` nothing was mutated, `2` UNVERIFIED — the
+mutation IS applied but unproven, and is NOT rolled back (one undo away).
+Never present UNVERIFIED output as evidence the move worked.
+
 ## Generating MIDI (cross-platform)
 
 Write the `.mid` file yourself (anywhere on disk), then send `insert_midi_file`

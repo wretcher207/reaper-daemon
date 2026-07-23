@@ -238,29 +238,37 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
     if not wait:
         return cid, None
 
-    deadline = time.monotonic() + timeout_ms / 1000.0
-    while time.monotonic() < deadline:
-        if os.path.isfile(outbox):
-            with open(outbox, "r", encoding="utf-8") as f:
-                reply = f.read()
-            # The reader owns its reply: the bridge no longer count-sweeps
-            # outbox/ (it was deleting unread replies on big batches), so delete
-            # it here once read to keep the queue from growing unbounded.
+    delivered = False
+    try:
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while time.monotonic() < deadline:
+            if os.path.isfile(outbox):
+                with open(outbox, "r", encoding="utf-8") as f:
+                    reply = f.read()
+                delivered = True
+                # The reader owns its reply: the bridge no longer count-sweeps
+                # outbox/ (it was deleting unread replies on big batches), so
+                # delete it here once read to keep the queue from growing
+                # unbounded.
+                try:
+                    os.remove(outbox)
+                except OSError:
+                    pass
+                return cid, reply
+            time.sleep(0.05)
+    finally:
+        # Withdraw the command whenever the wait ends without a reply —
+        # timeout, Ctrl+C, or any exception. A file left in inbox/ has no age
+        # gate on the bridge side and would execute later against whatever
+        # project is open then (captures wait up to 3 minutes, plenty of time
+        # to interrupt). If the bridge already grabbed it, this remove misses;
+        # the bridge's processing/ requeue age gate covers that side. A hard
+        # SIGKILL still leaks — that cannot be handled from here.
+        if not delivered:
             try:
-                os.remove(outbox)
+                os.remove(inbox)
             except OSError:
                 pass
-            return cid, reply
-        time.sleep(0.05)
-    # Withdraw the command so a TIMEOUT report stays true: a file left in
-    # inbox/ (or requeued from processing/ at bridge startup) would still
-    # execute later against whatever project is open then. If the bridge
-    # already grabbed it, this remove misses; the bridge's requeue age gate
-    # covers that side.
-    try:
-        os.remove(inbox)
-    except OSError:
-        pass
     raise TimeoutError(f"timed out after {timeout_ms}ms waiting for {outbox}")
 
 
@@ -849,6 +857,44 @@ def cmd_riff(args):
     return 0
 
 
+def cmd_measure(args):
+    import verifyloop  # lazy: verifyloop imports reaperd for transport
+    result = verifyloop.measure(args.track, seconds=args.seconds,
+                                start=args.start, bridge_root=args.bridge_root,
+                                keep_wav=args.keep_wav)
+    if args.json:
+        print(json.dumps(result, separators=(",", ":")))
+    else:
+        out = verifyloop.format_measure(result)
+        print(out) if result.get("ok") else print(out, file=sys.stderr)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_verify(args):
+    import verifyloop  # lazy: verifyloop imports reaperd for transport
+    mutation = list(args.mutation)
+    if len(mutation) != 2:
+        print("error: verify needs a mutation after '--': "
+              "verify <track> [options] -- <type> '<payload-json>'",
+              file=sys.stderr)
+        return 1
+    try:
+        payload = json.loads(mutation[1])
+    except Exception as e:
+        print(f"error: mutation payload is not valid JSON: {e}", file=sys.stderr)
+        return 1
+    result = verifyloop.verify(args.track, mutation[0], payload,
+                               seconds=args.seconds, start=args.start,
+                               bridge_root=args.bridge_root,
+                               keep_wav=args.keep_wav)
+    if args.json:
+        print(json.dumps(result, separators=(",", ":")))
+    else:
+        out = verifyloop.format_verify(result)
+        print(out) if result.get("ok") else print(out, file=sys.stderr)
+    return result["exit_code"]
+
+
 def cmd_list_maps(args):
     skill_dir = os.path.join(args.bridge_root, "skills", "drum-apparatus")
     if skill_dir not in sys.path:
@@ -1089,6 +1135,40 @@ def build_parser():
     s = sub.add_parser("jam", help="render a DSL beat from stdin onto the selected track")
     s.set_defaults(func=cmd_jam)
 
+    s = sub.add_parser("measure",
+                       help="capture one track and print measured audio metrics")
+    s.add_argument("track", help="track name or 'master'")
+    s.add_argument("--seconds", type=float, default=None,
+                   help="capture length in seconds (default 10, max 60)")
+    s.add_argument("--start", type=float, default=None,
+                   help="capture start in seconds (default: active time "
+                        "selection, else edit cursor)")
+    s.add_argument("--keep-wav", action="store_true",
+                   help="keep the capture WAV instead of deleting it on success")
+    s.add_argument("--json", action="store_true", help="machine-readable output")
+    s.set_defaults(func=cmd_measure)
+
+    s = sub.add_parser(
+        "verify",
+        help="measure, apply one mutation, re-measure, report measured deltas",
+        description="Exit codes: 0 VERIFIED (deltas reported), 1 nothing was "
+                    "mutated (pre-measure refused or the mutation failed), "
+                    "2 UNVERIFIED (mutation applied but the post-measure "
+                    "could not prove its effect; it is NOT rolled back).")
+    s.add_argument("track", help="track name or 'master'")
+    s.add_argument("--seconds", type=float, default=None,
+                   help="capture length in seconds (default 10, max 60)")
+    s.add_argument("--start", type=float, default=None,
+                   help="capture start in seconds (default: active time "
+                        "selection, else edit cursor)")
+    s.add_argument("--keep-wav", action="store_true",
+                   help="keep both capture WAVs instead of deleting on success")
+    s.add_argument("--json", action="store_true", help="machine-readable output")
+    # The mutation ("-- <type> '<payload-json>'") is split off in main()
+    # before argparse runs: a REMAINDER positional here would swallow any
+    # option that appears after the track name.
+    s.set_defaults(func=cmd_verify, mutation=[])
+
     s = sub.add_parser("riff",
                        help="read a guitar stem's transients into a proposed kick grid")
     s.add_argument("project", help="path to the saved .rpp project file")
@@ -1128,10 +1208,55 @@ def build_parser():
     return p
 
 
+def _subcommand(argv):
+    """First positional token = the subcommand, skipping --bridge-root (and
+    its argparse prefix abbreviations: --bridge, --b, ...) plus its value.
+    Used to scope the verify-only '--' split below; every other subcommand
+    keeps argparse's native '--' behavior (e.g. `fxload ReaEQ -- Bass` must
+    still parse Bass as the track, not drop it)."""
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--":
+            return None
+        if tok.startswith("--"):
+            flag = tok.split("=", 1)[0]
+            if ("--bridge-root".startswith(flag) and len(flag) >= 3
+                    and "=" not in tok):
+                i += 2  # the flag consumes the next token as its value
+            else:
+                i += 1
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return tok
+    return None
+
+
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    if argv is None:
+        argv = sys.argv[1:]
+    argv = list(argv)
+    mutation = []
+    if _subcommand(argv) == "verify" and "--" in argv:
+        split = argv.index("--")
+        argv, mutation = argv[:split], argv[split + 1:]
+    try:
+        args = build_parser().parse_args(argv)
+    except SystemExit as e:
+        # argparse exits 2 on usage errors, but 2 is a MEANINGFUL exit for
+        # this CLI (verify: UNVERIFIED, "the mutation IS applied";
+        # discover-map: incomplete map). A typo'd flag must never read as one
+        # of those verdicts, on any subcommand: remap usage errors to 64
+        # (EX_USAGE).
+        if e.code == 2:
+            raise SystemExit(64)
+        raise
     if getattr(args, "bridge_root", None):
         args.bridge_root = os.path.abspath(os.path.expanduser(args.bridge_root))
+    if hasattr(args, "mutation"):
+        args.mutation = mutation
     return args.func(args)
 
 

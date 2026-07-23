@@ -132,12 +132,58 @@ python3 reaperd.py list-maps                    # available drum-kit maps
 python3 reaperd.py discover-map <track> [--save <name>]
 python3 reaperd.py add-map <name> --file <map.json>   # or --roles '{...}' / stdin
 python3 reaperd.py remove-map <name>
+python3 reaperd.py measure <track> [--seconds N] [--start S] [--json]
 ```
 
 `fxload` and `cmd add_fx` resolve a fuzzy plugin query to REAPER's exact
 installed name from the VST/CLAP/AU cache before loading. `setparam` works on
 any plugin by parameter index, binary-searching the normalized value that
 produces a target display value, then verifying.
+
+`measure` captures one track (needs `allow_risk_level_3: true`, same gate as
+render) and prints what it actually sounds like: LUFS-I always, plus RMS,
+sample peak, crest, 1/3-octave spectrum, and stereo image when
+[Post Mortem](https://github.com/wretcher207/post-mortem) is installed — the
+output labels which mode produced it (`metrics_source`). It refuses when the
+capture preflight blocks, flags mostly-silent captures instead of reporting
+numbers diluted by dead air, and reports the capture scope honestly (an
+unverified or full-mix capture is never presented as per-track evidence).
+
+## Closed-loop verify — measure the move, not the knob
+
+Every mutation used to be open-loop: set an EQ band, get `ok: true`, never
+learn whether the mix improved. `verify` closes the loop — capture, apply ONE
+mutation, capture the exact same window again, report the measured
+difference:
+
+```bash
+# cut 2.5 dB at 320 Hz on the bass, and prove what it did:
+python3 reaperd.py verify Bass -- set_fx_param \
+  '{"target_track_name":"Bass","fx_name_contains":"ReaEQ","param_name_contains":"Gain","formatted_value":"-2.5 dB"}'
+
+# [verify] VERDICT: VERIFIED  (mutation applied: yes)
+# [verify] LUFS-I: -14.1 -> -14.9  (delta -0.8 LUFS)
+# [verify] spectrum bands that moved >= 1 dB:
+# [verify]    315 Hz: -20.0 -> -23.1 dB (delta -3.1)
+```
+
+The mutation is anything `cmd` accepts (`set_fx_param`, `add_fx`, `batch`,
+...), after a literal `--`. The capture window is frozen before the mutation
+(explicit `--start`/`--seconds`, else the active time selection, else the
+edit cursor) and reused for the post-capture, so moving the cursor mid-verify
+cannot skew the comparison.
+
+Exit codes are the contract: `0` VERIFIED (both captures clean, deltas
+reported), `1` nothing was mutated (pre-measure refused, or the mutation
+itself failed), `2` UNVERIFIED — the mutation IS applied but the post-capture
+couldn't prove its effect. An UNVERIFIED mutation is deliberately **not**
+rolled back (it's one Ctrl/Cmd+Z away); verify never destroys a user-visible
+change because measurement hiccupped.
+
+Honest limits: deltas describe the captured window of the captured scope —
+verify says so explicitly when a capture isn't a verified isolated track, and
+refuses verdicts on silent captures. It measures what changed, not whether it
+sounds *better*; that call stays with you.
 
 ## MCP server — talk to REAPER in plain English
 
