@@ -439,11 +439,15 @@ CTX = {"ok": True, "data": {"cursor": {"seconds": 2.0, "bar": 1},
                                                "end": 0}}}
 
 
-def _auto_bridge(root, lufs_fn, n0=0.5, count=40, record=None):
+def _auto_bridge(root, lufs_fn, n0=0.5, count=40, record=None,
+                 scope_fn=None, fx_guid_fn=None, fail_set_calls=()):
     """A stateful scripted bridge: set_fx_param updates the 'knob', captures
     report LUFS as a function of the current knob value. Mimics the real
-    feedback loop the tuner drives."""
-    state = {"n": n0}
+    feedback loop the tuner drives, and validates sets like the bridge does
+    (range check, GUID check when supplied). scope_fn(capture_index) ->
+    (scope, verified) and fx_guid_fn(scan_index) -> guid let tests simulate
+    scope drift and FX-chain edits mid-run."""
+    state = {"n": n0, "captures": 0, "scans": 0, "sets": 0}
 
     def respond(cmd):
         t, p = cmd["type"], cmd.get("payload", {})
@@ -452,13 +456,27 @@ def _auto_bridge(root, lufs_fn, n0=0.5, count=40, record=None):
         if t == "get_context":
             return CTX
         if t == "set_fx_param":
-            state["n"] = p["normalized_value"]
+            state["sets"] += 1
+            if state["sets"] in fail_set_calls:
+                return {"ok": False, "error": {"code": "SET_REJECTED",
+                                               "details": "scripted rejection"}}
+            n = p.get("normalized_value")
+            if not isinstance(n, (int, float)) or not 0.0 <= n <= 1.0:
+                return {"ok": False, "error": {"code": "BAD_PAYLOAD",
+                                               "details": f"normalized {n!r}"}}
+            if "target_track_guid" in p and p["target_track_guid"] != "{B}":
+                return {"ok": False, "error": {"code": "NO_TARGET_TRACK",
+                                               "details": "unknown guid"}}
+            state["n"] = n
             return {"ok": True, "data": {"applied": True}}
         if t == "get_fx_parameters":
+            idx = state["scans"]
+            state["scans"] += 1
+            guid = fx_guid_fn(idx) if fx_guid_fn else "{F}"
             return {"ok": True, "data": {
                 "track": {"index": 2, "name": "Bass", "guid": "{B}"},
                 "fx": {"index": 0, "api_index": 0, "scope": "track",
-                       "name": "VST: TestGain", "guid": "{F}",
+                       "name": "VST: TestGain", "guid": guid,
                        "parameter_count": 4},
                 "parameters": [
                     {"index": 3, "name": "Gain",
@@ -469,6 +487,10 @@ def _auto_bridge(root, lufs_fn, n0=0.5, count=40, record=None):
                 ],
                 "paging": {"has_more": False}}}
         if t == "capture_track_audio":
+            idx = state["captures"]
+            state["captures"] += 1
+            scope, verified = (scope_fn(idx) if scope_fn
+                               else ("isolated_track", True))
             out = p["output_file"]
             write_test_wav(out)
             lufs = lufs_fn(state["n"])
@@ -477,7 +499,7 @@ def _auto_bridge(root, lufs_fn, n0=0.5, count=40, record=None):
                 "file_path": out, "file_size_bytes": os.path.getsize(out),
                 "render_loudness_lufs": lufs,
                 "render_stats_raw": f"LUFSI:{lufs}",
-                "capture_scope": "isolated_track", "isolation_verified": True,
+                "capture_scope": scope, "isolation_verified": verified,
                 "start_seconds": p.get("start_seconds"),
                 "duration_seconds": p.get("duration_seconds")}}
         return {"ok": False, "error": {"code": "UNEXPECTED_COMMAND",
@@ -550,8 +572,7 @@ def test_tune_param_converges(root):
     # metric = -20 + 12n: baseline at n0=0.5 is -14; delta -3 -> target -17,
     # which sits exactly at n=0.25. Boundary probe (n=0) then one bisection.
     record = []
-    _auto_bridge(root, lambda n: round(-20 + 12 * n, 4), count=12,
-                 record=record)
+    _auto_bridge(root, lambda n: round(-20 + 12 * n, 4), record=record)
     resp = call("tune_param", {
         "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
         "target": {"metric": "lufs_i", "delta": -3.0, "tolerance": 0.5}})
@@ -574,7 +595,7 @@ def test_tune_param_converges(root):
 def test_tune_param_iteration_cap_and_unconverged_report(root):
     # metric = -20 + 12n^2: baseline -17 at n0=0.5; delta -2 -> target -19.
     # With a 0.02 tolerance, five iterations get close but not inside.
-    _auto_bridge(root, lambda n: round(-20 + 12 * n * n, 6), count=24)
+    _auto_bridge(root, lambda n: round(-20 + 12 * n * n, 6))
     resp = call("tune_param", {
         "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
         "target": {"metric": "lufs_i", "delta": -2.0, "tolerance": 0.02}})
@@ -587,25 +608,184 @@ def test_tune_param_iteration_cap_and_unconverged_report(root):
     assert resp["result"].get("isError") is not True
 
 
-def test_tune_param_non_monotone_aborts_and_restores(root):
-    # metric peaks at n0=0.5 and falls toward both boundaries: both probe
-    # directions contradict a monotone map -> abort, restore initial value.
+def test_tune_param_peak_at_baseline_is_unreachable_restores_best(root):
+    # metric peaks at n0=0.5 and falls toward both boundaries. Both probes
+    # move AWAY from the target — that is direction detection, not proof of
+    # non-monotonicity, and the honest verdict is UNREACHABLE (baseline is
+    # the closest achievable). Best-observed (= initial) value re-applied.
     def peaked(n):
         return round(-20 + 20 * (n if n <= 0.5 else 1.0 - n), 4)
 
     record = []
-    _auto_bridge(root, peaked, count=14, record=record)
+    _auto_bridge(root, peaked, record=record)
     resp = call("tune_param", {
         "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
         "target": {"metric": "lufs_i", "delta": 3.0, "tolerance": 0.5}})
     body = json.loads(result_text(resp))
-    assert body["status"] == "NON_MONOTONE"
-    assert "refusing to thrash" in body["note"].lower()
-    assert body["final"]["normalized"] == 0.5  # initial value restored
+    assert body["status"] == "UNREACHABLE"
+    assert "away from the target" in body["note"]
+    assert body["final"]["normalized"] == 0.5   # read back, not assumed
+    assert body["final"]["read_back"] is True
     sets = [c["payload"]["normalized_value"] for c in record
             if c["type"] == "set_fx_param"]
     assert sets[-1] == 0.5
     assert resp["result"].get("isError") is not True
+
+
+def test_tune_param_non_monotone_mid_bracket_aborts_and_restores(root):
+    # Bracket [0.5 -> -14, 0.0 -> -20], goal -17; the midpoint reads -25,
+    # OUTSIDE the bracket — the true NON_MONOTONE case. Initial restored.
+    table = {0.5: -14.0, 0.0: -20.0, 0.25: -25.0}
+
+    record = []
+    _auto_bridge(root, lambda n: table[round(n, 4)], record=record)
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
+        "target": {"metric": "lufs_i", "delta": -3.0, "tolerance": 0.5}})
+    body = json.loads(result_text(resp))
+    assert body["status"] == "NON_MONOTONE"
+    assert "refusing to thrash" in body["note"].lower()
+    assert body["final"]["normalized"] == 0.5   # initial value restored
+    assert resp["result"].get("isError") is not True
+
+
+def test_tune_param_baseline_already_within_tolerance(root):
+    # No sets, no iteration renders: report CONVERGED honestly at 0 cost.
+    record = []
+    _auto_bridge(root, lambda n: -14.0, record=record)
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
+        "target": {"metric": "lufs_i", "delta": -0.1, "tolerance": 0.5}})
+    body = json.loads(result_text(resp))
+    assert body["status"] == "CONVERGED"
+    assert body["iterations_used"] == 0
+    assert "nothing was changed" in body["note"]
+    assert all(c["type"] != "set_fx_param" for c in record)
+
+
+def test_tune_param_boundary_start_flips_direction(root):
+    # n0 = 1.0 with a DECREASING metric (-10n): the naive up-boundary equals
+    # the start, so the probe must go the other way instead of reporting a
+    # reachable target as UNREACHABLE (Codex gate MAJOR, 2026-07-23).
+    _auto_bridge(root, lambda n: round(-10.0 * n, 4), n0=1.0)
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
+        "target": {"metric": "lufs_i", "delta": 5.0, "tolerance": 0.5}})
+    body = json.loads(result_text(resp))
+    assert body["status"] == "CONVERGED"
+    assert body["final"]["normalized"] == 0.5
+    assert body["iterations_used"] == 2
+
+
+def test_tune_param_flat_metric_is_unreachable_not_non_monotone(root):
+    # A constant metric is monotone but useless — the honest label is
+    # UNREACHABLE (Codex gate MINOR, 2026-07-23).
+    _auto_bridge(root, lambda n: -14.0)
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
+        "target": {"metric": "lufs_i", "delta": 3.0, "tolerance": 0.5}})
+    body = json.loads(result_text(resp))
+    assert body["status"] == "UNREACHABLE"
+    assert "does not move" in body["note"]
+
+
+def test_tune_param_aborts_on_fx_chain_edit(root):
+    # After resolution, the FX at the pinned index changes GUID (a chain
+    # edit): the tuner must abort BEFORE setting a different plugin.
+    record = []
+    _auto_bridge(root, lambda n: round(-20 + 12 * n, 4),
+                 fx_guid_fn=lambda i: "{F}" if i == 0 else "{G}",
+                 record=record)
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
+        "target": {"metric": "lufs_i", "delta": -3.0, "tolerance": 0.5}})
+    body = json.loads(result_text(resp))
+    assert body["status"] == "IDENTITY_CHANGED"
+    assert body["iterations_used"] == 0
+    assert all(c["type"] != "set_fx_param" for c in record)
+    assert body["final"]["read_back"] is False  # different FX at read-back too
+    assert resp["result"].get("isError") is not True
+
+
+def test_tune_param_aborts_on_scope_change(root):
+    # Baseline is isolated; iteration captures fall back to full_mix (e.g.
+    # the project changed): per-track evidence is gone, stop honestly.
+    _auto_bridge(root, lambda n: round(-20 + 12 * n, 4),
+                 scope_fn=lambda i: ("isolated_track", True) if i == 0
+                 else ("full_mix", False))
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
+        "target": {"metric": "lufs_i", "delta": -3.0, "tolerance": 0.5}})
+    body = json.loads(result_text(resp))
+    assert body["status"] == "SCOPE_CHANGED"
+    assert "full_mix" in body["note"]
+    assert body["final"]["read_back"] is True
+    assert resp["result"].get("isError") is not True
+
+
+def test_tune_param_refuses_full_mix_baseline(root):
+    _auto_bridge(root, lambda n: -14.0,
+                 scope_fn=lambda i: ("full_mix", False))
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
+        "target": {"metric": "lufs_i", "delta": -3.0}})
+    assert resp["result"]["isError"] is True
+    body = json.loads(result_text(resp))
+    assert body["status"] == "REFUSED"
+    assert "full_mix" in body["note"]
+
+
+def test_tune_param_set_failure_reads_back_final_state(root):
+    _auto_bridge(root, lambda n: round(-20 + 12 * n, 4), fail_set_calls={1})
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "TestGain", "param_index": 3,
+        "target": {"metric": "lufs_i", "delta": -3.0, "tolerance": 0.5}})
+    body = json.loads(result_text(resp))
+    assert body["status"] == "SET_FAILED"
+    assert "SET_REJECTED" in body["note"]
+    assert body["final"]["normalized"] == 0.5  # read back: knob never moved
+    assert body["final"]["read_back"] is True
+    # a set may already have applied in the general case -> never isError
+    assert resp["result"].get("isError") is not True
+
+
+def test_verify_change_mutation_failed_is_not_a_tool_error(root):
+    # A rejected handler can still leave a partial mid-edit change; marking
+    # it isError invites a retry on top of it (Codex gate BLOCKER).
+    def respond(cmd):
+        t = cmd["type"]
+        if t == "get_capture_preflight":
+            return PRE_OK
+        if t == "get_context":
+            return CTX
+        if t == "capture_track_audio":
+            p = cmd["payload"]
+            write_test_wav(p["output_file"])
+            return {"ok": True, "data": {
+                "track": {"index": 2, "name": "Bass", "guid": "{B}"},
+                "file_path": p["output_file"], "render_loudness_lufs": -14.1,
+                "render_stats_raw": "LUFSI:-14.1",
+                "capture_scope": "isolated_track", "isolation_verified": True,
+                "start_seconds": p.get("start_seconds"),
+                "duration_seconds": p.get("duration_seconds")}}
+        return {"ok": False, "error": {"code": "NO_FX_PARAM",
+                                       "details": "no such parameter"}}
+    fake_bridge_script(root, [respond] * 4)
+    resp = call("verify_change", {
+        "track": "Bass", "command_type": "set_fx_param",
+        "payload": {"target_track_name": "Bass", "param_index": 99,
+                    "normalized_value": 0.2}})
+    body = json.loads(result_text(resp))
+    assert body["status"] == "MUTATION_FAILED"
+    assert resp["result"].get("isError") is not True
+
+
+def test_tune_param_advertised_schema_expresses_target_shape():
+    resp = reaper_mcp.handle_message(rpc("tools/list"))
+    tool = next(t for t in resp["result"]["tools"] if t["name"] == "tune_param")
+    target_schema = tool["inputSchema"]["properties"]["target"]
+    assert target_schema["required"] == ["metric", "delta"]
+    assert target_schema["properties"]["metric"]["enum"] == ["lufs_i", "band_db"]
 
 
 def test_tune_param_refused_on_gated_capture(root):

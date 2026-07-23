@@ -671,6 +671,49 @@ def test_verify_partial_batch_with_stop_on_error_false_is_unverified(root, tmp_p
     assert res["deltas"]["lufs_i_delta"] == -0.8  # still measured, still honest
 
 
+@pytest.mark.parametrize("batch_reply", [
+    {"ok": True, "data": {"results": [None]}},        # null result entry
+    {"ok": True, "data": "oops"},                     # data not an object
+    {"ok": True, "data": {"results": 1}},             # results not a list
+    {"ok": True, "data": {"results": []}},            # fewer results than commands
+    {"ok": True},                                     # no data at all
+])
+def test_verify_malformed_batch_results_are_outcome_unknown(root, tmp_path,
+                                                            batch_reply):
+    # A top-level ok:true batch whose per-command results are malformed or
+    # incomplete cannot PROVE the requested batch completed — never exit 0,
+    # never a crash (Codex gate round-3 BLOCKER, 2026-07-23).
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(), batch_reply,
+    ], cmd_type="batch",
+        payload={"commands": [{"type": "set_fx_param", "payload": {}}]})
+    assert res["status"] == "UNVERIFIED"
+    assert res["exit_code"] == 2
+    assert "UNKNOWN" in res["note"]
+
+
+def test_verify_partial_batch_disclosed_even_when_post_capture_fails(root, tmp_path):
+    batch_reply = {"ok": True, "type": "batch", "data": {"results": [
+        {"index": 1, "type": "set_fx_param", "ok": True, "data": {}},
+        {"index": 2, "type": "set_fx_param", "ok": False,
+         "error": "NO_FX_PARAM: nope"},
+    ]}}
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(), batch_reply,
+        PREFLIGHT_OK,
+        {"ok": False, "error": {"code": "CAPTURE_FAILED",
+                                "details": "render died"}},
+    ], cmd_type="batch",
+        payload={"stop_on_error": False,
+                 "commands": [{"type": "set_fx_param", "payload": {}},
+                              {"type": "set_fx_param", "payload": {}}]})
+    assert res["status"] == "UNVERIFIED"
+    assert "PARTIALLY" in res["note"]  # disclosed on the failure path too
+    text = verifyloop.format_verify(res)
+    assert "PARTIAL" in text
+    assert "mutation batch: ok" not in text
+
+
 def test_verify_fully_ok_batch_still_verifies(root, tmp_path):
     batch_reply = {"ok": True, "type": "batch", "data": {"results": [
         {"index": 1, "type": "set_fx_param", "ok": True, "data": {}},
@@ -688,6 +731,9 @@ def test_verify_fully_ok_batch_still_verifies(root, tmp_path):
     None,                                    # raw null through a bad transport
     {"ok": False, "error": "oops"},          # error is a string, not an object
     {"ok": False},                           # no error field at all
+    {"ok": False, "error": {"code": ""}},    # empty code proves nothing
+    {"ok": False, "error": {"code": []}},    # unhashable code must not crash
+    {"ok": False, "error": {"code": 7}},     # non-string code
 ])
 def test_verify_malformed_mutation_reply_is_outcome_unknown(root, tmp_path, reply):
     # Wrong-shaped replies after the command was queued are version skew or
@@ -857,6 +903,30 @@ def test_format_verify_reports_null_lufs_with_reason():
     assert "dLUFS-I n/a" in text
     assert "LUFS-I unavailable" in text
     assert "dRMS -0.80 dB" in text
+
+
+# --- band_energy_db unit tests ----------------------------------------------
+
+def test_band_energy_db_power_sums_bands_in_range():
+    spectrum = [{"freq_hz": 100, "level_db": -10.0},
+                {"freq_hz": 125, "level_db": -10.0},
+                {"freq_hz": 8000, "level_db": 0.0}]
+    # two equal bands power-sum to +3.01 dB over one
+    assert verifyloop.band_energy_db(spectrum, [90, 130]) == -6.99
+
+
+def test_band_energy_db_empty_range_is_none():
+    assert verifyloop.band_energy_db(
+        [{"freq_hz": 8000, "level_db": -10.0}], [20, 200]) is None
+    assert verifyloop.band_energy_db([], [20, 200]) is None
+
+
+def test_band_energy_db_underflow_and_malformed_entries_do_not_crash():
+    # -4000 dB underflows every power term to exactly 0.0 -> floor, not a
+    # log10(0) crash; non-dict entries are skipped (Codex gate MINOR).
+    spectrum = ["junk", None, {"freq_hz": 100, "level_db": -4000.0}]
+    assert verifyloop.band_energy_db(spectrum, [90, 130]) == \
+        verifyloop.BAND_ENERGY_FLOOR_DB
 
 
 # --- parse_render_stats unit tests ------------------------------------------

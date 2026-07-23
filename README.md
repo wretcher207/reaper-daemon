@@ -228,7 +228,7 @@ Claude Desktop (`claude_desktop_config.json`):
 Then just ask: *"add a ReaEQ to the bass and carve 2 dB at 300 Hz"*, *"what
 plugins are on the master?"*, *"program a d-beat groove at bar 33"*.
 
-20 tools: project/FX discovery (`get_context`, `scan_fx`,
+21 tools: project/FX discovery (`get_context`, `scan_fx`,
 `get_fx_parameters`, `get_track_routing`), transport, tracks, FX chains,
 `set_fx_param` (formatted values like `"-16.00 dB"` work), automation
 envelopes, markers/regions, MIDI insertion, `batch` (one undo block),
@@ -236,14 +236,17 @@ post-FX stem capture, the closed-loop pair — `verify_change` (run one
 mutation with measured pre/post proof, see
 [Closed-loop verify](#closed-loop-verify--mix-moves-with-measured-proof))
 and `tune_param` (iteratively search a parameter until a measured target
-like "bass LUFS-I down 3 dB" is hit; up to 5 renders, honest
-converged/unconverged/non-monotone reporting) — and, with
+like "bass LUFS-I down 3 dB" is hit; a baseline render plus up to 5
+iteration renders — 6 total — with honest converged/unconverged/
+non-monotone reporting) — and, with
 [Post Mortem](https://github.com/wretcher207/post-mortem) installed,
 `analyze_track` / `compare_tracks`, which hand the calling model measured
 mix data (LUFS, true peak, spectrum, stereo image, masking table) to
-diagnose. Mutations are undoable with one Ctrl/Cmd+Z; destructive tools ask
-the model to confirm intent; audio capture stays behind the
-`allow_risk_level_3` config gate (restart REAPER after changing it).
+diagnose. Mutations are undoable with Ctrl/Cmd+Z (single commands and
+batches are one undo step each; `tune_param` leaves one undo point per
+iteration set); destructive tools ask the model to confirm intent; audio
+capture stays behind the `allow_risk_level_3` config gate (restart REAPER
+after changing it).
 
 FX discovery returns REAPER's real track and FX GUIDs alongside names and
 indices. Use the GUIDs as stable identity when planning a later change: names

@@ -424,10 +424,11 @@ def tool_verify_change(args):
         return _text("verify_change needs 'payload' as an object", is_error=True)
     res = verifyloop.verify(_verify_sender, _verify_mutator, track, cmd_type,
                             payload, seconds=args.get("seconds"))
-    # REFUSED/MUTATION_FAILED achieved nothing -> tool error. VERIFIED and
-    # UNVERIFIED are real outcomes the model must read and relay (UNVERIFIED
-    # means the project may already be changed).
-    return _verify_result_text(res, ("REFUSED", "MUTATION_FAILED"))
+    # isError ONLY when provably nothing ran (REFUSED happens before the
+    # mutation). Every other status — including MUTATION_FAILED, whose
+    # rejected handler can still have made a partial mid-edit change — is a
+    # real outcome the model must read and relay, never auto-retry.
+    return _verify_result_text(res, ("REFUSED",))
 
 
 def tool_tune_param(args):
@@ -466,7 +467,11 @@ def tool_tune_param(args):
                                 seconds=args.get("seconds"))
     if res.get("error") and not res.get("status"):
         return _text(json.dumps(res, indent=1, allow_nan=False), is_error=True)
-    return _verify_result_text(res, ("REFUSED", "SET_FAILED", "MEASURE_FAILED"))
+    # isError ONLY for REFUSED (nothing was set). SET_FAILED/MEASURE_FAILED/
+    # IDENTITY_CHANGED/SCOPE_CHANGED happen after sets may have applied —
+    # marking them as tool errors would invite a retry on top of live
+    # changes. The model must read `final` (the read-back state) instead.
+    return _verify_result_text(res, ("REFUSED",))
 
 
 # --- Post Mortem integration -------------------------------------------------
@@ -996,13 +1001,17 @@ TOOLS = [
                         "(delete_track, delete_items_in_range, remove_fx). "
                         "Costs TWO renders; each blocks REAPER's UI for the "
                         "capture duration. Statuses: VERIFIED (deltas are "
-                        "real measurements), MUTATION_FAILED/REFUSED (nothing "
-                        "changed), UNVERIFIED (the project MAY have changed — "
-                        "applied, partial batch, or unknown outcome — but "
-                        "could not be measured; NOT rolled back; do NOT "
-                        "retry blindly). Relay the status honestly; never "
-                        "present UNVERIFIED as success. Needs "
-                        "allow_risk_level_3 (see capture_track_audio)."),
+                        "real measurements); REFUSED (refused before "
+                        "mutating, nothing ran); MUTATION_FAILED (the bridge "
+                        "rejected the command — but a handler that failed "
+                        "mid-edit can leave a partial change in one undo "
+                        "block, so read the note); UNVERIFIED (the project "
+                        "MAY have changed — applied, partial batch, or "
+                        "unknown outcome — but could not be measured; NOT "
+                        "rolled back; do NOT retry blindly). Relay the "
+                        "status honestly; never present UNVERIFIED as "
+                        "success. Needs allow_risk_level_3 (see "
+                        "capture_track_audio)."),
         "inputSchema": _schema({
             "track": {"type": "string",
                       "description": "Exact track name (case-insensitive) or 'master'."},
@@ -1032,7 +1041,11 @@ TOOLS = [
                         "REAPER's UI — warn the user before calling. Each "
                         "set is one undo point. On UNCONVERGED/UNREACHABLE "
                         "the best-observed value stays applied and the "
-                        "result says so honestly. Needs allow_risk_level_3."),
+                        "result says so honestly; `final` always carries the "
+                        "READ-BACK live parameter state. Requires ONE FX "
+                        "selector (fx_name_contains or fx_index) AND one "
+                        "parameter selector (param_index or "
+                        "param_name_contains). Needs allow_risk_level_3."),
         "inputSchema": _schema({
             "track": {"type": "string",
                       "description": "Exact track name (case-insensitive)."},
@@ -1046,10 +1059,24 @@ TOOLS = [
                             "description": "Parameter index (preferred; scan first)."},
             "param_name_contains": {"type": "string",
                                     "description": "Parameter by unique substring."},
-            "target": {"type": "object",
-                       "description": ("{\"metric\":\"lufs_i\"|\"band_db\","
-                                       "\"delta\":number,\"tolerance\":number,"
-                                       "\"band_hz\":[low,high]}")},
+            "target": {
+                "type": "object",
+                "description": ("The measured outcome to hit, relative to "
+                                "the baseline capture."),
+                "properties": {
+                    "metric": {"type": "string",
+                               "enum": ["lufs_i", "band_db"]},
+                    "delta": {"type": "number",
+                              "description": "Nonzero change vs baseline (e.g. -3.0)."},
+                    "tolerance": {"type": "number",
+                                  "description": "Convergence window (default 0.5)."},
+                    "band_hz": {"type": "array",
+                                "items": {"type": "number"},
+                                "minItems": 2, "maxItems": 2,
+                                "description": "[low, high] Hz — required for band_db."},
+                },
+                "required": ["metric", "delta"],
+            },
             "seconds": {"type": "number",
                         "description": "Capture length 1-60 (default 10)."},
         }, required=["track", "target"]),
