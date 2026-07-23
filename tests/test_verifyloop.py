@@ -7,6 +7,7 @@ analyzer so both metrics modes are covered deterministically whether or not
 the package is installed on the machine running the suite.
 """
 
+import json
 import math
 import os
 import struct
@@ -80,15 +81,23 @@ def _context(cursor=3.5, ts=None):
 
 
 def _capture_responder(lufs=-14.1, raw="LUFSI:-14.10;TRUEPEAK:-3.20;LRA:4.50",
-                       scope="isolated_track", verified=True, stale=False):
+                       scope="isolated_track", verified=True, stale_by=None,
+                       bounds_override=None):
     """A scripted reply that mimics the real bridge: writes the WAV the
-    payload asked for, then reports its path back."""
+    payload asked for, echoes the rendered bounds, reports the path back.
+    stale_by backdates the WAV's mtime by that many seconds;
+    bounds_override fakes a bridge that rendered a different window."""
     def responder(command):
-        out = command["payload"]["output_file"]
+        payload = command["payload"]
+        out = payload["output_file"]
         _write_wav(out)
-        if stale:
-            old = time.time() - 3600
+        if stale_by is not None:
+            old = time.time() - stale_by
             os.utime(out, (old, old))
+        echoed = {"start_seconds": payload.get("start_seconds"),
+                  "duration_seconds": payload.get("duration_seconds")}
+        if bounds_override:
+            echoed.update(bounds_override)
         return {"ok": True, "type": "capture_track_audio", "data": {
             "track": {"index": 2, "name": "Bass", "guid": "{B}"},
             "file_path": out,
@@ -97,6 +106,7 @@ def _capture_responder(lufs=-14.1, raw="LUFSI:-14.10;TRUEPEAK:-3.20;LRA:4.50",
             "render_stats_raw": raw,
             "capture_scope": scope,
             "isolation_verified": verified,
+            **echoed,
         }}
     return responder
 
@@ -307,14 +317,74 @@ def test_render_stats_mode_null_lufs_is_silent_not_a_pass(root, tmp_path):
 
 # --- freshness / staleness -------------------------------------------------
 
-def test_stale_capture_file_rejected(root, tmp_path):
+@pytest.mark.parametrize("stale_by", [3600, 5])
+def test_stale_capture_file_rejected(root, tmp_path, stale_by):
+    # 5s: even a file written moments before the command must be rejected —
+    # there is NO slack window (Codex gate finding, 2026-07-23).
     fake_bridge_script(root, [PREFLIGHT_OK, _context(),
-                              _capture_responder(stale=True)])
+                              _capture_responder(stale_by=stale_by)])
     res = verifyloop.measure(_sender(root), "Bass",
                              output_dir=str(tmp_path / "wavs"),
                              _analyzer_loader=_no_analyzer)
     assert res["ok"] is False
     assert res["error"]["code"] == "STALE_CAPTURE_FILE"
+
+
+def test_bounds_mismatch_rejected(root, tmp_path):
+    # A bridge that rendered a different window than requested must be
+    # refused: the audio is evidence for the wrong spot.
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(cursor=3.5),
+                              _capture_responder(
+                                  bounds_override={"start_seconds": 8.5})])
+    res = verifyloop.measure(_sender(root), "Bass",
+                             output_dir=str(tmp_path / "wavs"),
+                             _analyzer_loader=_no_analyzer)
+    assert res["ok"] is False
+    assert res["error"]["code"] == "BOUNDS_MISMATCH"
+
+
+def test_capture_failure_discloses_possible_partial_wav(root, tmp_path):
+    fake_bridge_script(root, [
+        PREFLIGHT_OK, _context(),
+        {"ok": False, "error": {"code": "RENDER_PREFERENCES_RESTORE_FAILED",
+                                "details": "restore failed after render"}},
+    ])
+    res = verifyloop.measure(_sender(root), "Bass",
+                             output_dir=str(tmp_path / "wavs"),
+                             _analyzer_loader=_no_analyzer)
+    assert res["ok"] is False
+    assert res["output_file"].endswith(".wav")
+
+
+def test_nan_metrics_are_sanitized_and_fail_closed_silent(root, tmp_path):
+    # NaN poisons threshold comparisons (all False) and breaks strict JSON —
+    # must sanitize to None and treat the capture as unusable (silent).
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(), _capture_responder()])
+    res = verifyloop.measure(
+        _sender(root), "Bass", output_dir=str(tmp_path / "wavs"),
+        _analyzer_loader=lambda: lambda p: _fake_stats(
+            rms_db=float("nan"), sample_peak_db=float("inf")))
+    assert res["ok"] is True
+    assert res["rms_db"] is None
+    assert res["sample_peak_db"] is None
+    assert res["silent"] is True
+    assert "not a finite number" in res["silence_reason"]
+    json.dumps(res, allow_nan=False)  # must not raise
+
+
+def test_analyzer_bad_shape_degrades_and_still_cleans_up(root, tmp_path):
+    # An incompatible Post Mortem returning a wrong-shaped object must
+    # degrade to render_stats — not crash measure and leak the WAV.
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(), _capture_responder()])
+    bad = types.SimpleNamespace(sample_peak_db=-3.0)  # missing every other field
+    res = verifyloop.measure(_sender(root), "Bass",
+                             output_dir=str(tmp_path / "wavs"),
+                             _analyzer_loader=lambda: lambda p: bad)
+    assert res["ok"] is True
+    assert res["metrics_source"] == "render_stats"
+    assert "AttributeError" in res["analysis_error"]
+    assert res["wav_kept"] is False
+    assert not os.path.exists(res["file_path"])
 
 
 def test_missing_capture_file_rejected(root, tmp_path):

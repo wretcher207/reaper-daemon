@@ -35,9 +35,10 @@ CAPTURE_TIMEOUT_MS = 180000   # a capture blocks the bridge for the render durat
 NEAR_SILENT_RMS_DB = -60.0
 SILENCE_GATE_FRACTION = 0.85
 
-# Clock fudge for the capture-file freshness check: mtime must not predate the
-# moment we sent the command by more than this (filesystem timestamp rounding).
-MTIME_SLACK_SECONDS = 2.0
+# Bridge-echoed bounds may differ from the requested ones only by float
+# noise; anything larger means the audio does not describe the window we asked
+# for and the measurement must be refused.
+BOUNDS_ECHO_TOLERANCE = 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +104,20 @@ def _load_analyzer():
 
 def _error(code, details, **extra):
     return {"ok": False, "error": {"code": code, "details": details}, **extra}
+
+
+def _sanitize_nonfinite(value):
+    """Replace every non-finite float (NaN, +/-inf) with None, recursively.
+    NaN poisons threshold comparisons (every one is False, so a NaN RMS would
+    sail past the silence guard as 'not silent') and json.dumps emits bare
+    NaN, which strict JSON consumers reject. None is honest: not measured."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: _sanitize_nonfinite(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_nonfinite(v) for v in value]
+    return value
 
 
 def resolve_bounds(sender, seconds, start_seconds=None):
@@ -211,20 +226,39 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
     }, timeout_ms=CAPTURE_TIMEOUT_MS)
     if not res.get("ok"):
         err = (res.get("error") or {})
+        # The render may have written a partial WAV before the bridge errored
+        # (e.g. a restore failure AFTER a successful render). Disclose the
+        # path so a kept file is findable, never silently orphaned.
         return _error(err.get("code") or "CAPTURE_FAILED",
-                      f"capture_track_audio failed: {err.get('details') or err}")
+                      f"capture_track_audio failed: {err.get('details') or err}",
+                      output_file=output_file,
+                      note="a partial capture WAV may exist at output_file; "
+                           "it is kept for debugging")
     data = res.get("data") or {}
     file_path = data.get("file_path")
     if not file_path or not os.path.isfile(file_path):
         return _error("CAPTURE_FILE_MISSING",
                       f"capture reported ok but no file at {file_path!r}")
     # The schema demands the client verify freshness: a stale or replayed
-    # reply pointing at an old WAV must never become evidence.
-    if os.path.getmtime(file_path) < sent_at - MTIME_SLACK_SECONDS:
+    # reply pointing at an old WAV must never become evidence. Strict: the
+    # file must not predate the send at all (same machine, same clock; REAPER
+    # writes it strictly after the command was queued).
+    if os.path.getmtime(file_path) < sent_at:
         return _error("STALE_CAPTURE_FILE",
                       f"{file_path} predates the capture command "
                       "(mtime older than send time); refusing to trust it",
                       file_path=file_path)
+    # Bounds honesty: the bridge echoes the window it actually rendered. If
+    # that differs from what we asked for, the audio is evidence for a
+    # different window — refuse rather than mislabel it.
+    for key, requested in (("start_seconds", bounds["start_seconds"]),
+                           ("duration_seconds", bounds["duration_seconds"])):
+        echoed = data.get(key)
+        if echoed is not None and abs(float(echoed) - requested) > BOUNDS_ECHO_TOLERANCE:
+            return _error("BOUNDS_MISMATCH",
+                          f"bridge captured {key}={echoed} but {requested} was "
+                          "requested; the audio does not describe the "
+                          "requested window", file_path=file_path)
 
     # 4. Metrics. LUFS-I and provenance always; Post Mortem analysis on top
     # when importable.
@@ -244,22 +278,29 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
 
     analyzer = _analyzer_loader()
     if analyzer is not None:
+        # The attribute reads live INSIDE the try: an incompatible Post
+        # Mortem returning a wrong-shaped object must degrade to
+        # render_stats, not crash measure and leak the WAV.
         try:
             stats = analyzer(file_path)
-        except Exception as e:
-            metrics["analysis_error"] = f"{type(e).__name__}: {e}"
-        else:
-            metrics["metrics_source"] = "postmortem"
-            metrics.update({
+            extra = {
                 "sample_peak_db": stats.sample_peak_db,
                 "rms_db": stats.rms_db,
                 "crest_factor_db": stats.crest_factor_db,
                 "silence_fraction": stats.silence_fraction,
                 "spectrum_third_octave": stats.spectrum_third_octave,
                 "stereo": stats.stereo,
-            })
+            }
+        except Exception as e:
+            metrics["analysis_error"] = f"{type(e).__name__}: {e}"
+        else:
+            metrics["metrics_source"] = "postmortem"
+            metrics.update(extra)
 
     # 5. Silence guard — callers must refuse verdicts on a silent capture.
+    # Sanitize first: NaN/inf would make every threshold comparison False and
+    # emit invalid JSON downstream.
+    metrics = _sanitize_nonfinite(metrics)
     silent, reason = _judge_silence(metrics)
     metrics["silent"] = silent
     if reason:
@@ -283,7 +324,12 @@ def _judge_silence(metrics):
     if metrics.get("metrics_source") == "postmortem":
         rms = metrics.get("rms_db")
         frac = metrics.get("silence_fraction")
-        if rms is not None and rms <= NEAR_SILENT_RMS_DB:
+        if rms is None:
+            # A sanitized (non-finite) RMS means the level could not be
+            # measured at all — fail closed, never "not silent" by default.
+            return True, ("RMS is not a finite number; the capture is "
+                          "unusable as level evidence")
+        if rms <= NEAR_SILENT_RMS_DB:
             return True, (f"capture is essentially silent (RMS {rms:.1f} dBFS "
                           f"<= {NEAR_SILENT_RMS_DB:.0f})")
         if frac is not None and frac >= SILENCE_GATE_FRACTION:
@@ -335,6 +381,8 @@ def format_measure(m):
     if m.get("silent"):
         lines.append(f"[measure] WARNING: SILENT capture — {m.get('silence_reason')}. "
                      "No verdict should be built on this measurement.")
+    if m.get("wav_kept") and m.get("file_path"):
+        lines.append(f"[measure] WAV kept: {m['file_path']}")
     if scope != "isolated_track" or not m.get("isolation_verified"):
         lines.append("[measure] NOTE: these numbers describe the capture scope "
                      f"({scope}), not necessarily this track alone.")

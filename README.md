@@ -141,15 +141,16 @@ any plugin by parameter index, binary-searching the normalized value that
 produces a target display value, then verifying.
 
 `measure` captures one track once (behind the same `allow_risk_level_3` gate
-as `capture_track_audio`) and prints measured audio metrics: LUFS-I always,
-plus — when [Post Mortem](https://github.com/wretcher207/post-mortem) is
-installed — sample peak, RMS, crest factor, 1/3-octave spectrum, stereo image,
-and a silence check. Bounds are resolved once (time selection start if active,
-else edit cursor; override with `--start`) and passed explicitly, so a second
-`measure` of the same spot is comparable. The output labels its
-`metrics_source` (`postmortem` or `render_stats`) and its capture scope —
-full-mix fallbacks are reported honestly, never presented as per-track
-evidence.
+as `capture_track_audio`) and prints measured audio metrics: LUFS-I whenever
+REAPER reports it (digital silence reads as null and is flagged), plus — when
+[Post Mortem](https://github.com/wretcher207/post-mortem) is installed —
+sample peak, RMS, crest factor, 1/3-octave spectrum, stereo image, and a
+silence check. Bounds are resolved once (time selection start if active, else
+edit cursor; override with `--start`) and passed explicitly; to compare two
+separate runs of the same spot, pass the same `--start`/`--seconds` to both.
+The output labels its `metrics_source` (`postmortem` or `render_stats`) and
+its capture scope — full-mix fallbacks are reported honestly, never presented
+as per-track evidence.
 
 ## MCP server — talk to REAPER in plain English
 

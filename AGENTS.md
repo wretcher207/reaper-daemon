@@ -160,11 +160,17 @@ python3 reaperd.py measure Bass --seconds 5 --start 12.5 --json
 What it does, in order: (1) `get_capture_preflight` — refuses with the
 blocker list if capture is gated (`allow_risk_level_3` needs a REAPER restart
 after changing it); (2) resolves capture bounds ONCE (active time selection's
-start, else edit cursor; `--start` overrides) and passes them explicitly so a
-later `measure` of the same spot is identical; (3) `capture_track_audio` to a
-unique temp WAV, verifying file freshness; (4) reports metrics: LUFS-I always
-(`metrics_source: "render_stats"`), plus spectrum/peak/RMS/stereo when Post
-Mortem is installed (`metrics_source: "postmortem"`).
+start, else edit cursor; `--start` overrides) and passes them explicitly;
+(3) `capture_track_audio` to a unique temp WAV, verifying file freshness and
+that the bridge rendered the exact requested window; (4) reports metrics:
+LUFS-I when REAPER reports it (digital silence reads as `null` and is flagged
+silent; `metrics_source: "render_stats"`), plus spectrum/peak/RMS/stereo when
+Post Mortem is installed (`metrics_source: "postmortem"`).
+
+To compare two separate `measure` runs of the same spot, pass the SAME
+`--start` and `--seconds` to both — a bare re-run re-resolves the cursor/time
+selection, which may have moved. (The Phase-2 `verify` loop freezes bounds
+across its pre/post captures automatically.)
 
 Honesty rules baked in: a silent capture (RMS <= -60 dBFS or >= 85% silence)
 is flagged `silent: true` — never build a verdict on it. If `capture_scope`

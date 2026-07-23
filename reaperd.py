@@ -171,6 +171,12 @@ def repair_set_fx_param(payload):
 # Core send / poll
 # ---------------------------------------------------------------------------
 
+class StaleReplyError(OSError):
+    """A leftover outbox reply with this command id exists and cannot be
+    removed (e.g. a Windows/OneDrive file lock). Sending anyway would read
+    the OLD reply back as this command's result — fail closed instead."""
+
+
 def _command_id(value):
     """Normalize a queue filename component or reject it before filesystem use."""
     cid = str(value if value is not None else "").strip()
@@ -223,11 +229,20 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
     os.makedirs(os.path.dirname(inbox), exist_ok=True)
 
     # A leftover reply with this id (fixed-id command file, or an unread reply
-    # from a previous run) would be read back as THIS command's result.
+    # from a previous run) would be read back as THIS command's result. If it
+    # exists but cannot be removed (Windows file lock, OneDrive sync), fail
+    # CLOSED before queuing anything: proceeding would return the stale reply
+    # as this command's result while the new command stays queued to execute
+    # later against whatever project is open then.
     try:
         os.remove(outbox)
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError as e:
+        raise StaleReplyError(
+            f"stale reply {outbox} exists and could not be removed ({e}); "
+            "refusing to send — the old reply would be read back as this "
+            "command's result")
 
     data = json.dumps(cmd, separators=(",", ":"))
     tmp = inbox + ".tmp"
@@ -288,6 +303,9 @@ def send_type(cmd_type, payload, bridge_root=None, timeout_ms=10000,
                                  bridge_root=bridge_root, verbose=verbose)
     except TimeoutError as e:
         return {"ok": False, "error": {"code": "TIMEOUT", "details": str(e)}}
+    except StaleReplyError as e:
+        return {"ok": False, "error": {"code": "STALE_REPLY_LOCKED",
+                                       "details": str(e)}}
     if raw is None:
         return {"ok": False, "error": {"code": "NO_REPLY", "details": "no reply"}}
     try:
@@ -388,7 +406,7 @@ def cmd_send(args):
     try:
         cid, reply = send_command(cmd, wait=args.wait, timeout_ms=args.timeout,
                                   bridge_root=args.bridge_root, verbose=True)
-    except (TimeoutError, ValueError) as e:
+    except (TimeoutError, ValueError, StaleReplyError) as e:
         print(f"error: {e}", file=sys.stderr)
         if isinstance(e, TimeoutError):
             print("       (is the bridge running? try: python3 reaperd.py status)",
@@ -494,7 +512,9 @@ def cmd_measure(args):
         seconds=args.seconds, start_seconds=args.start,
         keep_wav=args.keep_wav)
     if args.json:
-        print(json.dumps(res, separators=(",", ":")))
+        # allow_nan=False: emitting bare NaN would be invalid JSON for the
+        # MCP path; verifyloop sanitizes non-finite values, this enforces it.
+        print(json.dumps(res, separators=(",", ":"), allow_nan=False))
     elif res.get("ok"):
         print(verifyloop.format_measure(res))
     else:

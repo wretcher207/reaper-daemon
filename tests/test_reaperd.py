@@ -61,6 +61,37 @@ def test_stale_reply_is_not_answered_as_new_result(root):
     assert not os.path.exists(stale)
 
 
+def test_locked_stale_reply_fails_closed(root, monkeypatch):
+    # Codex gate finding (2026-07-23): if a stale reply exists but cannot be
+    # removed (Windows/OneDrive lock), sending anyway would return the OLD
+    # reply as the new command's result while the new command stays queued.
+    # Must refuse to send, leaving the inbox empty.
+    stale = os.path.join(root, "outbox", "fixed-2.json")
+    with open(stale, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"id": "fixed-2", "ok": True, "data": {"stale": True}}))
+    real_remove = os.remove
+
+    def locked_remove(path, *a, **k):
+        if os.path.abspath(path) == os.path.abspath(stale):
+            raise PermissionError(13, "The process cannot access the file", path)
+        return real_remove(path, *a, **k)
+
+    monkeypatch.setattr(reaperd.os, "remove", locked_remove)
+    with pytest.raises(reaperd.StaleReplyError):
+        reaperd.send_command({"id": "fixed-2", "type": "ping", "payload": {}},
+                             wait=True, timeout_ms=300, bridge_root=root)
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_send_type_reports_locked_stale_reply_as_error(root, monkeypatch):
+    def raise_stale(*a, **k):
+        raise reaperd.StaleReplyError("stale reply locked")
+    monkeypatch.setattr(reaperd, "send_command", raise_stale)
+    res = reaperd.send_type("ping", {}, bridge_root=root)
+    assert res["ok"] is False
+    assert res["error"]["code"] == "STALE_REPLY_LOCKED"
+
+
 def test_fresh_reply_still_returned_and_consumed(root):
     fake_bridge(root, {"ok": True, "type": "ping", "data": {}})
     cid, reply = reaperd.send_command({"type": "ping", "payload": {}},
