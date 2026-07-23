@@ -169,8 +169,20 @@ Post Mortem is installed (`metrics_source: "postmortem"`).
 
 To compare two separate `measure` runs of the same spot, pass the SAME
 `--start` and `--seconds` to both — a bare re-run re-resolves the cursor/time
-selection, which may have moved. (The Phase-2 `verify` loop freezes bounds
-across its pre/post captures automatically.)
+selection, which may have moved.
+
+To make ONE change with measured proof, use `verify` instead of `cmd`:
+
+```bash
+python3 reaperd.py verify Bass -- set_fx_param '{"target_track_name":"Bass","fx_name_contains":"ReaEQ","param_name_contains":"Gain","formatted_value":"-2.5 dB"}'
+```
+
+It measures, mutates (same resolution/repair path as `cmd`), re-measures with
+byte-identical frozen bounds, and reports deltas. Exit codes: 0 VERIFIED,
+1 mutation not applied, 2 UNVERIFIED — the mutation stayed applied but could
+not be measured (NOT rolled back; one Ctrl/Cmd+Z reverts it). Report those
+outcomes to the user exactly; never claim an unverified change improved
+anything.
 
 Honesty rules baked in: a silent capture (RMS <= -60 dBFS or >= 85% silence)
 is flagged `silent: true` — never build a verdict on it. If `capture_scope`

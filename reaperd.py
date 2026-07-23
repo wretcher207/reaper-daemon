@@ -12,6 +12,7 @@ Subcommands:
              repairs set_fx_param field aliases)
   status     liveness check via the bridge heartbeat
   measure    capture one track once and print measured audio metrics
+  verify     measure -> mutate -> measure: run a command with measured proof
   fxload     resolve an installed plugin name and add it to a track
   setparam   set any plugin parameter to a display value, with verify
   eq         set one EQ band (freq/gain/Q) and confirm it took
@@ -529,6 +530,44 @@ def cmd_measure(args):
             print(f"[measure]   capture WAV (kept for debugging): {kept}",
                   file=sys.stderr)
     return 0 if res.get("ok") else 1
+
+
+def cmd_verify(args):
+    import verifyloop
+    rest = list(args.mutation)
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    if len(rest) != 2:
+        print("error: verify needs `-- <type> '<payload-json>'` after the "
+              "options (exactly a command type and one payload argument)",
+              file=sys.stderr)
+        return 1
+    cmd_type, payload_text = rest
+    try:
+        payload = json.loads(payload_text)
+    except Exception as e:
+        print(f"error: payload is not valid JSON: {e}", file=sys.stderr)
+        return 1
+    if not isinstance(payload, dict):
+        print("error: payload must be a JSON object", file=sys.stderr)
+        return 1
+
+    br = args.bridge_root
+
+    def mutator(mtype, mpayload):
+        # Same path `cmd` uses: add_fx name resolution + set_fx_param repair.
+        return send_type(mtype, mpayload, bridge_root=br, timeout_ms=10000,
+                         resolve=True, repair=True)
+
+    res = verifyloop.verify(
+        _bridge_sender(br), mutator, args.track, cmd_type, payload,
+        seconds=args.seconds, start_seconds=args.start,
+        keep_wav=args.keep_wav)
+    if args.json:
+        print(json.dumps(res, separators=(",", ":"), allow_nan=False))
+    else:
+        print(verifyloop.format_verify(res))
+    return res.get("exit_code", 1)
 
 
 def cmd_fxload(args):
@@ -1121,6 +1160,29 @@ def build_parser():
     s.add_argument("--keep-wav", action="store_true",
                    help="keep the capture WAV (default: delete after analysis)")
     s.set_defaults(func=cmd_measure)
+
+    s = sub.add_parser(
+        "verify",
+        help="measure -> mutate -> measure: run a command with measured proof",
+        description="Capture the track, run the mutation, capture again with "
+                    "the SAME bounds, and report measured deltas. Exit codes: "
+                    "0 VERIFIED, 1 mutation not applied (failed or refused "
+                    "before mutating), 2 UNVERIFIED (mutation applied but the "
+                    "post-capture failed/was silent; NOT rolled back — one "
+                    "Ctrl/Cmd+Z reverts it).")
+    s.add_argument("track", help="track name or 'master'")
+    s.add_argument("--seconds", type=float, default=None,
+                   help="capture length 1-60 (default 10)")
+    s.add_argument("--start", type=float, default=None,
+                   help="capture start in seconds (default: time selection "
+                        "start if active, else edit cursor)")
+    s.add_argument("--json", action="store_true",
+                   help="machine-readable JSON instead of the human report")
+    s.add_argument("--keep-wav", action="store_true",
+                   help="keep the capture WAVs (default: delete after analysis)")
+    s.add_argument("mutation", nargs=argparse.REMAINDER,
+                   help="-- <type> '<payload-json>' (mirrors `cmd`)")
+    s.set_defaults(func=cmd_verify)
 
     s = sub.add_parser("fxload", help="resolve an installed plugin name and add it")
     s.add_argument("query", help="plugin name query (fuzzy)")

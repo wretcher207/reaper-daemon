@@ -167,7 +167,7 @@ def _capture_output_path(output_dir=None):
 # ---------------------------------------------------------------------------
 
 def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
-            keep_wav=False, _analyzer_loader=_load_analyzer):
+            keep_wav=False, _analyzer_loader=_load_analyzer, _bounds=None):
     """One capture, one metrics dict.
 
     sender: callable(cmd_type, payload, timeout_ms=...) -> parsed reply dict.
@@ -175,16 +175,22 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
     Returns a dict with "ok": True and metrics, or "ok": False with an error.
     A silent capture is still ok: True but carries silent: True — callers must
     refuse verdicts on it, not pretend it failed.
+
+    _bounds: internal — already-resolved {"start_seconds", "duration_seconds"}
+    from a previous measure (verify's frozen post-capture bounds). Skips both
+    user-input validation and bounds resolution; the values were validated
+    when they were first resolved.
     """
-    seconds = DEFAULT_SECONDS if seconds is None else seconds
-    try:
-        seconds = float(seconds)
-    except (TypeError, ValueError):
-        return _error("BAD_SECONDS", f"seconds must be a number, got {seconds!r}")
-    if not 1 <= seconds <= MAX_SECONDS:
-        return _error("BAD_SECONDS",
-                      f"seconds must be between 1 and {MAX_SECONDS} for measure "
-                      f"(got {seconds:g}); long renders are not verify material")
+    if _bounds is None:
+        seconds = DEFAULT_SECONDS if seconds is None else seconds
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return _error("BAD_SECONDS", f"seconds must be a number, got {seconds!r}")
+        if not 1 <= seconds <= MAX_SECONDS:
+            return _error("BAD_SECONDS",
+                          f"seconds must be between 1 and {MAX_SECONDS} for measure "
+                          f"(got {seconds:g}); long renders are not verify material")
 
     # 1. Preflight: everything that would block or degrade the capture,
     # without rendering.
@@ -212,9 +218,15 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
 
     # 2. Bounds, resolved once and passed explicitly (start_seconds fully
     # neutralizes the time selection in the bridge — verified in the Lua).
-    bounds = resolve_bounds(sender, seconds, start_seconds)
-    if not bounds.get("ok"):
-        return bounds
+    if _bounds is not None:
+        bounds = {"ok": True,
+                  "start_seconds": float(_bounds["start_seconds"]),
+                  "duration_seconds": float(_bounds["duration_seconds"]),
+                  "bounds_source": _bounds.get("bounds_source", "frozen")}
+    else:
+        bounds = resolve_bounds(sender, seconds, start_seconds)
+        if not bounds.get("ok"):
+            return bounds
 
     # 3. Capture. The output path is unique per invocation; prove it does not
     # exist BEFORE sending — then a file appearing at that exact path can only
@@ -366,6 +378,159 @@ def _judge_silence(metrics):
 
 
 # ---------------------------------------------------------------------------
+# verify: measure -> mutate -> measure -> verdict
+# ---------------------------------------------------------------------------
+
+# Exit codes are the contract agents branch on (spec Phase 2):
+# 0 VERIFIED, 1 mutation not applied (failed OR refused before mutating),
+# 2 UNVERIFIED (mutation applied, post-measure failed/silent — NOT rolled back).
+EXIT_VERIFIED = 0
+EXIT_MUTATION_FAILED = 1
+EXIT_UNVERIFIED = 2
+
+NOT_ROLLED_BACK = ("The mutation is NOT rolled back (it's one Ctrl/Cmd+Z "
+                   "away). This is deliberate: a user-visible change is never "
+                   "destroyed because measurement hiccupped.")
+
+
+def compute_deltas(pre, post):
+    """Measured differences between two measure dicts (post minus pre).
+    Only fields finite in BOTH captures produce a delta — a None on either
+    side yields no delta, never a fabricated zero."""
+    deltas = {}
+
+    def num(m, key):
+        v = m.get(key)
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    rounding = {"silence_fraction": 3}
+    for key in ("lufs_i", "true_peak_db", "loudness_range_lu",
+                "sample_peak_db", "rms_db", "crest_factor_db",
+                "silence_fraction"):
+        a, b = num(pre, key), num(post, key)
+        if a is not None and b is not None:
+            deltas[key + "_delta"] = round(b - a, rounding.get(key, 2))
+
+    stereo = {}
+    pre_st, post_st = pre.get("stereo") or {}, post.get("stereo") or {}
+    for key in ("correlation", "mid_rms_db", "side_rms_db", "balance_db"):
+        a, b = pre_st.get(key), post_st.get(key)
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            stereo[key + "_delta"] = round(b - a, 3 if key == "correlation" else 2)
+    if stereo:
+        deltas["stereo"] = stereo
+
+    pre_bands = {b.get("freq_hz"): b.get("level_db")
+                 for b in pre.get("spectrum_third_octave") or []}
+    post_bands = {b.get("freq_hz"): b.get("level_db")
+                  for b in post.get("spectrum_third_octave") or []}
+    band_deltas = []
+    for freq in sorted(f for f in pre_bands if f in post_bands):
+        a, b = pre_bands[freq], post_bands[freq]
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            band_deltas.append({"freq_hz": freq, "pre_db": a, "post_db": b,
+                                "delta_db": round(b - a, 1)})
+    if band_deltas:
+        deltas["spectrum_band_deltas"] = band_deltas
+    deltas["masking"] = "not applicable: single-track verify"
+    return deltas
+
+
+def _scope_warning(pre, post):
+    """Honesty caveat when the deltas do not describe the isolated track."""
+    pre_scope, post_scope = pre.get("capture_scope"), post.get("capture_scope")
+    if pre_scope != post_scope:
+        return (f"pre and post captures have DIFFERENT scopes ({pre_scope} vs "
+                f"{post_scope}); the deltas compare unlike evidence and must "
+                "not be attributed to this track alone.")
+    isolated = (pre_scope == "isolated_track"
+                and pre.get("isolation_verified") and post.get("isolation_verified"))
+    if not isolated:
+        return (f"captures have scope {pre_scope!r} (isolation not verified); "
+                "the deltas describe that capture scope, not necessarily this "
+                "track alone.")
+    return None
+
+
+def verify(sender, mutator, track, cmd_type, payload, seconds=None,
+           start_seconds=None, output_dir=None, keep_wav=False,
+           _analyzer_loader=_load_analyzer):
+    """measure -> mutate -> measure with frozen bounds -> measured verdict.
+
+    sender: read/capture transport (no name resolution).
+    mutator: callable(cmd_type, payload) -> reply, routed like `cmd` (add_fx
+    name resolution and set_fx_param alias repair apply).
+    Returns {"status", "exit_code", "pre", "mutation", "post", "deltas",
+    "scope_warning", ...}. The mutation is never rolled back by this function.
+    """
+    result = {"status": None, "exit_code": None, "track": track,
+              "mutation": {"type": cmd_type, "payload": payload, "reply": None},
+              "pre": None, "post": None, "deltas": None, "scope_warning": None}
+
+    # 1. Pre-measure. Refuse BEFORE mutating on anything unmeasurable —
+    # a mutation you can't measure is just `cmd`; say so.
+    pre = measure(sender, track, seconds=seconds, start_seconds=start_seconds,
+                  output_dir=output_dir, keep_wav=keep_wav,
+                  _analyzer_loader=_analyzer_loader)
+    result["pre"] = pre
+    if not pre.get("ok"):
+        result["status"] = "REFUSED"
+        result["exit_code"] = EXIT_MUTATION_FAILED
+        result["note"] = ("pre-measure failed; nothing was mutated. If you "
+                          "only want the change without measurement, use "
+                          "`reaperd.py cmd` instead.")
+        return result
+    if pre.get("silent"):
+        result["status"] = "REFUSED"
+        result["exit_code"] = EXIT_MUTATION_FAILED
+        result["note"] = ("pre-capture is SILENT "
+                          f"({pre.get('silence_reason')}); nothing was "
+                          "mutated. A mutation you can't measure is just "
+                          "`cmd` — use that instead, or move the cursor/"
+                          "time selection to where the track is playing.")
+        return result
+
+    # 2. Mutate, through the same path `cmd` uses.
+    reply = mutator(cmd_type, payload)
+    result["mutation"]["reply"] = reply
+    if not isinstance(reply, dict) or not reply.get("ok"):
+        result["status"] = "MUTATION_FAILED"
+        result["exit_code"] = EXIT_MUTATION_FAILED
+        result["note"] = ("mutation failed; no post-capture attempted, "
+                          "nothing to roll back.")
+        return result
+
+    # 3. Post-measure with the SAME frozen bounds as pre.
+    post = measure(sender, track, output_dir=output_dir, keep_wav=keep_wav,
+                   _analyzer_loader=_analyzer_loader,
+                   _bounds={"start_seconds": pre["bounds"]["start_seconds"],
+                            "duration_seconds": pre["bounds"]["duration_seconds"],
+                            "bounds_source": "frozen_from_pre"})
+    result["post"] = post
+    if not post.get("ok"):
+        result["status"] = "UNVERIFIED"
+        result["exit_code"] = EXIT_UNVERIFIED
+        result["note"] = ("mutation applied but the post-capture failed "
+                          f"({(post.get('error') or {}).get('code')}). "
+                          + NOT_ROLLED_BACK)
+        return result
+    if post.get("silent"):
+        result["status"] = "UNVERIFIED"
+        result["exit_code"] = EXIT_UNVERIFIED
+        result["note"] = ("mutation applied but the post-capture is SILENT "
+                          f"({post.get('silence_reason')}); deltas would "
+                          "compare signal against dead air. " + NOT_ROLLED_BACK)
+        return result
+
+    # 4. Verdict with measured deltas.
+    result["deltas"] = compute_deltas(pre, post)
+    result["scope_warning"] = _scope_warning(pre, post)
+    result["status"] = "VERIFIED"
+    result["exit_code"] = EXIT_VERIFIED
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Human-readable formatting (the CLI's default output)
 # ---------------------------------------------------------------------------
 
@@ -403,4 +568,73 @@ def format_measure(m):
     if scope != "isolated_track" or not m.get("isolation_verified"):
         lines.append("[measure] NOTE: these numbers describe the capture scope "
                      f"({scope}), not necessarily this track alone.")
+    return "\n".join(lines)
+
+
+def _level_summary(m):
+    lufs = m.get("lufs_i")
+    parts = [f"LUFS-I {lufs:.1f}" if lufs is not None else "LUFS-I n/a"]
+    if m.get("rms_db") is not None:
+        parts.append(f"RMS {m['rms_db']:.1f} dBFS")
+    if m.get("true_peak_db") is not None:
+        parts.append(f"true peak {m['true_peak_db']:.1f} dBTP")
+    iso = "verified" if m.get("isolation_verified") else "NOT verified"
+    parts.append(f"scope {m.get('capture_scope')} ({iso})")
+    return " | ".join(parts)
+
+
+def format_verify(res):
+    """Human-readable report for a verify result dict."""
+    lines = []
+    pre, post = res.get("pre"), res.get("post")
+    if pre and pre.get("ok"):
+        lines.append(f"[verify] pre:  {_level_summary(pre)}")
+    elif pre:
+        err = pre.get("error") or {}
+        lines.append(f"[verify] pre-measure FAILED — {err.get('code')}: "
+                     f"{err.get('details')}")
+    mut = res.get("mutation") or {}
+    reply = mut.get("reply")
+    if reply is not None:
+        if isinstance(reply, dict) and reply.get("ok"):
+            lines.append(f"[verify] mutation {mut.get('type')}: ok")
+        else:
+            err = (reply.get("error") if isinstance(reply, dict) else None) or reply
+            lines.append(f"[verify] mutation {mut.get('type')}: FAILED — {err}")
+    if post and post.get("ok"):
+        lines.append(f"[verify] post: {_level_summary(post)}")
+    elif post:
+        err = post.get("error") or {}
+        lines.append(f"[verify] post-measure FAILED — {err.get('code')}: "
+                     f"{err.get('details')}")
+
+    deltas = res.get("deltas") or {}
+    delta_bits = []
+    for key, label in (("lufs_i_delta", "dLUFS-I"),
+                       ("true_peak_db_delta", "dTruePeak"),
+                       ("rms_db_delta", "dRMS"),
+                       ("sample_peak_db_delta", "dPeak"),
+                       ("crest_factor_db_delta", "dCrest")):
+        if deltas.get(key) is not None:
+            delta_bits.append(f"{label} {deltas[key]:+.2f} dB"
+                              if key != "lufs_i_delta"
+                              else f"{label} {deltas[key]:+.2f}")
+    if delta_bits:
+        lines.append("[verify] " + "   ".join(delta_bits))
+    stereo = deltas.get("stereo") or {}
+    if stereo:
+        lines.append("[verify] stereo deltas: " + ", ".join(
+            f"{k[:-len('_delta')]} {v:+g}" for k, v in stereo.items()))
+    bands = deltas.get("spectrum_band_deltas") or []
+    moved = sorted((b for b in bands if b["delta_db"]),
+                   key=lambda b: abs(b["delta_db"]), reverse=True)[:5]
+    if moved:
+        lines.append("[verify] biggest spectrum moves: " + ", ".join(
+            f"{b['freq_hz']} Hz {b['delta_db']:+.1f} dB" for b in moved))
+    if res.get("scope_warning"):
+        lines.append(f"[verify] SCOPE: {res['scope_warning']}")
+    verdict = f"[verify] VERDICT: {res.get('status')}"
+    if res.get("note"):
+        verdict += f" — {res['note']}"
+    lines.append(verdict)
     return "\n".join(lines)

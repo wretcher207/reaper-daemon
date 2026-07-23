@@ -442,6 +442,216 @@ def test_format_notes_non_isolated_scope(root, tmp_path):
     assert "not necessarily this track alone" in text
 
 
+# --- verify: measure -> mutate -> measure -> verdict ------------------------
+
+MUT_OK = {"ok": True, "type": "set_fx_param", "data": {"applied": True}}
+MUT_FAIL = {"ok": False, "error": {"code": "NO_FX_PARAM",
+                                   "details": "no matching parameter"}}
+SET_PARAM = {"target_track_name": "Bass", "fx_name_contains": "EQ",
+             "param_index": 3, "value": 0.4}
+
+
+def _mutator(root):
+    def mutate(cmd_type, payload):
+        return reaperd.send_type(cmd_type, payload, bridge_root=root,
+                                 resolve=True, repair=True)
+    return mutate
+
+
+def _run_verify(root, tmp_path, replies, record=None, analyzer=_no_analyzer,
+                **kwargs):
+    fake_bridge_script(root, replies, record=record)
+    return verifyloop.verify(
+        _sender(root), _mutator(root), "Bass", "set_fx_param", dict(SET_PARAM),
+        output_dir=str(tmp_path / "wavs"), _analyzer_loader=analyzer, **kwargs)
+
+
+def test_verify_verified_happy_path(root, tmp_path):
+    record = []
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(cursor=3.5),
+        _capture_responder(lufs=-14.1, raw="LUFSI:-14.10;TRUEPEAK:-3.20"),
+        MUT_OK,
+        PREFLIGHT_OK,
+        _capture_responder(lufs=-14.9, raw="LUFSI:-14.90;TRUEPEAK:-3.90"),
+    ], record=record)
+    assert res["status"] == "VERIFIED"
+    assert res["exit_code"] == 0
+    assert res["deltas"]["lufs_i_delta"] == -0.8
+    assert res["deltas"]["true_peak_db_delta"] == -0.7
+    assert res["deltas"]["masking"] == "not applicable: single-track verify"
+    assert res["scope_warning"] is None
+    # mutation went through the cmd path: value -> normalized_value repair
+    mut_cmd = [c for c in record if c["type"] == "set_fx_param"]
+    assert len(mut_cmd) == 1
+    assert mut_cmd[0]["payload"]["normalized_value"] == 0.4
+    assert "value" not in mut_cmd[0]["payload"]
+
+
+def test_verify_pre_post_bounds_byte_identical(root, tmp_path):
+    record = []
+    _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(ts={"active": True, "start": 12.25, "end": 15.75}),
+        _capture_responder(), MUT_OK, PREFLIGHT_OK, _capture_responder(),
+    ], record=record)
+    captures = [c for c in record if c["type"] == "capture_track_audio"]
+    assert len(captures) == 2
+    for key in ("start_seconds", "duration_seconds"):
+        a, b = captures[0]["payload"][key], captures[1]["payload"][key]
+        assert json.dumps(a) == json.dumps(b)  # byte-identical on the wire
+    assert captures[0]["payload"]["start_seconds"] == 12.25
+    assert captures[0]["payload"]["duration_seconds"] == 3.5
+    # post-measure resolves NO context (bounds frozen from pre)
+    assert [c["type"] for c in record].count("get_context") == 1
+
+
+def test_verify_mutation_failed_stops_before_post_capture(root, tmp_path):
+    record = []
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(), MUT_FAIL,
+    ], record=record)
+    assert res["status"] == "MUTATION_FAILED"
+    assert res["exit_code"] == 1
+    assert res["post"] is None
+    assert "nothing to roll back" in res["note"]
+    assert [c["type"] for c in record].count("capture_track_audio") == 1
+
+
+def test_verify_unverified_when_post_capture_fails(root, tmp_path):
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(), MUT_OK,
+        PREFLIGHT_OK,
+        {"ok": False, "error": {"code": "CAPTURE_FAILED",
+                                "details": "render died"}},
+    ])
+    assert res["status"] == "UNVERIFIED"
+    assert res["exit_code"] == 2
+    assert "NOT rolled back" in res["note"]
+    assert "Ctrl/Cmd+Z" in res["note"]
+
+
+def test_verify_unverified_when_post_capture_is_silent(root, tmp_path):
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(), MUT_OK,
+        PREFLIGHT_OK, _capture_responder(lufs=-75.0, raw="LUFSI:-75.0"),
+    ])
+    assert res["status"] == "UNVERIFIED"
+    assert res["exit_code"] == 2
+    assert "SILENT" in res["note"]
+    assert "Ctrl/Cmd+Z" in res["note"]
+
+
+def test_verify_refused_when_pre_capture_blocked(root, tmp_path):
+    record = []
+    res = _run_verify(root, tmp_path, [PREFLIGHT_GATED], record=record)
+    assert res["status"] == "REFUSED"
+    assert res["exit_code"] == 1
+    assert "nothing was mutated" in res["note"]
+    # the mutation was never sent
+    assert all(c["type"] != "set_fx_param" for c in record)
+
+
+def test_verify_refused_when_pre_capture_is_silent(root, tmp_path):
+    record = []
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(),
+        _capture_responder(lufs=-75.0, raw="LUFSI:-75.0"),
+    ], record=record)
+    assert res["status"] == "REFUSED"
+    assert res["exit_code"] == 1
+    assert "`cmd`" in res["note"]
+    assert all(c["type"] != "set_fx_param" for c in record)
+
+
+def test_verify_scope_warning_on_scope_change(root, tmp_path):
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(),
+        MUT_OK, PREFLIGHT_OK,
+        _capture_responder(scope="full_mix", verified=False),
+    ])
+    assert res["status"] == "VERIFIED"
+    assert "DIFFERENT scopes" in res["scope_warning"]
+
+
+def test_verify_scope_warning_on_unverified_isolation(root, tmp_path):
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(),
+        _capture_responder(scope="full_mix", verified=False),
+        MUT_OK, PREFLIGHT_OK,
+        _capture_responder(scope="full_mix", verified=False),
+    ])
+    assert res["status"] == "VERIFIED"
+    assert "not necessarily this track alone" in res["scope_warning"]
+
+
+# --- compute_deltas / format_verify unit tests -------------------------------
+
+def test_compute_deltas_with_canned_metrics():
+    pre = {"lufs_i": -14.1, "rms_db": -18.0, "true_peak_db": -3.2,
+           "silence_fraction": 0.02,
+           "stereo": {"correlation": 0.9, "side_rms_db": -30.0},
+           "spectrum_third_octave": [{"freq_hz": 100, "level_db": -20.0},
+                                     {"freq_hz": 315, "level_db": -18.0}]}
+    post = {"lufs_i": -14.9, "rms_db": -18.8, "true_peak_db": -3.9,
+            "silence_fraction": 0.05,
+            "stereo": {"correlation": 0.85, "side_rms_db": -31.0},
+            "spectrum_third_octave": [{"freq_hz": 100, "level_db": -20.5},
+                                      {"freq_hz": 315, "level_db": -21.1}]}
+    d = verifyloop.compute_deltas(pre, post)
+    assert d["lufs_i_delta"] == -0.8
+    assert d["rms_db_delta"] == -0.8
+    assert d["true_peak_db_delta"] == -0.7
+    assert d["silence_fraction_delta"] == 0.03
+    assert d["stereo"]["correlation_delta"] == -0.05
+    assert d["stereo"]["side_rms_db_delta"] == -1.0
+    bands = {b["freq_hz"]: b["delta_db"] for b in d["spectrum_band_deltas"]}
+    assert bands == {100: -0.5, 315: -3.1}
+
+
+def test_compute_deltas_never_fabricates_from_missing_values():
+    d = verifyloop.compute_deltas({"lufs_i": None, "rms_db": -18.0},
+                                  {"lufs_i": -14.0, "rms_db": None})
+    assert "lufs_i_delta" not in d
+    assert "rms_db_delta" not in d
+
+
+def test_format_verify_verified_and_unverified():
+    verified = {"status": "VERIFIED", "exit_code": 0,
+                "pre": {"ok": True, "lufs_i": -14.1,
+                        "capture_scope": "isolated_track",
+                        "isolation_verified": True},
+                "post": {"ok": True, "lufs_i": -14.9,
+                         "capture_scope": "isolated_track",
+                         "isolation_verified": True},
+                "mutation": {"type": "set_fx_param",
+                             "reply": {"ok": True}},
+                "deltas": {"lufs_i_delta": -0.8,
+                           "spectrum_band_deltas": [
+                               {"freq_hz": 315, "pre_db": -18.0,
+                                "post_db": -21.1, "delta_db": -3.1}]},
+                "scope_warning": None, "note": None}
+    text = verifyloop.format_verify(verified)
+    assert "VERDICT: VERIFIED" in text
+    assert "dLUFS-I -0.80" in text
+    assert "315 Hz -3.1 dB" in text
+
+    unverified = {"status": "UNVERIFIED", "exit_code": 2,
+                  "pre": {"ok": True, "lufs_i": -14.1,
+                          "capture_scope": "isolated_track",
+                          "isolation_verified": True},
+                  "post": {"ok": False,
+                           "error": {"code": "CAPTURE_FAILED",
+                                     "details": "render died"}},
+                  "mutation": {"type": "set_fx_param",
+                               "reply": {"ok": True}},
+                  "deltas": None, "scope_warning": None,
+                  "note": "mutation applied but the post-capture failed. "
+                          + verifyloop.NOT_ROLLED_BACK}
+    text = verifyloop.format_verify(unverified)
+    assert "VERDICT: UNVERIFIED" in text
+    assert "one Ctrl/Cmd+Z away" in text
+
+
 # --- parse_render_stats unit tests ------------------------------------------
 
 def test_parse_render_stats_maps_known_keys():

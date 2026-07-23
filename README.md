@@ -127,6 +127,7 @@ python3 reaperd.py fxload "<plugin query>" <track|master>
 python3 reaperd.py setparam <track> "<fx>" "<param>" "<display value>"
 python3 reaperd.py eq <track> "<fx>" <band> <freqHz> <gaindB> [Q]
 python3 reaperd.py measure <track> [--seconds N] [--start S] [--json]
+python3 reaperd.py verify <track> [--seconds N] [--json] -- <type> '<payload-json>'
 python3 reaperd.py groove <beat.dsl> --track Drums [--position SEC] [--map NAME]
 python3 reaperd.py jam                          # DSL drum beat from stdin -> selected track
 python3 reaperd.py list-maps                    # available drum-kit maps
@@ -151,6 +152,49 @@ separate runs of the same spot, pass the same `--start`/`--seconds` to both.
 The output labels its `metrics_source` (`postmortem` or `render_stats`) and
 its capture scope — full-mix fallbacks are reported honestly, never presented
 as per-track evidence.
+
+## Closed-loop verify — mix moves with measured proof
+
+Every mutating command returns `ok: true`, but `ok` only means "REAPER did
+it" — not "the mix got better". `verify` closes that loop: it captures the
+track, runs your command, captures the **same spot** again, and reports what
+actually changed in the audio.
+
+```bash
+python3 reaperd.py verify Bass -- set_fx_param \
+  '{"target_track_name":"Bass","fx_name_contains":"ReaEQ","param_name_contains":"Gain","formatted_value":"-2.5 dB"}'
+```
+
+```text
+[verify] pre:  LUFS-I -14.1 | RMS -18.0 dBFS | scope isolated_track (verified)
+[verify] mutation set_fx_param: ok
+[verify] post: LUFS-I -14.9 | RMS -18.8 dBFS | scope isolated_track (verified)
+[verify] dLUFS-I -0.80   dRMS -0.80 dB
+[verify] biggest spectrum moves: 315 Hz -3.1 dB, 250 Hz -1.7 dB
+[verify] VERDICT: VERIFIED
+```
+
+Exit codes are the contract (agents branch on them): `0` VERIFIED (both
+captures clean, deltas reported), `1` mutation not applied (it failed, or the
+pre-capture was blocked/silent so nothing was changed), `2` UNVERIFIED (the
+mutation IS applied but the post-capture failed or was silent — it is **not**
+rolled back; one Ctrl/Cmd+Z reverts it. A user-visible change is never
+destroyed because measurement hiccupped).
+
+Honest limits, by design:
+
+- Bounds are frozen once, before the mutation: pre and post captures use the
+  byte-identical `start_seconds`/`duration_seconds`, so a moved cursor or
+  time selection between captures cannot skew the comparison.
+- With Post Mortem installed you get per-band spectrum deltas, true peak,
+  RMS, and stereo-image deltas; without it, LUFS-I deltas only (the report
+  labels its `metrics_source`).
+- If either capture is not a verified isolated track (some tracks fall back
+  to a full-mix render), the report says the deltas describe the capture
+  scope — it never presents full-mix deltas as per-track evidence.
+- A silent capture refuses a verdict rather than comparing dead air.
+- Two renders per verify: each capture blocks REAPER's UI for the render
+  duration (default 10 s of audio; keep `--seconds` short).
 
 ## MCP server — talk to REAPER in plain English
 
