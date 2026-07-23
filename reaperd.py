@@ -238,29 +238,37 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
     if not wait:
         return cid, None
 
-    deadline = time.monotonic() + timeout_ms / 1000.0
-    while time.monotonic() < deadline:
-        if os.path.isfile(outbox):
-            with open(outbox, "r", encoding="utf-8") as f:
-                reply = f.read()
-            # The reader owns its reply: the bridge no longer count-sweeps
-            # outbox/ (it was deleting unread replies on big batches), so delete
-            # it here once read to keep the queue from growing unbounded.
+    delivered = False
+    try:
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while time.monotonic() < deadline:
+            if os.path.isfile(outbox):
+                with open(outbox, "r", encoding="utf-8") as f:
+                    reply = f.read()
+                delivered = True
+                # The reader owns its reply: the bridge no longer count-sweeps
+                # outbox/ (it was deleting unread replies on big batches), so
+                # delete it here once read to keep the queue from growing
+                # unbounded.
+                try:
+                    os.remove(outbox)
+                except OSError:
+                    pass
+                return cid, reply
+            time.sleep(0.05)
+    finally:
+        # Withdraw the command whenever the wait ends without a reply —
+        # timeout, Ctrl+C, or any exception. A file left in inbox/ has no age
+        # gate on the bridge side and would execute later against whatever
+        # project is open then (captures wait up to 3 minutes, plenty of time
+        # to interrupt). If the bridge already grabbed it, this remove misses;
+        # the bridge's processing/ requeue age gate covers that side. A hard
+        # SIGKILL still leaks — that cannot be handled from here.
+        if not delivered:
             try:
-                os.remove(outbox)
+                os.remove(inbox)
             except OSError:
                 pass
-            return cid, reply
-        time.sleep(0.05)
-    # Withdraw the command so a TIMEOUT report stays true: a file left in
-    # inbox/ (or requeued from processing/ at bridge startup) would still
-    # execute later against whatever project is open then. If the bridge
-    # already grabbed it, this remove misses; the bridge's requeue age gate
-    # covers that side.
-    try:
-        os.remove(inbox)
-    except OSError:
-        pass
     raise TimeoutError(f"timed out after {timeout_ms}ms waiting for {outbox}")
 
 

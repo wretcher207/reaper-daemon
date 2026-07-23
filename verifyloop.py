@@ -13,6 +13,7 @@ produced it in metrics_source, and the two modes never mix silently.
 """
 
 import datetime
+import math
 import os
 import re
 import secrets
@@ -87,25 +88,51 @@ def _preflight(track, bridge_root):
     risk = data.get("risk_gate") or {}
     if not risk.get("allow_risk_level_3"):
         # Users always trip on this: the flag is read once at REAPER startup.
-        restart = risk.get("requires_restart_to_change")
         lines.append(
             "  - allow_risk_level_3 is false in bridge/bridge_config.json"
-            + (f" (requires_restart_to_change: {restart} — set it true, then "
-               f"restart REAPER)" if restart is not None else ""))
-    return None, _err("CAPTURE_BLOCKED", "\n".join(lines))
+            + (" (requires_restart_to_change: the flag is read once at REAPER "
+               "startup — set it true, then restart REAPER)"
+               if risk.get("requires_restart_to_change") else ""))
+    # Machine callers (the Phase-3 MCP tools) get the structured lists, not
+    # just the prose.
+    return None, _err("CAPTURE_BLOCKED", "\n".join(lines),
+                      blockers=blockers, risk_gate=risk)
 
 
 def _check_window_args(seconds, start):
     """Validate the requested window without any bridge traffic. Returns an
     error result or None. Split out so measure() can refuse bad arguments
-    before sending a single command."""
+    before sending a single command. Non-finite values are refused explicitly:
+    json.dumps would emit a bare NaN/Infinity the bridge's JSON parser cannot
+    read, costing the caller a full capture timeout."""
     duration = DEFAULT_SECONDS if seconds is None else float(seconds)
-    if not (0 < duration <= MAX_SECONDS):
+    if not (math.isfinite(duration) and 0 < duration <= MAX_SECONDS):
         return _err("BAD_SECONDS",
                     f"seconds must be in (0, {MAX_SECONDS:g}] for verify "
                     f"captures, got {duration:g}")
-    if start is not None and float(start) < 0:
-        return _err("BAD_START", f"start must be >= 0, got {float(start):g}")
+    if start is not None and not (math.isfinite(float(start))
+                                  and float(start) >= 0):
+        return _err("BAD_START",
+                    f"start must be finite and >= 0, got {float(start):g}")
+    return None
+
+
+def _check_bounds_dict(bounds):
+    """Validate a caller-supplied frozen-bounds dict (the verify reuse path)
+    so measure() keeps its never-raises contract on malformed input."""
+    if not isinstance(bounds, dict):
+        return _err("BAD_BOUNDS",
+                    f"bounds must be a dict from resolve_bounds(), got "
+                    f"{type(bounds).__name__}")
+    start = bounds.get("start_seconds")
+    duration = bounds.get("duration_seconds")
+    if not (isinstance(start, (int, float)) and math.isfinite(start)
+            and start >= 0):
+        return _err("BAD_BOUNDS", f"bounds.start_seconds invalid: {start!r}")
+    if not (isinstance(duration, (int, float)) and math.isfinite(duration)
+            and 0 < duration <= MAX_SECONDS):
+        return _err("BAD_BOUNDS",
+                    f"bounds.duration_seconds invalid: {duration!r}")
     return None
 
 
@@ -147,9 +174,13 @@ def resolve_bounds(seconds=None, start=None, bridge_root=None):
 
 
 def _judge_silence(metrics, source):
-    """(silent, basis). basis None = could not assess (caller must warn)."""
+    """(silent, basis). basis None = could not assess (caller must warn).
+    NaN samples in the WAV make rms_db NaN and every comparison False — that
+    is an unassessable capture, not a clean one."""
     if source == "postmortem":
         rms = metrics.get("rms_db")
+        if rms is not None and rms != rms:
+            return False, None
         frac = metrics.get("silence_fraction") or 0
         silent = ((rms is not None and rms <= SILENT_RMS_DB)
                   or frac >= SILENT_FRACTION)
@@ -169,13 +200,15 @@ def measure(track, seconds=None, start=None, bounds=None, bridge_root=None,
     post-measure passes the pre-measure's bounds so both captures are
     byte-identical in start/duration). When given, seconds/start are ignored.
     """
-    if bounds is None:
-        bad = _check_window_args(seconds, start)
-        if bad:
-            return bad
-    data, refusal = _preflight(track, bridge_root)
+    bad = (_check_window_args(seconds, start) if bounds is None
+           else _check_bounds_dict(bounds))
+    if bad:
+        return bad
+    preflight, refusal = _preflight(track, bridge_root)
     if refusal:
         return refusal
+    warnings = [f"preflight: [{w.get('code')}] {w.get('message')}"
+                for w in (preflight.get("warnings") or [])]
     if bounds is None:
         bounds, err = resolve_bounds(seconds=seconds, start=start,
                                      bridge_root=bridge_root)
@@ -213,12 +246,12 @@ def measure(track, seconds=None, start=None, bounds=None, bridge_root=None,
                     f"{file_path} was last modified before this capture was "
                     f"sent; refusing to measure a stale file", bounds=bounds)
 
-    warnings = []
     source = metrics_source_available()
     lufs = cap.get("render_loudness_lufs")
     if isinstance(lufs, float) and lufs != lufs:  # NaN survives json.loads;
         lufs = None                               # treat as "not measured"
     metrics = {"lufs_i": lufs}
+    degraded = False
     if source == "postmortem":
         try:
             stats = analyze_wav(file_path)
@@ -233,15 +266,24 @@ def measure(track, seconds=None, start=None, bounds=None, bridge_root=None,
                 "sample_rate": stats.sample_rate,
                 "channels": stats.channels,
             })
+            want = bounds["duration_seconds"]
+            if abs(stats.duration_seconds - want) > max(0.25, 0.05 * want):
+                warnings.append(
+                    f"capture WAV is {stats.duration_seconds:g}s but the "
+                    f"requested window was {want:g}s — the render may have "
+                    f"been truncated; the metrics describe the file, not the "
+                    f"full window")
         except Exception as e:
             source = "render_stats"
-            warnings.append(f"Post Mortem analysis failed ({e}); metrics "
-                            f"degraded to render_stats (LUFS-I only)")
+            degraded = True
+            warnings.append(f"Post Mortem analysis of the capture failed "
+                            f"({e}); metrics degraded to render_stats "
+                            f"(LUFS-I only) — the WAV is kept for debugging")
 
     silent, basis = _judge_silence(metrics, source)
     if basis is None:
         warnings.append("silence could not be assessed (no LUFS-I in "
-                        "RENDER_STATS and Post Mortem is not installed); "
+                        "RENDER_STATS and no usable Post Mortem analysis); "
                         "treat level metrics with caution")
     if silent:
         warnings.append("capture is effectively SILENT — no verdict may rest "
@@ -256,8 +298,11 @@ def measure(track, seconds=None, start=None, bounds=None, bridge_root=None,
             f"{cap.get('isolation_verified')}): these numbers describe that "
             f"capture scope, NOT necessarily the track alone")
 
+    # The WAV is evidence. It survives silence (debug why it's silent) and
+    # analysis failure (debug why Post Mortem choked) — deletion happens only
+    # for a clean, fully-analyzed success the caller didn't ask to keep.
     file_kept = True
-    if not keep_wav and not silent:
+    if not keep_wav and not silent and not degraded:
         try:
             os.remove(file_path)
             file_kept = False
@@ -538,7 +583,9 @@ def format_measure(result):
         if stereo:
             lines.append(f"[measure] stereo correlation: {stereo.get('correlation')}"
                          f"  balance: {_fmt_db(stereo.get('balance_db'))}")
-    lines.append(f"[measure] silent: {'YES' if result.get('silent') else 'no'}")
+    lines.append("[measure] silent: "
+                 + ("unassessed" if result.get("silence_basis") is None
+                    else "YES" if result.get("silent") else "no"))
     if cap.get("file_kept"):
         lines.append(f"[measure] WAV kept: {cap.get('file_path')}")
     for w in result.get("warnings", []):

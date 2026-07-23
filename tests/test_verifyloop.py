@@ -54,10 +54,23 @@ def context_reply(cursor=0.0, ts_start=0.0, ts_end=0.0):
 
 
 def capture_reply(wav_path, lufs=-14.2, scope="isolated_track", verified=True,
-                  track_name="Bass"):
-    """Callable reply: echoes the requested bounds like the real bridge."""
+                  track_name="Bass", touch=True):
+    """Callable reply: echoes the requested bounds like the real bridge.
+    touch=False keeps the WAV's existing mtime (the stale-file tests set it
+    deliberately old)."""
     def build(cmd):
         p = cmd["payload"]
+        if touch:
+            # The real bridge writes the WAV during the render, after the
+            # command was sent. Refresh the pre-made file's mtime to match —
+            # and to keep the freshness gate from flaking when a slow test
+            # run reaches the second measure >2s after the WAV was created.
+            # Never let this kill the fake's thread (an unanswered command
+            # costs the test the full 180s capture timeout).
+            try:
+                os.utime(wav_path, None)
+            except OSError:
+                pass
         return {"ok": True, "type": "capture_track_audio", "data": {
             "track": {"index": 1, "name": track_name, "guid": "{fake}"},
             "file_path": wav_path,
@@ -118,8 +131,9 @@ def test_bad_seconds_refused_before_any_command(root):
         assert result["ok"] is False
         assert result["error"]["code"] == "BAD_SECONDS"
     time.sleep(0.1)
-    # Preflight runs first by design; the point is no CAPTURE was attempted.
-    assert all(c["type"] != "capture_track_audio" for c in record)
+    # Window args are validated before ANY bridge traffic: not even a
+    # preflight goes out on bad seconds (record stays empty).
+    assert record == []
 
 
 # --- bounds resolution and freezing ----------------------------------------
@@ -285,7 +299,7 @@ def test_stale_capture_file_rejected(root, tmp_path, monkeypatch):
     wav = write_wav(str(tmp_path / "old.wav"))
     hour_ago = time.time() - 3600
     os.utime(wav, (hour_ago, hour_ago))
-    fake_bridge_script(root, [preflight_ok(), capture_reply(wav)])
+    fake_bridge_script(root, [preflight_ok(), capture_reply(wav, touch=False)])
     result = verifyloop.measure("Bass", start=0.0, bridge_root=root)
     assert result["ok"] is False
     assert result["error"]["code"] == "STALE_CAPTURE_FILE"
@@ -329,6 +343,103 @@ def test_wav_deleted_on_success_kept_on_request(root, tmp_path, monkeypatch):
     kept = verifyloop.measure("Bass", start=0.0, bridge_root=root, keep_wav=True)
     assert gone["capture"]["file_kept"] is False and not os.path.exists(wav1)
     assert kept["capture"]["file_kept"] is True and os.path.exists(wav2)
+
+
+# --- gate findings: validation, evidence, transport hygiene ------------------
+
+def test_nonfinite_start_refused_before_any_command(root):
+    record = []
+    fake_bridge_script(root, [], record=record)
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        result = verifyloop.measure("Bass", start=bad, bridge_root=root)
+        assert result["ok"] is False
+        assert result["error"]["code"] == "BAD_START"
+    time.sleep(0.1)
+    assert record == []
+
+
+def test_malformed_bounds_dict_errors_instead_of_raising(root):
+    fake_bridge_script(root, [preflight_ok()])
+    for bad in ({"start_seconds": "x", "duration_seconds": 10},
+                {"duration_seconds": 10}, {"start_seconds": 1}, "nonsense",
+                {"start_seconds": 1, "duration_seconds": 600}):
+        result = verifyloop.measure("Bass", bounds=bad, bridge_root=root)
+        assert result["ok"] is False
+        assert result["error"]["code"] == "BAD_BOUNDS"
+
+
+def test_degraded_analysis_keeps_the_wav(root, tmp_path):
+    # The WAV is the evidence of WHY analysis failed; deleting it on the
+    # degrade path would destroy the only debuggable artifact.
+    pytest.importorskip("postmortem")
+    bad = str(tmp_path / "bad.wav")
+    with open(bad, "wb") as f:
+        f.write(b"not a wav at all")
+    fake_bridge_script(root, [preflight_ok(), capture_reply(bad, lufs=-14.2)])
+    result = verifyloop.measure("Bass", start=0.0, bridge_root=root)
+    assert result["ok"] is True
+    assert result["metrics_source"] == "render_stats"
+    assert result["capture"]["file_kept"] is True
+    assert os.path.exists(bad)
+
+
+def test_truncated_capture_warns(root, tmp_path):
+    pytest.importorskip("postmortem")
+    wav1 = write_wav(str(tmp_path / "short1.wav"), seconds=0.5)
+    wav2 = write_wav(str(tmp_path / "short2.wav"), seconds=0.5)
+    fake_bridge_script(root, [preflight_ok(), capture_reply(wav1),
+                              preflight_ok(), capture_reply(wav2)])
+    short = verifyloop.measure("Bass", start=0.0, seconds=10,
+                               bridge_root=root, keep_wav=True)
+    exact = verifyloop.measure("Bass", start=0.0, seconds=0.5,
+                               bridge_root=root, keep_wav=True)
+    assert any("truncated" in w for w in short["warnings"])
+    assert not any("truncated" in w for w in exact["warnings"])
+
+
+def test_capture_blocked_carries_structured_blockers(root):
+    fake_bridge_script(root, [
+        {"ok": True, "type": "get_capture_preflight", "data": {
+            "capture_allowed": False,
+            "blockers": [{"code": "capture_gated", "message": "gated"}],
+            "risk_gate": {"allow_risk_level_3": False,
+                          "requires_restart_to_change": True}}},
+    ])
+    result = verifyloop.measure("Bass", start=0.0, bridge_root=root)
+    # Machine callers (MCP in Phase 3) must not have to parse prose.
+    assert result["blockers"][0]["code"] == "capture_gated"
+    assert result["risk_gate"]["allow_risk_level_3"] is False
+    assert "True" not in result["error"]["details"]  # no Python-repr leak
+
+
+def test_preflight_warnings_bubble_into_result(root, tmp_path, monkeypatch):
+    no_postmortem(monkeypatch)
+    wav = write_wav(str(tmp_path / "c.wav"))
+    fake_bridge_script(root, [
+        preflight_ok(warnings=[{"code": "render_hang_risk",
+                                "message": "auto-close can't be forced"}]),
+        capture_reply(wav)])
+    result = verifyloop.measure("Bass", start=0.0, bridge_root=root)
+    assert any(w.startswith("preflight: [render_hang_risk]")
+               for w in result["warnings"])
+
+
+def test_interrupted_wait_withdraws_inbox_command(root, monkeypatch):
+    # Ctrl+C during the (up to 3 min) capture wait must not leave a command
+    # in inbox/ — the bridge has no age gate there and would execute it later
+    # against whatever project is open then.
+    def boom(_seconds):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(time, "sleep", boom)
+    with pytest.raises(KeyboardInterrupt):
+        reaperd_send_interrupted(root)
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def reaperd_send_interrupted(root):
+    import reaperd
+    reaperd.send_command({"type": "ping", "payload": {}}, wait=True,
+                         timeout_ms=5000, bridge_root=root)
 
 
 # --- human formatter ---------------------------------------------------------

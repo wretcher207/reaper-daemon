@@ -483,7 +483,7 @@ def test_degraded_analysis_warnings_bubble_to_verify_report(root, tmp_path):
     result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
                                start=0.0, bridge_root=root)
     assert result["verdict"] == "VERIFIED"  # LUFS basis still held
-    assert any(w.startswith("pre-measure: Post Mortem analysis failed")
+    assert any(w.startswith("pre-measure: Post Mortem analysis")
                for w in result["warnings"])
     assert "WARNING" in verifyloop.format_verify(result)
 

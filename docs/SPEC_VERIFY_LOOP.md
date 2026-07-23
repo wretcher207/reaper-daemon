@@ -316,7 +316,57 @@ Protocol per phase:
 |---|---|---|---|---|
 | 2026-07-23 | spec | — | Spec written, baseline verified (124 tests pass, main@8358a9a) | Authored by prior session; no code yet |
 | 2026-07-23 | 0 | 2af3a92 | DONE | See "Phase 0 findings" below. Environment: remote Linux session, not David's Windows machine. Branch is `claude/status-last-pushed-h4l7un` (session-mandated), not `feat/verify-loop` — same role, one PR at the end (#25). Codex CLI unavailable here; per David, the per-phase gate is an independent adversarial review by fresh agent sessions hunting the template's seven failure categories (David can re-run real Codex on his machine before merge). |
-| 2026-07-23 | 1 | 0b3fba3 | DONE, gate pending | `measure` + `verifyloop.py` + scripted fake + 19 tests. Three independent reviewers dispatched (protocol/bounds, Windows/lifecycle, honesty lenses); findings pending. |
+| 2026-07-23 | 1 | 0b3fba3 → fix commit | Gate round 1: 2 MAJOR → fixed | Three independent reviewers (protocol/bounds: clean, 6 MINOR; honesty: 1 MAJOR; Windows/lifecycle: 1 MAJOR). See "Phase 1 gate round 1" below. Scoped re-review of the fixes pending. |
+
+### Phase 1 gate round 1 (2026-07-23, reviewed 0b3fba3)
+
+**MAJOR (both fixed):**
+
+- **Evidence WAV deleted on the analysis-degrade path** (honesty reviewer;
+  Windows reviewer found it independently as MINOR): `measure` deleted the
+  capture whenever it wasn't silent, including when `analyze_wav` raised —
+  destroying the only artifact that could show why analysis failed,
+  contradicting AGENTS.md's "kept on failure" contract. FIX: `degraded` flag;
+  the WAV now survives silence, analysis failure, and every error path;
+  deletion happens only for a clean fully-analyzed success without
+  `--keep-wav`.
+- **Orphaned inbox command after Ctrl+C/kill during the wait** (Windows/
+  lifecycle reviewer): `send_command`'s inbox withdrawal ran only on the
+  timeout fall-through; an interrupt during the up-to-180 s capture wait left
+  the command in `inbox/`, which the bridge dispatches with NO age gate —
+  hours later, opening REAPER on a different project would execute a
+  risk-level-3 render against it. FIX: withdrawal moved to a `finally` that
+  fires whenever the wait ends without a delivered reply (timeout, Ctrl+C,
+  any exception). SIGKILL still leaks — unhandleable from user code; noted in
+  the code comment.
+
+**MINOR (all fixed):** non-finite `--start`/seconds refused before any
+command (previously became invalid JSON the bridge can't parse + a full
+timeout); caller-supplied bounds dicts validated (`BAD_BOUNDS`) preserving
+measure's never-raises contract; NaN LUFS/RMS treated as unassessable, not
+clean; degrade-warning wording no longer blames a missing Post Mortem when
+analysis failed; `format_measure` prints "silent: unassessed" when no basis
+exists; truncated renders (WAV duration vs requested window) warn;
+`CAPTURE_BLOCKED` carries structured `blockers[]`/`risk_gate` for machine
+callers and drops the Python-repr leak; preflight `warnings[]` bubble into
+the result; AGENTS.md repeatability claim scoped honestly (frozen within one
+verify / explicit `--start`, not across bare CLI runs); fake `capture_reply`
+refreshes mtime like the real bridge (kills a latent >2 s CI flake) with a
+`touch=False` opt-out for the stale tests; stale test comment corrected.
+
+**MINOR accepted with justification:** a backward wall-clock step >2 s
+mid-render can false-positive `STALE_CAPTURE_FILE` — mtime vs wall clock is
+inherent to the freshness check, the failure mode is safe (refuse + keep
+file), and NTP step-backs of that size mid-render are rare. `--json` may
+emit non-RFC NaN for NaN-sample WAVs — the Phase-3 consumer is Python
+(`json.loads` accepts it); scrubbing the whole result tree is deferred to
+Phase 3 where the MCP boundary is defined.
+
+**Reconciled with Phase 2 (already fixed there before these reports
+arrived):** "verify must key on silence_basis, not the silent bool" — Phase 2
+gate round 1 M3 added exactly that (`PRE_MEASURE_UNMEASURABLE` /
+UNVERIFIED); "check whether the reused-bounds path validates" — round 1 of
+this gate added `_check_bounds_dict`.
 | 2026-07-23 | 2 | c876f5d → 7497a68 | DONE, gate PASSED (3 rounds) | Two independent reviewers. Round 1: 1 BLOCKER + 4 MAJOR, all fixed (54d7106). Round 2 (scoped re-review): all closed, 2 new findings, fixed (7497a68). Round 3 (scoped verification): both fixes CLOSED, zero BLOCKER/MAJOR; 3 MINORs fixed in the pass-cleanup commit (NaN LUFS sanitized to "not measured", dead formatter branch removed, imprecise message reworded). Gate green. |
 
 ### Phase 2 gate round 1 (2026-07-23, reviewed c876f5d)

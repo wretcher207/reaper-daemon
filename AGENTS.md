@@ -159,8 +159,11 @@ a mix move to know what actually changed, instead of trusting `ok: true`.
   refuses with the blocker list when a capture cannot succeed.
 - The capture window is frozen client-side (explicit `--start`, else the
   active time selection, else the edit cursor; default 10 s, max 60) and sent
-  as explicit bounds, so measuring the same spot twice measures the same
-  audio.
+  as explicit bounds. Within one `verify` run the pre and post captures are
+  guaranteed identical; across separate CLI invocations the window is only
+  reproducible with an explicit `--start` — a bare `measure` re-resolves it
+  from the current cursor/selection each run. Reuse the `--json` bounds
+  (full precision), not the rounded human output.
 - Metrics: LUFS-I always (from REAPER's render stats). With Post Mortem
   installed you also get RMS, sample peak, crest factor, 1/3-octave spectrum,
   silence fraction, and stereo image. `metrics_source` says which mode ran.
