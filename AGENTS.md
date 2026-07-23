@@ -178,9 +178,12 @@ python3 reaperd.py verify Bass -- set_fx_param '{"target_track_name":"Bass","fx_
 ```
 
 It measures, mutates (same resolution/repair path as `cmd`), re-measures with
-byte-identical frozen bounds, and reports deltas. Exit codes: 0 VERIFIED,
-1 mutation not applied, 2 UNVERIFIED — the mutation stayed applied but could
-not be measured (NOT rolled back; one Ctrl/Cmd+Z reverts it). Report those
+byte-identical frozen bounds on the GUID-pinned track, and reports deltas.
+Exit codes: 0 VERIFIED; 1 mutation NOT applied (bridge rejected it, or the
+pre-capture refused); 2 UNVERIFIED — the project MAY have changed (applied,
+partially applied on a failed `batch`, or unknown after a transport timeout)
+but could not be measured. NOT rolled back; one Ctrl/Cmd+Z reverts it. Never
+retry blindly on exit 2 — the change may already be live. Report these
 outcomes to the user exactly; never claim an unverified change improved
 anything.
 

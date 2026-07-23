@@ -92,6 +92,71 @@ def test_send_type_reports_locked_stale_reply_as_error(root, monkeypatch):
     assert res["error"]["code"] == "STALE_REPLY_LOCKED"
 
 
+def test_transiently_locked_reply_read_is_retried_not_crashed(root, monkeypatch):
+    # Codex gate BLOCKER (2026-07-23): a transient Windows lock on the first
+    # read of a freshly published reply crashed the CLI with exit 1 — which
+    # the verify contract reads as "nothing was changed" — after a mutation
+    # had in fact applied. The read must be retried until the deadline.
+    import builtins
+    from bridge_fakes import fake_bridge
+    fake_bridge(root, {"ok": True, "data": {"pong": True}})
+    real_open = builtins.open
+    denied = {"count": 0}
+
+    def flaky_open(file, mode="r", *a, **k):
+        locked = (isinstance(file, str) and (os.sep + "outbox") in file
+                  and file.endswith(".json") and "r" in mode)
+        if locked and denied["count"] < 2:
+            denied["count"] += 1
+            raise PermissionError(13, "The process cannot access the file", file)
+        return real_open(file, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", flaky_open)
+    _cid, reply = reaperd.send_command({"type": "ping", "payload": {}},
+                                       wait=True, timeout_ms=5000,
+                                       bridge_root=root)
+    assert denied["count"] == 2
+    assert json.loads(reply)["ok"] is True
+
+
+# --- verify CLI parsing (options in any position) --------------------------
+
+def test_verify_options_after_track_are_recovered():
+    # Codex gate MAJOR (2026-07-23): argparse.REMAINDER swallowed every
+    # option after the track, so the documented `verify Bass --json -- ...`
+    # silently dropped --json. They must be recovered.
+    args = reaperd.build_parser().parse_args(
+        ["verify", "Bass", "--json", "--seconds", "5", "--",
+         "set_fx_param", "{}"])
+    cmd_type, payload_text, err = reaperd._split_verify_mutation(args)
+    assert err is None
+    assert (cmd_type, payload_text) == ("set_fx_param", "{}")
+    assert args.json is True
+    assert args.seconds == 5.0
+
+
+def test_verify_options_before_track_still_work():
+    args = reaperd.build_parser().parse_args(
+        ["verify", "--json", "Bass", "--", "set_fx_param", "{}"])
+    cmd_type, payload_text, err = reaperd._split_verify_mutation(args)
+    assert err is None
+    assert (cmd_type, payload_text) == ("set_fx_param", "{}")
+    assert args.json is True
+
+
+def test_verify_junk_before_separator_is_an_error():
+    args = reaperd.build_parser().parse_args(
+        ["verify", "Bass", "oops", "--", "set_fx_param", "{}"])
+    _t, _p, err = reaperd._split_verify_mutation(args)
+    assert err is not None and "oops" in err
+
+
+def test_verify_missing_mutation_is_an_error():
+    args = reaperd.build_parser().parse_args(["verify", "Bass", "--"])
+    _t, _p, err = reaperd._split_verify_mutation(args)
+    assert err is not None
+
+
 def test_fresh_reply_still_returned_and_consumed(root):
     fake_bridge(root, {"ok": True, "type": "ping", "data": {}})
     cid, reply = reaperd.send_command({"type": "ping", "payload": {}},

@@ -175,11 +175,16 @@ python3 reaperd.py verify Bass -- set_fx_param \
 ```
 
 Exit codes are the contract (agents branch on them): `0` VERIFIED (both
-captures clean, deltas reported), `1` mutation not applied (it failed, or the
-pre-capture was blocked/silent so nothing was changed), `2` UNVERIFIED (the
-mutation IS applied but the post-capture failed or was silent — it is **not**
-rolled back; one Ctrl/Cmd+Z reverts it. A user-visible change is never
-destroyed because measurement hiccupped).
+captures clean and comparable, deltas reported), `1` mutation NOT applied
+(the bridge rejected it, or the pre-capture was blocked/silent so nothing was
+attempted), `2` UNVERIFIED — the project **may have changed** but the change
+could not be measured. Exit 2 covers: post-capture failed or silent, a
+partially-applied `batch` (the bridge keeps sub-commands that ran before the
+failure), a mutation whose reply timed out or could not be read (it may have
+executed, or may execute later), and pre/post captures that stopped being
+comparable (track identity or capture scope changed mid-verify). Nothing is
+ever rolled back automatically — one Ctrl/Cmd+Z reverts it — and an agent
+must NOT blindly retry on exit 2: the change may already be live.
 
 Honest limits, by design:
 

@@ -167,11 +167,14 @@ def _capture_output_path(output_dir=None):
 # ---------------------------------------------------------------------------
 
 def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
-            keep_wav=False, _analyzer_loader=_load_analyzer, _bounds=None):
+            keep_wav=False, track_guid=None, _analyzer_loader=_load_analyzer,
+            _bounds=None):
     """One capture, one metrics dict.
 
     sender: callable(cmd_type, payload, timeout_ms=...) -> parsed reply dict.
     track: exact track name (case-insensitive) or "master".
+    track_guid: when given, targets by GUID instead of name (verify pins the
+    post-capture to the exact track the pre-capture resolved).
     Returns a dict with "ok": True and metrics, or "ok": False with an error.
     A silent capture is still ok: True but carries silent: True — callers must
     refuse verdicts on it, not pretend it failed.
@@ -192,9 +195,12 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
                           f"seconds must be between 1 and {MAX_SECONDS} for measure "
                           f"(got {seconds:g}); long renders are not verify material")
 
+    selector = ({"target_track_guid": track_guid} if track_guid
+                else {"target_track_name": track})
+
     # 1. Preflight: everything that would block or degrade the capture,
     # without rendering.
-    pre = sender("get_capture_preflight", {"target_track_name": track})
+    pre = sender("get_capture_preflight", dict(selector))
     if not pre.get("ok"):
         return _error("PREFLIGHT_FAILED",
                       f"get_capture_preflight failed: {pre.get('error')}")
@@ -238,7 +244,7 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
                       f"fresh capture path already exists: {output_file}")
     sent_at = time.time()
     res = sender("capture_track_audio", {
-        "target_track_name": track,
+        **selector,
         "start_seconds": bounds["start_seconds"],
         "duration_seconds": bounds["duration_seconds"],
         "output_file": output_file,
@@ -399,9 +405,16 @@ def compute_deltas(pre, post):
     side yields no delta, never a fabricated zero."""
     deltas = {}
 
+    def fin(v):
+        """The value if it is a finite real number, else None. Enforced here
+        as well as in measure's sanitizer: a delta must never be built from
+        NaN/inf even if a caller feeds compute_deltas unsanitized dicts."""
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        return v if math.isfinite(v) else None
+
     def num(m, key):
-        v = m.get(key)
-        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+        return fin(m.get(key))
 
     rounding = {"silence_fraction": 3}
     for key in ("lufs_i", "true_peak_db", "loudness_range_lu",
@@ -414,20 +427,31 @@ def compute_deltas(pre, post):
     stereo = {}
     pre_st, post_st = pre.get("stereo") or {}, post.get("stereo") or {}
     for key in ("correlation", "mid_rms_db", "side_rms_db", "balance_db"):
-        a, b = pre_st.get(key), post_st.get(key)
-        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        a, b = fin(pre_st.get(key)), fin(post_st.get(key))
+        if a is not None and b is not None:
             stereo[key + "_delta"] = round(b - a, 3 if key == "correlation" else 2)
+    # Stereo width: side-to-mid ratio in dB (side_rms_db - mid_rms_db) —
+    # arithmetic over Post Mortem's existing numbers, no new DSP. Positive
+    # width delta = the image got wider.
+    widths = []
+    for st in (pre_st, post_st):
+        side, mid = fin(st.get("side_rms_db")), fin(st.get("mid_rms_db"))
+        widths.append(side - mid if side is not None and mid is not None else None)
+    if widths[0] is not None and widths[1] is not None:
+        stereo["width_db_delta"] = round(widths[1] - widths[0], 2)
     if stereo:
         deltas["stereo"] = stereo
 
     pre_bands = {b.get("freq_hz"): b.get("level_db")
-                 for b in pre.get("spectrum_third_octave") or []}
+                 for b in pre.get("spectrum_third_octave") or []
+                 if isinstance(b, dict) and fin(b.get("freq_hz")) is not None}
     post_bands = {b.get("freq_hz"): b.get("level_db")
-                  for b in post.get("spectrum_third_octave") or []}
+                  for b in post.get("spectrum_third_octave") or []
+                  if isinstance(b, dict) and fin(b.get("freq_hz")) is not None}
     band_deltas = []
     for freq in sorted(f for f in pre_bands if f in post_bands):
-        a, b = pre_bands[freq], post_bands[freq]
-        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        a, b = fin(pre_bands[freq]), fin(post_bands[freq])
+        if a is not None and b is not None:
             band_deltas.append({"freq_hz": freq, "pre_db": a, "post_db": b,
                                 "delta_db": round(b - a, 1)})
     if band_deltas:
@@ -452,23 +476,47 @@ def _scope_warning(pre, post):
     return None
 
 
+# Mutation replies with these transport error codes leave the outcome UNKNOWN:
+# the command may have executed without a readable reply (locked file, late
+# reply) or may still execute later (a timed-out inbox withdraw can miss an
+# in-flight command). Exit 1's "nothing was changed" promise cannot be made.
+UNCERTAIN_MUTATION_CODES = {"TIMEOUT", "NO_REPLY", "BAD_REPLY",
+                            "STALE_REPLY_LOCKED"}
+
+
 def verify(sender, mutator, track, cmd_type, payload, seconds=None,
            start_seconds=None, output_dir=None, keep_wav=False,
-           _analyzer_loader=_load_analyzer):
+           progress=None, _analyzer_loader=_load_analyzer):
     """measure -> mutate -> measure with frozen bounds -> measured verdict.
 
     sender: read/capture transport (no name resolution).
     mutator: callable(cmd_type, payload) -> reply, routed like `cmd` (add_fx
     name resolution and set_fx_param alias repair apply).
+    progress: optional callable(str) invoked at step boundaries, so a killed
+    process still leaves a trace of whether the mutation had been applied.
     Returns {"status", "exit_code", "pre", "mutation", "post", "deltas",
     "scope_warning", ...}. The mutation is never rolled back by this function.
+
+    Exit-code contract (agents branch on it):
+    0 VERIFIED — clean, comparable pre/post captures, deltas reported.
+    1 mutation NOT applied — pre-measure refused, or the bridge rejected the
+      command. (A rejected single command that failed mid-edit can leave a
+      partial change inside one closed undo block; the note says so.)
+    2 UNVERIFIED — the project MAY have changed (mutation applied, partially
+      applied, or outcome unknown) but the change could not be measured.
+      Nothing is rolled back. Do not retry blindly on exit 2.
     """
+    def report(msg):
+        if progress is not None:
+            progress(msg)
+
     result = {"status": None, "exit_code": None, "track": track,
               "mutation": {"type": cmd_type, "payload": payload, "reply": None},
               "pre": None, "post": None, "deltas": None, "scope_warning": None}
 
     # 1. Pre-measure. Refuse BEFORE mutating on anything unmeasurable —
     # a mutation you can't measure is just `cmd`; say so.
+    report("pre-capture...")
     pre = measure(sender, track, seconds=seconds, start_seconds=start_seconds,
                   output_dir=output_dir, keep_wav=keep_wav,
                   _analyzer_loader=_analyzer_loader)
@@ -489,45 +537,130 @@ def verify(sender, mutator, track, cmd_type, payload, seconds=None,
                           "`cmd` — use that instead, or move the cursor/"
                           "time selection to where the track is playing.")
         return result
+    pre_guid = (pre.get("track") or {}).get("guid")
 
     # 2. Mutate, through the same path `cmd` uses.
+    report("mutating (post-capture pending — if this process dies now, the "
+           "mutation stays applied; one Ctrl/Cmd+Z reverts it)...")
     reply = mutator(cmd_type, payload)
     result["mutation"]["reply"] = reply
-    if not isinstance(reply, dict) or not reply.get("ok"):
+    mut_ok = isinstance(reply, dict) and reply.get("ok")
+    if not mut_ok:
+        code = None
+        if isinstance(reply, dict):
+            code = (reply.get("error") or {}).get("code")
+        if cmd_type == "batch":
+            # The bridge keeps sub-commands that ran BEFORE the failure
+            # applied, inside one closed undo block. "Nothing changed" would
+            # be a lie; the project may be partially mutated and unmeasured.
+            result["status"] = "UNVERIFIED"
+            result["exit_code"] = EXIT_UNVERIFIED
+            result["note"] = (
+                f"batch failed ({code}): sub-commands that ran before the "
+                "failure REMAIN APPLIED (the bridge keeps partial batch "
+                "mutations inside one closed undo block). The project may be "
+                "partially changed and was not re-measured. Do not retry "
+                "blindly. One Ctrl/Cmd+Z reverts the whole batch.")
+            return result
+        if code in UNCERTAIN_MUTATION_CODES:
+            result["status"] = "UNVERIFIED"
+            result["exit_code"] = EXIT_UNVERIFIED
+            result["note"] = (
+                f"mutation outcome UNKNOWN ({code}): the command may have "
+                "executed without a readable reply, or may still execute "
+                "later. Do not retry blindly — check the track state (or "
+                "undo history) first. If it did apply, it is NOT rolled back "
+                "(one Ctrl/Cmd+Z); if it applies later, it will land "
+                "unmeasured.")
+            return result
         result["status"] = "MUTATION_FAILED"
         result["exit_code"] = EXIT_MUTATION_FAILED
-        result["note"] = ("mutation failed; no post-capture attempted, "
-                          "nothing to roll back.")
+        result["note"] = (
+            f"the bridge rejected {cmd_type} ({code}); no post-capture "
+            "attempted. A command that fails during resolution changes "
+            "nothing; if the handler failed mid-edit, any partial change "
+            "sits in one closed undo block — one Ctrl/Cmd+Z reverts it.")
         return result
 
-    # 3. Post-measure with the SAME frozen bounds as pre.
-    post = measure(sender, track, output_dir=output_dir, keep_wav=keep_wav,
-                   _analyzer_loader=_analyzer_loader,
-                   _bounds={"start_seconds": pre["bounds"]["start_seconds"],
-                            "duration_seconds": pre["bounds"]["duration_seconds"],
-                            "bounds_source": "frozen_from_pre"})
-    result["post"] = post
-    if not post.get("ok"):
-        result["status"] = "UNVERIFIED"
-        result["exit_code"] = EXIT_UNVERIFIED
-        result["note"] = ("mutation applied but the post-capture failed "
-                          f"({(post.get('error') or {}).get('code')}). "
-                          + NOT_ROLLED_BACK)
-        return result
-    if post.get("silent"):
-        result["status"] = "UNVERIFIED"
-        result["exit_code"] = EXIT_UNVERIFIED
-        result["note"] = ("mutation applied but the post-capture is SILENT "
-                          f"({post.get('silence_reason')}); deltas would "
-                          "compare signal against dead air. " + NOT_ROLLED_BACK)
-        return result
+    # From here on the mutation IS applied: any internal failure must come
+    # back as an honest UNVERIFIED result, never as a crash whose exit code
+    # an agent could read as "nothing was changed".
+    try:
+        # 3. Post-measure: SAME frozen bounds, and the track pinned by the
+        # GUID the pre-capture resolved — a rename/reorder between captures
+        # must not silently switch which track the post measures.
+        report("mutation applied; post-capture...")
+        post = measure(sender, track, output_dir=output_dir, keep_wav=keep_wav,
+                       track_guid=pre_guid, _analyzer_loader=_analyzer_loader,
+                       _bounds={"start_seconds": pre["bounds"]["start_seconds"],
+                                "duration_seconds": pre["bounds"]["duration_seconds"],
+                                "bounds_source": "frozen_from_pre"})
+        result["post"] = post
+        if not post.get("ok"):
+            result["status"] = "UNVERIFIED"
+            result["exit_code"] = EXIT_UNVERIFIED
+            result["note"] = ("mutation applied but the post-capture failed "
+                              f"({(post.get('error') or {}).get('code')}). "
+                              + NOT_ROLLED_BACK)
+            return result
+        if post.get("silent"):
+            result["status"] = "UNVERIFIED"
+            result["exit_code"] = EXIT_UNVERIFIED
+            result["note"] = ("mutation applied but the post-capture is SILENT "
+                              f"({post.get('silence_reason')}); deltas would "
+                              "compare signal against dead air. " + NOT_ROLLED_BACK)
+            return result
 
-    # 4. Verdict with measured deltas.
-    result["deltas"] = compute_deltas(pre, post)
-    result["scope_warning"] = _scope_warning(pre, post)
-    result["status"] = "VERIFIED"
-    result["exit_code"] = EXIT_VERIFIED
-    return result
+        # Identity honesty: same track in both captures, or no verdict.
+        post_guid = (post.get("track") or {}).get("guid")
+        if pre_guid and post_guid and pre_guid != post_guid:
+            result["status"] = "UNVERIFIED"
+            result["exit_code"] = EXIT_UNVERIFIED
+            result["note"] = ("mutation applied but the pre and post captures "
+                              f"resolved DIFFERENT tracks (guid {pre_guid} vs "
+                              f"{post_guid}); the comparison is contaminated. "
+                              + NOT_ROLLED_BACK)
+            return result
+        # Scope honesty: unlike evidence gets no verdict. (Same-scope but
+        # non-isolated captures stay VERIFIED with an explicit warning — the
+        # comparison is like-for-like, it just describes the capture scope.)
+        if pre.get("capture_scope") != post.get("capture_scope"):
+            result["status"] = "UNVERIFIED"
+            result["exit_code"] = EXIT_UNVERIFIED
+            result["note"] = ("mutation applied but the capture scope changed "
+                              f"({pre.get('capture_scope')} -> "
+                              f"{post.get('capture_scope')}); pre and post are "
+                              "unlike evidence and their difference is not a "
+                              "measurement of this change. " + NOT_ROLLED_BACK)
+            return result
+
+        # 4. Verdict with measured deltas. ΔLUFS-I is always REPORTED (null
+        # with a reason when REAPER did not supply LUFS), and a verdict
+        # requires at least one broadband level delta to exist.
+        deltas = compute_deltas(pre, post)
+        if "lufs_i_delta" not in deltas:
+            deltas["lufs_i_delta"] = None
+            deltas["lufs_i_note"] = ("LUFS-I unavailable in pre and/or post "
+                                     "capture (REAPER did not report it)")
+        result["deltas"] = deltas
+        if deltas.get("lufs_i_delta") is None and deltas.get("rms_db_delta") is None:
+            result["status"] = "UNVERIFIED"
+            result["exit_code"] = EXIT_UNVERIFIED
+            result["note"] = ("mutation applied but no broadband level metric "
+                              "(LUFS-I or RMS) is comparable between the "
+                              "captures; there is no measured evidence to "
+                              "report. " + NOT_ROLLED_BACK)
+            return result
+        result["scope_warning"] = _scope_warning(pre, post)
+        result["status"] = "VERIFIED"
+        result["exit_code"] = EXIT_VERIFIED
+        return result
+    except Exception as e:  # noqa: BLE001 — honest exit 2 beats a traceback
+        result["status"] = "UNVERIFIED"
+        result["exit_code"] = EXIT_UNVERIFIED
+        result["note"] = ("mutation applied, then verify hit an internal "
+                          f"error ({type(e).__name__}: {e}). " + NOT_ROLLED_BACK)
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -583,6 +716,15 @@ def _level_summary(m):
     return " | ".join(parts)
 
 
+def _kept_wav_line(tag, m):
+    """Disclosure line for a WAV a failed capture kept on disk, or None."""
+    for key in ("file_path", "output_file"):
+        path = (m or {}).get(key)
+        if path and os.path.isfile(path):
+            return f"[verify] {tag} capture WAV kept for debugging: {path}"
+    return None
+
+
 def format_verify(res):
     """Human-readable report for a verify result dict."""
     lines = []
@@ -593,6 +735,9 @@ def format_verify(res):
         err = pre.get("error") or {}
         lines.append(f"[verify] pre-measure FAILED — {err.get('code')}: "
                      f"{err.get('details')}")
+        kept = _kept_wav_line("pre", pre)
+        if kept:
+            lines.append(kept)
     mut = res.get("mutation") or {}
     reply = mut.get("reply")
     if reply is not None:
@@ -607,6 +752,9 @@ def format_verify(res):
         err = post.get("error") or {}
         lines.append(f"[verify] post-measure FAILED — {err.get('code')}: "
                      f"{err.get('details')}")
+        kept = _kept_wav_line("post", post)
+        if kept:
+            lines.append(kept)
 
     deltas = res.get("deltas") or {}
     delta_bits = []

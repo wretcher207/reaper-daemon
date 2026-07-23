@@ -258,8 +258,17 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
     deadline = time.monotonic() + timeout_ms / 1000.0
     while time.monotonic() < deadline:
         if os.path.isfile(outbox):
-            with open(outbox, "r", encoding="utf-8") as f:
-                reply = f.read()
+            # A transient Windows lock (OneDrive sync, antivirus scan) can
+            # deny the first read of a reply the bridge just published. That
+            # reply may acknowledge an already-applied mutation — crashing
+            # here would exit 1 ("nothing was changed") while the change is
+            # live. Keep polling until the deadline instead.
+            try:
+                with open(outbox, "r", encoding="utf-8") as f:
+                    reply = f.read()
+            except OSError:
+                time.sleep(0.05)
+                continue
             # The reader owns its reply: the bridge no longer count-sweeps
             # outbox/ (it was deleting unread replies on big batches), so delete
             # it here once read to keep the queue from growing unbounded.
@@ -532,17 +541,61 @@ def cmd_measure(args):
     return 0 if res.get("ok") else 1
 
 
+# verify's options, shared between the subparser (options BEFORE the track)
+# and the re-parse of anything argparse.REMAINDER swallowed (options AFTER
+# the track but before `--`). Without the re-parse, `verify Bass --json --
+# ...` silently dropped --json into the mutation text.
+def _add_verify_options(parser):
+    parser.add_argument("--seconds", type=float, default=None,
+                        help="capture length 1-60 (default 10)")
+    parser.add_argument("--start", type=float, default=None,
+                        help="capture start in seconds (default: time "
+                             "selection start if active, else edit cursor)")
+    parser.add_argument("--json", action="store_true",
+                        help="machine-readable JSON instead of the human report")
+    parser.add_argument("--keep-wav", action="store_true",
+                        help="keep the capture WAVs (default: delete after analysis)")
+
+
+def _split_verify_mutation(args):
+    """Recover options that landed in args.mutation and extract the mutation
+    (type, payload-text). Returns (cmd_type, payload_text, None) or
+    (None, None, error_message)."""
+    rest = list(args.mutation)
+    if "--" in rest:
+        cut = rest.index("--")
+        head, rest = rest[:cut], rest[cut + 1:]
+    else:
+        head = []
+    if head:
+        opts = argparse.ArgumentParser(prog="verify", add_help=False)
+        _add_verify_options(opts)
+        try:
+            parsed, unknown = opts.parse_known_args(head)
+        except SystemExit:
+            return None, None, f"could not parse verify options: {head}"
+        if unknown:
+            return None, None, (f"unrecognized text before '--': {unknown} "
+                                "(options go before '--'; the mutation goes "
+                                "after it)")
+        for name, default in (("seconds", None), ("start", None),
+                              ("json", False), ("keep_wav", False)):
+            value = getattr(parsed, name)
+            if value != default:
+                setattr(args, name, value)
+    if len(rest) != 2:
+        return None, None, ("verify needs `-- <type> '<payload-json>'` "
+                            "(exactly a command type and one payload argument "
+                            "after `--`)")
+    return rest[0], rest[1], None
+
+
 def cmd_verify(args):
     import verifyloop
-    rest = list(args.mutation)
-    if rest and rest[0] == "--":
-        rest = rest[1:]
-    if len(rest) != 2:
-        print("error: verify needs `-- <type> '<payload-json>'` after the "
-              "options (exactly a command type and one payload argument)",
-              file=sys.stderr)
+    cmd_type, payload_text, parse_error = _split_verify_mutation(args)
+    if parse_error:
+        print(f"error: {parse_error}", file=sys.stderr)
         return 1
-    cmd_type, payload_text = rest
     try:
         payload = json.loads(payload_text)
     except Exception as e:
@@ -556,13 +609,21 @@ def cmd_verify(args):
 
     def mutator(mtype, mpayload):
         # Same path `cmd` uses: add_fx name resolution + set_fx_param repair.
-        return send_type(mtype, mpayload, bridge_root=br, timeout_ms=10000,
+        # 30 s: batches and heavier mutations outlive the 10 s default, and a
+        # premature TIMEOUT here means "outcome unknown" (exit 2), not a
+        # cheap retry.
+        return send_type(mtype, mpayload, bridge_root=br, timeout_ms=30000,
                          resolve=True, repair=True)
+
+    def progress(msg):
+        # Step markers go to stderr as they happen, so a process killed
+        # mid-verify still leaves evidence of whether the mutation applied.
+        print(f"[verify] {msg}", file=sys.stderr, flush=True)
 
     res = verifyloop.verify(
         _bridge_sender(br), mutator, args.track, cmd_type, payload,
         seconds=args.seconds, start_seconds=args.start,
-        keep_wav=args.keep_wav)
+        keep_wav=args.keep_wav, progress=progress)
     if args.json:
         print(json.dumps(res, separators=(",", ":"), allow_nan=False))
     else:
@@ -1166,22 +1227,17 @@ def build_parser():
         help="measure -> mutate -> measure: run a command with measured proof",
         description="Capture the track, run the mutation, capture again with "
                     "the SAME bounds, and report measured deltas. Exit codes: "
-                    "0 VERIFIED, 1 mutation not applied (failed or refused "
-                    "before mutating), 2 UNVERIFIED (mutation applied but the "
-                    "post-capture failed/was silent; NOT rolled back — one "
-                    "Ctrl/Cmd+Z reverts it).")
+                    "0 VERIFIED (clean comparable captures, deltas reported), "
+                    "1 mutation NOT applied (rejected, or refused before "
+                    "mutating), 2 UNVERIFIED (the project may have changed — "
+                    "applied, partial, or unknown — but it could not be "
+                    "measured; NOT rolled back, one Ctrl/Cmd+Z reverts it; "
+                    "do not retry blindly).")
     s.add_argument("track", help="track name or 'master'")
-    s.add_argument("--seconds", type=float, default=None,
-                   help="capture length 1-60 (default 10)")
-    s.add_argument("--start", type=float, default=None,
-                   help="capture start in seconds (default: time selection "
-                        "start if active, else edit cursor)")
-    s.add_argument("--json", action="store_true",
-                   help="machine-readable JSON instead of the human report")
-    s.add_argument("--keep-wav", action="store_true",
-                   help="keep the capture WAVs (default: delete after analysis)")
+    _add_verify_options(s)
     s.add_argument("mutation", nargs=argparse.REMAINDER,
-                   help="-- <type> '<payload-json>' (mirrors `cmd`)")
+                   help="-- <type> '<payload-json>' (mirrors `cmd`; options "
+                        "work before or after the track name)")
     s.set_defaults(func=cmd_verify)
 
     s = sub.add_parser("fxload", help="resolve an installed plugin name and add it")

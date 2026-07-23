@@ -83,7 +83,7 @@ def _context(cursor=3.5, ts=None):
 def _capture_responder(lufs=-14.1, raw="LUFSI:-14.10;TRUEPEAK:-3.20;LRA:4.50",
                        scope="isolated_track", verified=True,
                        backdate_by=None, report_other_file=False,
-                       bounds_override=None):
+                       bounds_override=None, guid="{B}"):
     """A scripted reply that mimics the real bridge: writes the WAV the
     payload asked for, echoes the rendered bounds, reports the path back.
     backdate_by backdates the reported WAV's mtime by that many seconds;
@@ -103,7 +103,7 @@ def _capture_responder(lufs=-14.1, raw="LUFSI:-14.10;TRUEPEAK:-3.20;LRA:4.50",
         if bounds_override:
             echoed.update(bounds_override)
         return {"ok": True, "type": "capture_track_audio", "data": {
-            "track": {"index": 2, "name": "Bass", "guid": "{B}"},
+            "track": {"index": 2, "name": "Bass", "guid": guid},
             "file_path": out,
             "file_size_bytes": os.path.getsize(out),
             "render_loudness_lufs": lufs,
@@ -459,10 +459,11 @@ def _mutator(root):
 
 
 def _run_verify(root, tmp_path, replies, record=None, analyzer=_no_analyzer,
-                **kwargs):
+                cmd_type="set_fx_param", payload=None, **kwargs):
     fake_bridge_script(root, replies, record=record)
     return verifyloop.verify(
-        _sender(root), _mutator(root), "Bass", "set_fx_param", dict(SET_PARAM),
+        _sender(root), _mutator(root), "Bass", cmd_type,
+        dict(SET_PARAM) if payload is None else payload,
         output_dir=str(tmp_path / "wavs"), _analyzer_loader=analyzer, **kwargs)
 
 
@@ -513,8 +514,45 @@ def test_verify_mutation_failed_stops_before_post_capture(root, tmp_path):
     assert res["status"] == "MUTATION_FAILED"
     assert res["exit_code"] == 1
     assert res["post"] is None
-    assert "nothing to roll back" in res["note"]
+    # honest about the bridge's real semantics: a handler that failed
+    # mid-edit leaves the partial change in one closed undo block
+    assert "rejected" in res["note"]
+    assert "Ctrl/Cmd+Z" in res["note"]
     assert [c["type"] for c in record].count("capture_track_audio") == 1
+
+
+def test_verify_failed_batch_is_unverified_not_mutation_failed(root, tmp_path):
+    # The bridge KEEPS sub-commands that ran before a batch failure (one
+    # closed undo block). Exit 1 would promise "nothing changed" — a lie an
+    # agent would compound by retrying. Must be exit 2 (Codex gate BLOCKER,
+    # 2026-07-23).
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(),
+        {"ok": False, "error": {"code": "BATCH_FAILED",
+                                "details": "sub-command 2 failed"}},
+    ], cmd_type="batch",
+        payload={"commands": [{"type": "set_fx_param", "payload": {}},
+                              {"type": "set_fx_param", "payload": {}}]})
+    assert res["status"] == "UNVERIFIED"
+    assert res["exit_code"] == 2
+    assert "REMAIN APPLIED" in res["note"]
+    assert "Do not retry blindly" in res["note"]
+
+
+@pytest.mark.parametrize("code", ["TIMEOUT", "NO_REPLY", "BAD_REPLY",
+                                  "STALE_REPLY_LOCKED"])
+def test_verify_uncertain_mutation_outcome_is_unverified(root, tmp_path, code):
+    # A timed-out or unreadable mutation may have executed (or may execute
+    # later) — exit 1's "nothing was changed" promise cannot be made, so
+    # these are exit 2 with a do-not-retry note (Codex gate BLOCKER).
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(),
+        {"ok": False, "error": {"code": code, "details": "transport hiccup"}},
+    ])
+    assert res["status"] == "UNVERIFIED"
+    assert res["exit_code"] == 2
+    assert "UNKNOWN" in res["note"]
+    assert "Do not retry blindly" in res["note"]
 
 
 def test_verify_unverified_when_post_capture_fails(root, tmp_path):
@@ -563,14 +601,51 @@ def test_verify_refused_when_pre_capture_is_silent(root, tmp_path):
     assert all(c["type"] != "set_fx_param" for c in record)
 
 
-def test_verify_scope_warning_on_scope_change(root, tmp_path):
+def test_verify_scope_change_is_unverified_not_verified(root, tmp_path):
+    # Pre isolated, post full-mix (e.g. the mutation inserted media items and
+    # changed the render fallback): unlike evidence — subtracting their LUFS
+    # is not a measurement of the change. Exit 0 would tell a branching agent
+    # both captures were clean (Codex gate MAJOR, 2026-07-23).
     res = _run_verify(root, tmp_path, [
         PREFLIGHT_OK, _context(), _capture_responder(),
         MUT_OK, PREFLIGHT_OK,
         _capture_responder(scope="full_mix", verified=False),
     ])
+    assert res["status"] == "UNVERIFIED"
+    assert res["exit_code"] == 2
+    assert "scope changed" in res["note"]
+
+
+def test_verify_post_targets_pre_guid_and_guid_change_is_unverified(root, tmp_path):
+    # Post-capture must pin the exact track the pre-capture resolved (GUID),
+    # and a GUID mismatch (rename/reorder swapped names mid-verify) gets no
+    # verdict (Codex gate MAJOR, 2026-07-23).
+    record = []
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(guid="{A}"),
+        MUT_OK, PREFLIGHT_OK, _capture_responder(guid="{Z}"),
+    ], record=record)
+    post_preflight, post_capture = record[-2], record[-1]
+    assert post_preflight["payload"] == {"target_track_guid": "{A}"}
+    assert post_capture["payload"]["target_track_guid"] == "{A}"
+    assert "target_track_name" not in post_capture["payload"]
+    assert res["status"] == "UNVERIFIED"
+    assert res["exit_code"] == 2
+    assert "DIFFERENT tracks" in res["note"]
+
+
+def test_verify_lufs_delta_always_reported_null_when_unavailable(root, tmp_path):
+    # REAPER supplied no LUFS but Post Mortem RMS keeps both captures
+    # measurable: lufs_i_delta must still be REPORTED (null + reason), and
+    # the verdict rests on the RMS delta (Codex gate MAJOR, 2026-07-23).
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(lufs=None, raw=None),
+        MUT_OK, PREFLIGHT_OK, _capture_responder(lufs=None, raw=None),
+    ], analyzer=lambda: lambda p: _fake_stats())
     assert res["status"] == "VERIFIED"
-    assert "DIFFERENT scopes" in res["scope_warning"]
+    assert res["deltas"]["lufs_i_delta"] is None
+    assert "unavailable" in res["deltas"]["lufs_i_note"]
+    assert res["deltas"]["rms_db_delta"] == 0.0
 
 
 def test_verify_scope_warning_on_unverified_isolation(root, tmp_path):
@@ -608,11 +683,32 @@ def test_compute_deltas_with_canned_metrics():
     assert bands == {100: -0.5, 315: -3.1}
 
 
+def test_compute_deltas_stereo_width():
+    pre = {"stereo": {"mid_rms_db": -20.0, "side_rms_db": -30.0}}   # width -10
+    post = {"stereo": {"mid_rms_db": -20.0, "side_rms_db": -27.5}}  # width -7.5
+    d = verifyloop.compute_deltas(pre, post)
+    assert d["stereo"]["width_db_delta"] == 2.5  # positive = wider
+
+
 def test_compute_deltas_never_fabricates_from_missing_values():
     d = verifyloop.compute_deltas({"lufs_i": None, "rms_db": -18.0},
                                   {"lufs_i": -14.0, "rms_db": None})
     assert "lufs_i_delta" not in d
     assert "rms_db_delta" not in d
+
+
+def test_compute_deltas_rejects_nonfinite_and_bad_band_keys():
+    # inf/NaN inputs must not become deltas, and a malformed band entry with
+    # a None freq must not crash the sort (Codex gate MINOR, 2026-07-23).
+    pre = {"lufs_i": float("-inf"), "rms_db": float("nan"),
+           "spectrum_third_octave": [{"freq_hz": None, "level_db": -20.0},
+                                     {"freq_hz": 100, "level_db": -20.0}]}
+    post = {"lufs_i": -14.0, "rms_db": -18.0,
+            "spectrum_third_octave": [{"freq_hz": 100, "level_db": -21.0}]}
+    d = verifyloop.compute_deltas(pre, post)
+    assert "lufs_i_delta" not in d
+    assert "rms_db_delta" not in d
+    assert [b["freq_hz"] for b in d["spectrum_band_deltas"]] == [100]
 
 
 def test_format_verify_verified_and_unverified():
