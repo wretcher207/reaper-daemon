@@ -126,11 +126,12 @@ def _check_bounds_dict(bounds):
                     f"{type(bounds).__name__}")
     start = bounds.get("start_seconds")
     duration = bounds.get("duration_seconds")
-    if not (isinstance(start, (int, float)) and math.isfinite(start)
-            and start >= 0):
+    if (isinstance(start, bool) or not isinstance(start, (int, float))
+            or not math.isfinite(start) or start < 0):
         return _err("BAD_BOUNDS", f"bounds.start_seconds invalid: {start!r}")
-    if not (isinstance(duration, (int, float)) and math.isfinite(duration)
-            and 0 < duration <= MAX_SECONDS):
+    if (isinstance(duration, bool) or not isinstance(duration, (int, float))
+            or not math.isfinite(duration)
+            or not 0 < duration <= MAX_SECONDS):
         return _err("BAD_BOUNDS",
                     f"bounds.duration_seconds invalid: {duration!r}")
     return None
@@ -228,7 +229,8 @@ def measure(track, seconds=None, start=None, bounds=None, bridge_root=None,
     if not res.get("ok"):
         err = res.get("error") or {}
         return _err(err.get("code", "CAPTURE_FAILED"),
-                    f"capture failed: {err.get('details')}", bounds=bounds)
+                    f"capture failed: {err.get('details')}", bounds=bounds,
+                    warnings=warnings)
     cap = res.get("data", {})
     file_path = cap.get("file_path") or output_file
 
@@ -240,11 +242,12 @@ def measure(track, seconds=None, start=None, bounds=None, bridge_root=None,
     except OSError:
         return _err("CAPTURE_FILE_MISSING",
                     f"bridge reported success but no file at {file_path}",
-                    bounds=bounds)
+                    bounds=bounds, warnings=warnings)
     if mtime < sent_at - MTIME_SLACK_SECONDS:
         return _err("STALE_CAPTURE_FILE",
                     f"{file_path} was last modified before this capture was "
-                    f"sent; refusing to measure a stale file", bounds=bounds)
+                    f"sent; refusing to measure a stale file", bounds=bounds,
+                    warnings=warnings)
 
     source = metrics_source_available()
     lufs = cap.get("render_loudness_lufs")
@@ -469,10 +472,10 @@ def verify(track, cmd_type, payload, seconds=None, start=None,
                 "exit_code": EXIT_MUTATION_FAILED, "mutation_applied": False,
                 "pre": pre,
                 "message": "pre-capture produced no assessable level metrics "
-                           "(no LUFS-I in RENDER_STATS and Post Mortem is not "
-                           "installed), so no delta could prove anything; "
-                           "nothing was mutated. Install Post Mortem, or use "
-                           "`cmd` for an unverified change."}
+                           "(no LUFS-I from RENDER_STATS and no usable Post "
+                           "Mortem analysis), so no delta could prove "
+                           "anything; nothing was mutated. Fix the capture, "
+                           "or use `cmd` for an unverified change."}
 
     mut = reaperd.send_type(cmd_type, dict(payload), bridge_root=bridge_root,
                             timeout_ms=MUTATION_TIMEOUT_MS)

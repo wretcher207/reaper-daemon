@@ -316,7 +316,7 @@ Protocol per phase:
 |---|---|---|---|---|
 | 2026-07-23 | spec | — | Spec written, baseline verified (124 tests pass, main@8358a9a) | Authored by prior session; no code yet |
 | 2026-07-23 | 0 | 2af3a92 | DONE | See "Phase 0 findings" below. Environment: remote Linux session, not David's Windows machine. Branch is `claude/status-last-pushed-h4l7un` (session-mandated), not `feat/verify-loop` — same role, one PR at the end (#25). Codex CLI unavailable here; per David, the per-phase gate is an independent adversarial review by fresh agent sessions hunting the template's seven failure categories (David can re-run real Codex on his machine before merge). |
-| 2026-07-23 | 1 | 0b3fba3 → fix commit | Gate round 1: 2 MAJOR → fixed | Three independent reviewers (protocol/bounds: clean, 6 MINOR; honesty: 1 MAJOR; Windows/lifecycle: 1 MAJOR). See "Phase 1 gate round 1" below. Scoped re-review of the fixes pending. |
+| 2026-07-23 | 1 | 0b3fba3 → b90d370 | Gate PASSED (2 rounds) | Three independent reviewers (protocol/bounds: clean, 6 MINOR; honesty: 1 MAJOR; Windows/lifecycle: 1 MAJOR). Round 1 findings all fixed (b90d370, see below). Round 2 (scoped re-review of the fixes, incl. mutation-testing the new tests): all CLOSED, zero BLOCKER/MAJOR; its 5 MINORs fixed in the pass-cleanup commit (narrow time-stub in the interrupt test so lingering fake threads can't be killed, direct NaN-rms guard test, honest PRE_MEASURE_UNMEASURABLE wording, bool rejected in bounds dicts, preflight warnings carried on capture-error returns). Gate green. |
 
 ### Phase 1 gate round 1 (2026-07-23, reviewed 0b3fba3)
 

@@ -427,19 +427,31 @@ def test_preflight_warnings_bubble_into_result(root, tmp_path, monkeypatch):
 def test_interrupted_wait_withdraws_inbox_command(root, monkeypatch):
     # Ctrl+C during the (up to 3 min) capture wait must not leave a command
     # in inbox/ — the bridge has no age gate there and would execute it later
-    # against whatever project is open then.
+    # against whatever project is open then. Patch reaperd's `time` reference
+    # with a stub, NOT the global time module: lingering fake-bridge daemon
+    # threads from earlier tests also call time.sleep, and a global patch
+    # kills them with misattributed thread exceptions.
+    import types
+
+    import reaperd
+
     def boom(_seconds):
         raise KeyboardInterrupt
-    monkeypatch.setattr(time, "sleep", boom)
+    stub = types.SimpleNamespace(sleep=boom, monotonic=time.monotonic,
+                                 time=time.time)
+    monkeypatch.setattr(reaperd, "time", stub)
     with pytest.raises(KeyboardInterrupt):
-        reaperd_send_interrupted(root)
+        reaperd.send_command({"type": "ping", "payload": {}}, wait=True,
+                             timeout_ms=5000, bridge_root=root)
     assert os.listdir(os.path.join(root, "inbox")) == []
 
 
-def reaperd_send_interrupted(root):
-    import reaperd
-    reaperd.send_command({"type": "ping", "payload": {}}, wait=True,
-                         timeout_ms=5000, bridge_root=root)
+def test_judge_silence_nan_rms_is_unassessable():
+    # NaN samples make every rms comparison False; that must read as "could
+    # not assess", never as a clean non-silent capture.
+    assert verifyloop._judge_silence(
+        {"rms_db": float("nan"), "silence_fraction": 0.0},
+        "postmortem") == (False, None)
 
 
 # --- human formatter ---------------------------------------------------------
