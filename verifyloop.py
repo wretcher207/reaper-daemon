@@ -215,7 +215,10 @@ def measure(track, seconds=None, start=None, bounds=None, bridge_root=None,
 
     warnings = []
     source = metrics_source_available()
-    metrics = {"lufs_i": cap.get("render_loudness_lufs")}
+    lufs = cap.get("render_loudness_lufs")
+    if isinstance(lufs, float) and lufs != lufs:  # NaN survives json.loads;
+        lufs = None                               # treat as "not measured"
+    metrics = {"lufs_i": lufs}
     if source == "postmortem":
         try:
             stats = analyze_wav(file_path)
@@ -493,9 +496,9 @@ def verify(track, cmd_type, payload, seconds=None, start=None,
                 "exit_code": EXIT_UNVERIFIED, "mutation_applied": True,
                 "pre": pre, "post": post, "warnings": warnings,
                 "message": f"mutation {cmd_type} IS applied and both captures "
-                           f"completed, but no metric was measurable on BOTH "
-                           f"sides, so there is no comparable evidence. "
-                           f"{UNVERIFIED_NOTE}"}
+                           f"completed, but no metric was comparable across "
+                           f"both sides, so there is no evidence of its "
+                           f"effect. {UNVERIFIED_NOTE}"}
     return {"ok": True, "verdict": "VERIFIED", "exit_code": EXIT_VERIFIED,
             "mutation_applied": True, "mutation": {"type": cmd_type,
                                                    "result": mut.get("data")},
@@ -583,9 +586,6 @@ def format_verify(result):
                              f"(delta {b['delta']:+g})")
         else:
             lines.append("[verify] spectrum: no 1/3-octave band moved >= 1 dB")
-    if result.get("ok") and not deltas:
-        lines.append("[verify] no comparable metrics on both sides — deltas "
-                     "unavailable (see warnings)")
     for w in result.get("warnings", []):
         lines.append(f"[verify] WARNING: {w}")
     return "\n".join(lines)

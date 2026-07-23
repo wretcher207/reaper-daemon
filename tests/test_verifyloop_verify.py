@@ -441,7 +441,7 @@ def test_verified_never_carries_empty_deltas(root, tmp_path):
     assert result["verdict"] == "UNVERIFIED"
     assert result["exit_code"] == 2
     assert result["mutation_applied"] is True
-    assert "no metric was measurable on BOTH sides" in result["message"]
+    assert "no metric was comparable across both sides" in result["message"]
 
 
 def test_dashdash_stays_native_for_other_subcommands(root):

@@ -317,7 +317,7 @@ Protocol per phase:
 | 2026-07-23 | spec | — | Spec written, baseline verified (124 tests pass, main@8358a9a) | Authored by prior session; no code yet |
 | 2026-07-23 | 0 | 2af3a92 | DONE | See "Phase 0 findings" below. Environment: remote Linux session, not David's Windows machine. Branch is `claude/status-last-pushed-h4l7un` (session-mandated), not `feat/verify-loop` — same role, one PR at the end (#25). Codex CLI unavailable here; per David, the per-phase gate is an independent adversarial review by fresh agent sessions hunting the template's seven failure categories (David can re-run real Codex on his machine before merge). |
 | 2026-07-23 | 1 | 0b3fba3 | DONE, gate pending | `measure` + `verifyloop.py` + scripted fake + 19 tests. Three independent reviewers dispatched (protocol/bounds, Windows/lifecycle, honesty lenses); findings pending. |
-| 2026-07-23 | 2 | c876f5d + fixes | DONE, gate round 1 FAILED → fixed | Two independent reviewers. Round 1: 1 BLOCKER + 4 MAJOR (2 shared), all confirmed real and fixed same day (see "Phase 2 gate round 1" below). Re-review scoped to the fixes pending. |
+| 2026-07-23 | 2 | c876f5d → 7497a68 | DONE, gate PASSED (3 rounds) | Two independent reviewers. Round 1: 1 BLOCKER + 4 MAJOR, all fixed (54d7106). Round 2 (scoped re-review): all closed, 2 new findings, fixed (7497a68). Round 3 (scoped verification): both fixes CLOSED, zero BLOCKER/MAJOR; 3 MINORs fixed in the pass-cleanup commit (NaN LUFS sanitized to "not measured", dead formatter branch removed, imprecise message reworded). Gate green. |
 
 ### Phase 2 gate round 1 (2026-07-23, reviewed c876f5d)
 
