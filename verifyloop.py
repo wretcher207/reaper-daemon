@@ -481,7 +481,7 @@ def _scope_warning(pre, post):
 # reply) or may still execute later (a timed-out inbox withdraw can miss an
 # in-flight command). Exit 1's "nothing was changed" promise cannot be made.
 UNCERTAIN_MUTATION_CODES = {"TIMEOUT", "NO_REPLY", "BAD_REPLY",
-                            "STALE_REPLY_LOCKED"}
+                            "STALE_REPLY_LOCKED", "MUTATOR_EXCEPTION"}
 
 
 def verify(sender, mutator, track, cmd_type, payload, seconds=None,
@@ -538,17 +538,65 @@ def verify(sender, mutator, track, cmd_type, payload, seconds=None,
                           "time selection to where the track is playing.")
         return result
     pre_guid = (pre.get("track") or {}).get("guid")
+    if not pre_guid:
+        # Fail closed BEFORE mutating: without the pre-capture's GUID the
+        # post-capture cannot be pinned to the same track, so a rename during
+        # the mutation could silently switch what "post" measures.
+        result["status"] = "REFUSED"
+        result["exit_code"] = EXIT_MUTATION_FAILED
+        result["note"] = ("pre-capture reply carries no track GUID (older "
+                          "bridge?); the post-capture could not be pinned to "
+                          "the same track, so no trustworthy comparison is "
+                          "possible. Nothing was mutated. Update the bridge, "
+                          "or use `cmd` for an unmeasured change.")
+        return result
 
-    # 2. Mutate, through the same path `cmd` uses.
+    # 2. Mutate, through the same path `cmd` uses. A mutator exception is
+    # outcome-unknown, not "nothing happened": the command may already be in
+    # the inbox.
     report("mutating (post-capture pending — if this process dies now, the "
            "mutation stays applied; one Ctrl/Cmd+Z reverts it)...")
-    reply = mutator(cmd_type, payload)
+    try:
+        reply = mutator(cmd_type, payload)
+    except Exception as e:  # noqa: BLE001
+        reply = {"ok": False, "error": {"code": "MUTATOR_EXCEPTION",
+                                        "details": f"{type(e).__name__}: {e}"}}
     result["mutation"]["reply"] = reply
-    mut_ok = isinstance(reply, dict) and reply.get("ok")
-    if not mut_ok:
-        code = None
-        if isinstance(reply, dict):
-            code = (reply.get("error") or {}).get("code")
+
+    def _uncertain(code_text):
+        result["status"] = "UNVERIFIED"
+        result["exit_code"] = EXIT_UNVERIFIED
+        result["note"] = (
+            f"mutation outcome UNKNOWN ({code_text}): the command may have "
+            "executed without a readable reply, or may still execute "
+            "later. Do not retry blindly — check the track state (or "
+            "undo history) first. If it did apply, it is NOT rolled back "
+            "(one Ctrl/Cmd+Z); if it applies later, it will land "
+            "unmeasured.")
+        return result
+
+    if not isinstance(reply, dict):
+        # A non-object reply (raw null, a bare string...) is a wrong-shaped
+        # transport result AFTER the command was queued: outcome unknown.
+        return _uncertain(f"malformed reply: {reply!r}")
+    batch_partial_note = None
+    if reply.get("ok") is True and cmd_type == "batch":
+        # stop_on_error:false lets the bridge return top-level ok:true while
+        # individual sub-commands failed. That is NOT the requested change.
+        results_list = (reply.get("data") or {}).get("results")
+        failed = [r for r in results_list or []
+                  if isinstance(r, dict) and not r.get("ok")]
+        if failed:
+            what = ", ".join(f"#{r.get('index')} {r.get('type')}"
+                             for r in failed[:6])
+            batch_partial_note = (
+                f"batch applied PARTIALLY: {len(failed)} sub-command(s) "
+                f"failed ({what}) while the rest ran. The measured deltas "
+                "describe this partially-applied state, NOT the requested "
+                "change. One Ctrl/Cmd+Z reverts the whole batch.")
+    if reply.get("ok") is not True:
+        err = reply.get("error")
+        code = err.get("code") if isinstance(err, dict) else None
         if cmd_type == "batch":
             # The bridge keeps sub-commands that ran BEFORE the failure
             # applied, inside one closed undo block. "Nothing changed" would
@@ -562,17 +610,10 @@ def verify(sender, mutator, track, cmd_type, payload, seconds=None,
                 "partially changed and was not re-measured. Do not retry "
                 "blindly. One Ctrl/Cmd+Z reverts the whole batch.")
             return result
-        if code in UNCERTAIN_MUTATION_CODES:
-            result["status"] = "UNVERIFIED"
-            result["exit_code"] = EXIT_UNVERIFIED
-            result["note"] = (
-                f"mutation outcome UNKNOWN ({code}): the command may have "
-                "executed without a readable reply, or may still execute "
-                "later. Do not retry blindly — check the track state (or "
-                "undo history) first. If it did apply, it is NOT rolled back "
-                "(one Ctrl/Cmd+Z); if it applies later, it will land "
-                "unmeasured.")
-            return result
+        if code in UNCERTAIN_MUTATION_CODES or code is None:
+            # A missing/wrong-shaped error block is version skew, not a
+            # provable clean rejection — outcome unknown.
+            return _uncertain(code or f"wrong-shaped error field: {err!r}")
         result["status"] = "MUTATION_FAILED"
         result["exit_code"] = EXIT_MUTATION_FAILED
         result["note"] = (
@@ -611,15 +652,20 @@ def verify(sender, mutator, track, cmd_type, payload, seconds=None,
                               "compare signal against dead air. " + NOT_ROLLED_BACK)
             return result
 
-        # Identity honesty: same track in both captures, or no verdict.
+        # Identity honesty: same track in both captures, or no verdict. A
+        # missing post GUID cannot "confirm by omission" — fail closed.
         post_guid = (post.get("track") or {}).get("guid")
-        if pre_guid and post_guid and pre_guid != post_guid:
+        if not post_guid or pre_guid != post_guid:
             result["status"] = "UNVERIFIED"
             result["exit_code"] = EXIT_UNVERIFIED
-            result["note"] = ("mutation applied but the pre and post captures "
-                              f"resolved DIFFERENT tracks (guid {pre_guid} vs "
-                              f"{post_guid}); the comparison is contaminated. "
-                              + NOT_ROLLED_BACK)
+            result["note"] = (("mutation applied but the post-capture did not "
+                               "confirm the track identity (no GUID in its "
+                               "reply); the comparison cannot be trusted. ")
+                              if not post_guid else
+                              ("mutation applied but the pre and post captures "
+                               f"resolved DIFFERENT tracks (guid {pre_guid} vs "
+                               f"{post_guid}); the comparison is contaminated. ")
+                              ) + NOT_ROLLED_BACK
             return result
         # Scope honesty: unlike evidence gets no verdict. (Same-scope but
         # non-isolated captures stay VERIFIED with an explicit warning — the
@@ -652,6 +698,13 @@ def verify(sender, mutator, track, cmd_type, payload, seconds=None,
                               "report. " + NOT_ROLLED_BACK)
             return result
         result["scope_warning"] = _scope_warning(pre, post)
+        if batch_partial_note:
+            # Measured deltas exist, but they describe a PARTIALLY applied
+            # batch — exit 0 would tell an agent the whole batch succeeded.
+            result["status"] = "UNVERIFIED"
+            result["exit_code"] = EXIT_UNVERIFIED
+            result["note"] = batch_partial_note
+            return result
         result["status"] = "VERIFIED"
         result["exit_code"] = EXIT_VERIFIED
         return result
@@ -1102,8 +1155,14 @@ def format_verify(res):
             delta_bits.append(f"{label} {deltas[key]:+.2f} dB"
                               if key != "lufs_i_delta"
                               else f"{label} {deltas[key]:+.2f}")
+        elif key == "lufs_i_delta" and key in deltas:
+            # ΔLUFS-I is always reported — n/a with its reason, never
+            # silently dropped from the human report.
+            delta_bits.append("dLUFS-I n/a")
     if delta_bits:
         lines.append("[verify] " + "   ".join(delta_bits))
+    if deltas.get("lufs_i_delta") is None and deltas.get("lufs_i_note"):
+        lines.append(f"[verify] NOTE: {deltas['lufs_i_note']}")
     stereo = deltas.get("stereo") or {}
     if stereo:
         lines.append("[verify] stereo deltas: " + ", ".join(

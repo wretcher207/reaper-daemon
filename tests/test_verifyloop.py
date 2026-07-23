@@ -648,6 +648,97 @@ def test_verify_lufs_delta_always_reported_null_when_unavailable(root, tmp_path)
     assert res["deltas"]["rms_db_delta"] == 0.0
 
 
+def test_verify_partial_batch_with_stop_on_error_false_is_unverified(root, tmp_path):
+    # stop_on_error:false lets the bridge return top-level ok:true while
+    # sub-commands failed — exit 0 would claim the whole batch succeeded
+    # (Codex gate round-2 BLOCKER, 2026-07-23). Deltas are still measured
+    # but the verdict must be UNVERIFIED.
+    batch_reply = {"ok": True, "type": "batch", "data": {"results": [
+        {"index": 1, "type": "set_fx_param", "ok": True, "data": {}},
+        {"index": 2, "type": "set_fx_param", "ok": False,
+         "error": "NO_FX_PARAM: nope"},
+    ]}}
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(), batch_reply,
+        PREFLIGHT_OK, _capture_responder(lufs=-14.9, raw="LUFSI:-14.90"),
+    ], cmd_type="batch",
+        payload={"stop_on_error": False,
+                 "commands": [{"type": "set_fx_param", "payload": {}},
+                              {"type": "set_fx_param", "payload": {}}]})
+    assert res["status"] == "UNVERIFIED"
+    assert res["exit_code"] == 2
+    assert "PARTIALLY" in res["note"]
+    assert res["deltas"]["lufs_i_delta"] == -0.8  # still measured, still honest
+
+
+def test_verify_fully_ok_batch_still_verifies(root, tmp_path):
+    batch_reply = {"ok": True, "type": "batch", "data": {"results": [
+        {"index": 1, "type": "set_fx_param", "ok": True, "data": {}},
+    ]}}
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(), batch_reply,
+        PREFLIGHT_OK, _capture_responder(lufs=-14.9, raw="LUFSI:-14.90"),
+    ], cmd_type="batch",
+        payload={"commands": [{"type": "set_fx_param", "payload": {}}]})
+    assert res["status"] == "VERIFIED"
+    assert res["exit_code"] == 0
+
+
+@pytest.mark.parametrize("reply", [
+    None,                                    # raw null through a bad transport
+    {"ok": False, "error": "oops"},          # error is a string, not an object
+    {"ok": False},                           # no error field at all
+])
+def test_verify_malformed_mutation_reply_is_outcome_unknown(root, tmp_path, reply):
+    # Wrong-shaped replies after the command was queued are version skew or
+    # corruption — the mutation may have executed. Exit 1 would promise
+    # "nothing changed"; must be exit 2, and must not crash (Codex gate
+    # round-2 BLOCKER, 2026-07-23).
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(), _capture_responder()])
+    res = verifyloop.verify(
+        _sender(root), lambda t, p: reply, "Bass", "set_fx_param",
+        dict(SET_PARAM), output_dir=str(tmp_path / "wavs"),
+        _analyzer_loader=_no_analyzer)
+    assert res["status"] == "UNVERIFIED"
+    assert res["exit_code"] == 2
+    assert "UNKNOWN" in res["note"]
+
+
+def test_verify_mutator_exception_is_outcome_unknown(root, tmp_path):
+    def exploding_mutator(t, p):
+        raise RuntimeError("transport blew up mid-send")
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(), _capture_responder()])
+    res = verifyloop.verify(
+        _sender(root), exploding_mutator, "Bass", "set_fx_param",
+        dict(SET_PARAM), output_dir=str(tmp_path / "wavs"),
+        _analyzer_loader=_no_analyzer)
+    assert res["status"] == "UNVERIFIED"
+    assert res["exit_code"] == 2
+
+
+def test_verify_missing_pre_guid_refuses_before_mutation(root, tmp_path):
+    # No GUID in the pre-capture -> the post-capture cannot be pinned; must
+    # refuse BEFORE mutating, not fail open (Codex gate round-2 MAJOR).
+    record = []
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(guid=None),
+    ], record=record)
+    assert res["status"] == "REFUSED"
+    assert res["exit_code"] == 1
+    assert "GUID" in res["note"]
+    assert all(c["type"] != "set_fx_param" for c in record)
+
+
+def test_verify_missing_post_guid_is_unverified(root, tmp_path):
+    res = _run_verify(root, tmp_path, [
+        PREFLIGHT_OK, _context(), _capture_responder(guid="{A}"),
+        MUT_OK, PREFLIGHT_OK, _capture_responder(guid=None),
+    ])
+    assert res["status"] == "UNVERIFIED"
+    assert res["exit_code"] == 2
+    assert "identity" in res["note"]
+
+
 def test_verify_scope_warning_on_unverified_isolation(root, tmp_path):
     res = _run_verify(root, tmp_path, [
         PREFLIGHT_OK, _context(),
@@ -746,6 +837,26 @@ def test_format_verify_verified_and_unverified():
     text = verifyloop.format_verify(unverified)
     assert "VERDICT: UNVERIFIED" in text
     assert "one Ctrl/Cmd+Z away" in text
+
+
+def test_format_verify_reports_null_lufs_with_reason():
+    res = {"status": "VERIFIED", "exit_code": 0,
+           "pre": {"ok": True, "lufs_i": None, "rms_db": -18.0,
+                   "capture_scope": "isolated_track",
+                   "isolation_verified": True},
+           "post": {"ok": True, "lufs_i": None, "rms_db": -18.8,
+                    "capture_scope": "isolated_track",
+                    "isolation_verified": True},
+           "mutation": {"type": "set_fx_param", "reply": {"ok": True}},
+           "deltas": {"lufs_i_delta": None,
+                      "lufs_i_note": "LUFS-I unavailable in pre and/or post "
+                                     "capture (REAPER did not report it)",
+                      "rms_db_delta": -0.8},
+           "scope_warning": None, "note": None}
+    text = verifyloop.format_verify(res)
+    assert "dLUFS-I n/a" in text
+    assert "LUFS-I unavailable" in text
+    assert "dRMS -0.80 dB" in text
 
 
 # --- parse_render_stats unit tests ------------------------------------------

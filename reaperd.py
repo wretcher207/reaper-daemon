@@ -319,9 +319,16 @@ def send_type(cmd_type, payload, bridge_root=None, timeout_ms=10000,
     if raw is None:
         return {"ok": False, "error": {"code": "NO_REPLY", "details": "no reply"}}
     try:
-        return json.loads(raw)
+        reply = json.loads(raw)
     except Exception as e:
         return {"ok": False, "error": {"code": "BAD_REPLY", "details": str(e)}}
+    if not isinstance(reply, dict):
+        # A syntactically valid non-object (raw null, a bare number...) is
+        # still a broken reply; returning it raw made callers crash or, in
+        # verify, misread "outcome unknown" as "nothing was changed".
+        return {"ok": False, "error": {"code": "BAD_REPLY",
+                                       "details": "reply is not a JSON object"}}
+    return reply
 
 
 def scan_fx_parameter_data(base, bridge_root, include_values=False):
@@ -566,14 +573,30 @@ def _split_verify_mutation(args):
         cut = rest.index("--")
         head, rest = rest[:cut], rest[cut + 1:]
     else:
-        head = []
+        # No `--` separator: peel leading option-looking tokens (this is how
+        # `verify Bass --help` reaches the help text instead of a missing-
+        # mutation error). Option VALUES can't be recovered here — the error
+        # below tells the user to add the `--`.
+        split = 0
+        while split < len(rest) and rest[split].startswith("-"):
+            split += 1
+        head, rest = rest[:split], rest[split:]
     if head:
-        opts = argparse.ArgumentParser(prog="verify", add_help=False)
+        # add_help=True so a trailing `--help` prints the verify options and
+        # exits 0 instead of surfacing as a missing-mutation error.
+        opts = argparse.ArgumentParser(
+            prog="reaperd verify", add_help=True,
+            description="Full form: reaperd verify <track> [options] "
+                        "-- <type> '<payload-json>'")
         _add_verify_options(opts)
         try:
             parsed, unknown = opts.parse_known_args(head)
-        except SystemExit:
-            return None, None, f"could not parse verify options: {head}"
+        except SystemExit as e:
+            if e.code == 0:  # --help was handled; propagate the clean exit
+                raise
+            return None, None, (f"could not parse verify options: {head} "
+                                "(tip: put `--` between the options and the "
+                                "mutation type)")
         if unknown:
             return None, None, (f"unrecognized text before '--': {unknown} "
                                 "(options go before '--'; the mutation goes "

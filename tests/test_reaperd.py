@@ -157,6 +157,14 @@ def test_verify_missing_mutation_is_an_error():
     assert err is not None
 
 
+def test_verify_help_after_track_prints_help_not_error(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        reaperd.main(["verify", "Bass", "--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "--seconds" in out and "--json" in out
+
+
 def test_fresh_reply_still_returned_and_consumed(root):
     fake_bridge(root, {"ok": True, "type": "ping", "data": {}})
     cid, reply = reaperd.send_command({"type": "ping", "payload": {}},
