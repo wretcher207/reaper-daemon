@@ -345,6 +345,22 @@ review template. **BLOCKER/MAJOR: 5 (1 shared pair collapsed), all fixed.**
   the FX to the MASTER bus). FIX: split only when the subcommand is `verify`;
   everything else keeps argparse's native `--`.
 
+**Round 2 (scoped re-review of the fixes, commit 54d7106):** all five round-1
+findings verified CLOSED; two new findings, both fixed:
+
+- **NEW-1 (MAJOR)** `_subcommand` ignored argparse prefix abbreviation
+  (`--bridge`, `--b` alias `--bridge-root`), making abbreviated verify calls
+  unusable and exiting an unremapped 2. FIX: prefix-aware `_subcommand`, and
+  the usage-error remap (2 → 64) now covers ALL subcommands — exit 2 is also
+  meaningful for `discover-map`, so no argparse error may collide with any
+  semantic exit anywhere.
+- **NEW-2** VERIFIED with empty deltas was still reachable (mixed metric
+  modes with asymmetric LUFS). FIX: a clean run whose delta set is empty is
+  UNVERIFIED exit 2 — VERIFIED now structurally requires ≥1 measured delta.
+- **NEW-3 (MINOR, accepted)** `main`'s `argv.index("--")` would mis-split if
+  the bridge root were literally named `--`. Justification: not a realistic
+  path, and argparse itself would misparse it identically.
+
 MINOR fixes: non-dict payload refused before the pre-render (`BAD_PAYLOAD`);
 per-measure warnings bubble into the verify report; pre/post format drift
 (sample_rate/channels/duration) restricts deltas to LUFS-I with a warning;

@@ -483,12 +483,24 @@ def verify(track, cmd_type, payload, seconds=None, start=None,
         for w in m.get("warnings", []):
             if not w.startswith("capture_scope is"):
                 warnings.append(f"{label}-measure: {w}")
+    deltas = _delta_metrics(pre, post, content_comparable=not mismatch)
+    if not deltas:
+        # Both captures individually assessable, yet no metric is numeric on
+        # BOTH sides (e.g. one side's analysis degraded while the other's
+        # LUFS went missing). VERIFIED means evidence; zero deltas is zero
+        # evidence.
+        return {"ok": False, "verdict": "UNVERIFIED",
+                "exit_code": EXIT_UNVERIFIED, "mutation_applied": True,
+                "pre": pre, "post": post, "warnings": warnings,
+                "message": f"mutation {cmd_type} IS applied and both captures "
+                           f"completed, but no metric was measurable on BOTH "
+                           f"sides, so there is no comparable evidence. "
+                           f"{UNVERIFIED_NOTE}"}
     return {"ok": True, "verdict": "VERIFIED", "exit_code": EXIT_VERIFIED,
             "mutation_applied": True, "mutation": {"type": cmd_type,
                                                    "result": mut.get("data")},
             "pre": pre, "post": post, "bounds": pre["bounds"],
-            "deltas": _delta_metrics(pre, post, content_comparable=not mismatch),
-            "warnings": warnings}
+            "deltas": deltas, "warnings": warnings}
 
 
 def _fmt_db(value, unit="dB"):

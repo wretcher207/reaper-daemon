@@ -1201,21 +1201,28 @@ def build_parser():
 
 
 def _subcommand(argv):
-    """First positional token = the subcommand, skipping --bridge-root and its
-    value. Used to scope the verify-only '--' split below; every other
-    subcommand keeps argparse's native '--' behavior (e.g. `fxload ReaEQ --
-    Bass` must still parse Bass as the track, not drop it)."""
+    """First positional token = the subcommand, skipping --bridge-root (and
+    its argparse prefix abbreviations: --bridge, --b, ...) plus its value.
+    Used to scope the verify-only '--' split below; every other subcommand
+    keeps argparse's native '--' behavior (e.g. `fxload ReaEQ -- Bass` must
+    still parse Bass as the track, not drop it)."""
     i = 0
     while i < len(argv):
         tok = argv[i]
-        if tok == "--bridge-root":
-            i += 2
-            continue
         if tok == "--":
             return None
-        if not tok.startswith("-"):
-            return tok
-        i += 1
+        if tok.startswith("--"):
+            flag = tok.split("=", 1)[0]
+            if ("--bridge-root".startswith(flag) and len(flag) >= 3
+                    and "=" not in tok):
+                i += 2  # the flag consumes the next token as its value
+            else:
+                i += 1
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return tok
     return None
 
 
@@ -1224,17 +1231,18 @@ def main(argv=None):
         argv = sys.argv[1:]
     argv = list(argv)
     mutation = []
-    is_verify = _subcommand(argv) == "verify"
-    if is_verify and "--" in argv:
+    if _subcommand(argv) == "verify" and "--" in argv:
         split = argv.index("--")
         argv, mutation = argv[:split], argv[split + 1:]
     try:
         args = build_parser().parse_args(argv)
     except SystemExit as e:
-        # argparse exits 2 on usage errors, but verify's contract defines
-        # exit 2 as UNVERIFIED ("the mutation IS applied"). A typo'd flag must
-        # never read as an applied mutation: remap to 64 (EX_USAGE).
-        if is_verify and e.code == 2:
+        # argparse exits 2 on usage errors, but 2 is a MEANINGFUL exit for
+        # this CLI (verify: UNVERIFIED, "the mutation IS applied";
+        # discover-map: incomplete map). A typo'd flag must never read as one
+        # of those verdicts, on any subcommand: remap usage errors to 64
+        # (EX_USAGE).
+        if e.code == 2:
             raise SystemExit(64)
         raise
     if getattr(args, "bridge_root", None):

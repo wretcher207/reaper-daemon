@@ -393,6 +393,57 @@ def test_verify_usage_error_never_exits_2(root):
     assert e.value.code == 64  # EX_USAGE, never the UNVERIFIED verdict
 
 
+def test_usage_error_remap_covers_all_subcommands(root):
+    # exit 2 is meaningful for discover-map too (incomplete map); a usage
+    # error must never collide with any semantic exit code.
+    with pytest.raises(SystemExit) as e:
+        reaperd.main(["--bridge-root", root, "cmd"])  # missing required args
+    assert e.value.code == 64
+
+
+def test_bridge_root_abbreviation_still_verify(root, tmp_path, monkeypatch,
+                                               capsys):
+    # argparse accepts --bridge/--b as abbreviations of --bridge-root; the
+    # verify detection (and so the '--' split) must survive them.
+    assert reaperd._subcommand(["--bridge", "/x", "verify", "T"]) == "verify"
+    assert reaperd._subcommand(["--bridge-root=/x", "verify", "T"]) == "verify"
+    assert reaperd._subcommand(["--b", "/x", "cmd", "t", "{}"]) == "cmd"
+    assert reaperd._subcommand(["send", "--", "f.json"]) == "send"
+    no_postmortem(monkeypatch)
+    wav = write_wav(str(tmp_path / "pre.wav"))
+    fake_bridge_script(root, [
+        preflight_ok(), capture_reply(wav),
+        {"ok": False, "error": {"code": "NO_FX", "details": "nope"}},
+    ])
+    rc = reaperd.main(["--bridge", root, "verify", "Bass", "--start", "0",
+                       "--json", "--", "set_fx_param", json.dumps(MUT_PAYLOAD)])
+    assert rc == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "MUTATION_FAILED"
+
+
+def test_verified_never_carries_empty_deltas(root, tmp_path):
+    # Mixed modes with asymmetric LUFS: pre degrades to render_stats (bad WAV,
+    # LUFS present -> assessable), post analyzes fine but has no LUFS. No
+    # metric spans both sides -> zero evidence -> must NOT be VERIFIED.
+    pytest.importorskip("postmortem")
+    bad = str(tmp_path / "bad.wav")
+    with open(bad, "wb") as f:
+        f.write(b"not a wav")
+    good = write_wav(str(tmp_path / "good.wav"))
+    fake_bridge_script(root, [
+        preflight_ok(), capture_reply(bad, lufs=-14.0),
+        set_param_ok(),
+        preflight_ok(), capture_reply(good, lufs=None),
+    ])
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
+                               start=0.0, bridge_root=root)
+    assert result["verdict"] == "UNVERIFIED"
+    assert result["exit_code"] == 2
+    assert result["mutation_applied"] is True
+    assert "no metric was measurable on BOTH sides" in result["message"]
+
+
 def test_dashdash_stays_native_for_other_subcommands(root):
     from bridge_fakes import fake_bridge
     fake_bridge(root, {"ok": True, "type": "get_context", "data": {}})
