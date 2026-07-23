@@ -281,6 +281,129 @@ def measure(track, seconds=None, start=None, bounds=None, bridge_root=None,
     }
 
 
+# verify() exit codes — agents branch on these, so they are part of the
+# contract: 0 = both captures clean and deltas reported; 1 = nothing was
+# mutated (pre-measure refused, or the mutation itself failed); 2 = the
+# mutation IS applied but the post-measure could not prove what it did.
+EXIT_VERIFIED = 0
+EXIT_MUTATION_FAILED = 1
+EXIT_UNVERIFIED = 2
+
+# Said verbatim whenever verify leaves a mutation applied but unproven. The
+# asymmetry is deliberate: never destroy a user-visible change because
+# measurement hiccupped.
+UNVERIFIED_NOTE = ("The mutation is NOT rolled back — it is one Ctrl/Cmd+Z "
+                   "away if you don't want it.")
+MUTATION_TIMEOUT_MS = 30000
+
+
+def _delta_metrics(pre, post):
+    """Measured deltas between two measure() results. Only fields that are
+    numeric on BOTH sides are compared — a metric that exists on one side only
+    (e.g. Post Mortem analysis degraded once) is silently absent, never
+    guessed."""
+    pm, qm = pre.get("metrics", {}), post.get("metrics", {})
+    deltas = {}
+    for key in ("lufs_i", "sample_peak_db", "rms_db", "crest_factor_db",
+                "silence_fraction"):
+        a, b = pm.get(key), qm.get(key)
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            deltas[key] = {"pre": a, "post": b, "delta": round(b - a, 2)}
+    pa, qa = pm.get("stereo") or {}, qm.get("stereo") or {}
+    stereo = {}
+    for key in ("correlation", "side_rms_db", "mid_rms_db", "balance_db"):
+        a, b = pa.get(key), qa.get(key)
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            stereo[key] = {"pre": a, "post": b, "delta": round(b - a, 3)}
+    if stereo:
+        deltas["stereo"] = stereo
+    ps = {b["freq_hz"]: b["level_db"] for b in pm.get("spectrum_third_octave") or []}
+    qs = {b["freq_hz"]: b["level_db"] for b in qm.get("spectrum_third_octave") or []}
+    bands = [{"freq_hz": f, "pre": ps[f], "post": qs[f],
+              "delta": round(qs[f] - ps[f], 1)}
+             for f in ps if f in qs]
+    if bands:
+        deltas["spectrum_third_octave"] = bands
+    return deltas
+
+
+def _scope_warnings(pre, post):
+    warnings = []
+    pre_cap, post_cap = pre.get("capture", {}), post.get("capture", {})
+    if pre_cap.get("capture_scope") != post_cap.get("capture_scope"):
+        warnings.append(
+            f"capture scope CHANGED between measures "
+            f"({pre_cap.get('capture_scope')} -> {post_cap.get('capture_scope')}"
+            f"): the deltas compare two different signals and are not "
+            f"per-track evidence")
+    elif not (pre_cap.get("capture_scope") == "isolated_track"
+              and pre_cap.get("isolation_verified") is True
+              and post_cap.get("isolation_verified") is True):
+        warnings.append(
+            f"captures are {pre_cap.get('capture_scope') or 'unknown'} (not a "
+            f"verified isolated track): the deltas describe that capture "
+            f"scope, not necessarily this track alone")
+    if pre.get("metrics_source") != post.get("metrics_source"):
+        warnings.append(
+            f"metrics source differs between measures "
+            f"({pre.get('metrics_source')} pre, {post.get('metrics_source')} "
+            f"post); only metrics present on both sides are compared")
+    return warnings
+
+
+def verify(track, cmd_type, payload, seconds=None, start=None,
+           bridge_root=None, keep_wav=False):
+    """measure -> mutate -> measure with frozen bounds -> measured deltas.
+
+    Returns a result whose exit_code field implements the contract above.
+    The mutation goes through the same send path as `reaperd.py cmd` (add_fx
+    name resolution and set_fx_param alias repair included).
+    """
+    pre = measure(track, seconds=seconds, start=start, bridge_root=bridge_root,
+                  keep_wav=keep_wav)
+    if not pre.get("ok"):
+        return {"ok": False, "verdict": "PRE_MEASURE_BLOCKED",
+                "exit_code": EXIT_MUTATION_FAILED, "mutation_applied": False,
+                "error": pre.get("error"), "pre": pre,
+                "message": "pre-measure refused; nothing was mutated. Fix the "
+                           "capture (or use `cmd` if you don't need proof)."}
+    if pre.get("silent"):
+        return {"ok": False, "verdict": "PRE_MEASURE_SILENT",
+                "exit_code": EXIT_MUTATION_FAILED, "mutation_applied": False,
+                "pre": pre,
+                "message": "pre-capture is silent, so no delta could prove "
+                           "anything; nothing was mutated. Park the capture "
+                           "window where the track is playing, or use `cmd` "
+                           "for an unverified change."}
+
+    mut = reaperd.send_type(cmd_type, dict(payload), bridge_root=bridge_root,
+                            timeout_ms=MUTATION_TIMEOUT_MS)
+    if not mut.get("ok"):
+        return {"ok": False, "verdict": "MUTATION_FAILED",
+                "exit_code": EXIT_MUTATION_FAILED, "mutation_applied": False,
+                "error": mut.get("error"), "pre": pre,
+                "message": f"mutation {cmd_type} failed; no post-capture "
+                           f"attempted, nothing to roll back."}
+
+    post = measure(track, bounds=pre["bounds"], bridge_root=bridge_root,
+                   keep_wav=keep_wav)
+    if not post.get("ok") or post.get("silent"):
+        why = ("post-capture failed" if not post.get("ok")
+               else "post-capture is silent")
+        return {"ok": False, "verdict": "UNVERIFIED",
+                "exit_code": EXIT_UNVERIFIED, "mutation_applied": True,
+                "error": post.get("error"), "pre": pre, "post": post,
+                "message": f"mutation {cmd_type} IS applied, but {why}, so "
+                           f"its effect is unproven. {UNVERIFIED_NOTE}"}
+
+    warnings = _scope_warnings(pre, post)
+    return {"ok": True, "verdict": "VERIFIED", "exit_code": EXIT_VERIFIED,
+            "mutation_applied": True, "mutation": {"type": cmd_type,
+                                                   "result": mut.get("data")},
+            "pre": pre, "post": post, "bounds": pre["bounds"],
+            "deltas": _delta_metrics(pre, post), "warnings": warnings}
+
+
 def _fmt_db(value, unit="dB"):
     return "n/a" if value is None else f"{value:.1f} {unit}"
 
@@ -318,4 +441,48 @@ def format_measure(result):
         lines.append(f"[measure] WAV kept: {cap.get('file_path')}")
     for w in result.get("warnings", []):
         lines.append(f"[measure] WARNING: {w}")
+    return "\n".join(lines)
+
+
+def format_verify(result):
+    """Short human-readable report for one verify() result. The verdict line
+    always states whether the project was mutated — that is the one thing a
+    reader must never be wrong about."""
+    verdict = result.get("verdict")
+    lines = [f"[verify] VERDICT: {verdict}  (mutation applied: "
+             f"{'yes' if result.get('mutation_applied') else 'NO'})"]
+    if result.get("message"):
+        lines.append(f"[verify] {result['message']}")
+    if result.get("error"):
+        err = result["error"]
+        lines.append(f"[verify] error [{err.get('code')}]: {err.get('details')}")
+    deltas = result.get("deltas") or {}
+    label = {"lufs_i": ("LUFS-I", "LUFS"), "sample_peak_db": ("sample peak", "dB"),
+             "rms_db": ("RMS", "dB"), "crest_factor_db": ("crest", "dB"),
+             "silence_fraction": ("silence fraction", "")}
+    for key, (name, unit) in label.items():
+        d = deltas.get(key)
+        if d:
+            lines.append(f"[verify] {name}: {d['pre']:g} -> {d['post']:g}  "
+                         f"(delta {d['delta']:+g}{' ' + unit if unit else ''})")
+    stereo = deltas.get("stereo") or {}
+    for key, d in stereo.items():
+        lines.append(f"[verify] stereo {key}: {d['pre']:g} -> {d['post']:g}  "
+                     f"(delta {d['delta']:+g})")
+    bands = deltas.get("spectrum_third_octave") or []
+    moved = [b for b in bands if abs(b["delta"]) >= 1.0]
+    if bands:
+        if moved:
+            lines.append("[verify] spectrum bands that moved >= 1 dB:")
+            for b in moved:
+                lines.append(f"[verify]   {b['freq_hz']:>6g} Hz: "
+                             f"{b['pre']:g} -> {b['post']:g} dB "
+                             f"(delta {b['delta']:+g})")
+        else:
+            lines.append("[verify] spectrum: no 1/3-octave band moved >= 1 dB")
+    if result.get("ok") and not deltas:
+        lines.append("[verify] no comparable metrics on both sides — deltas "
+                     "unavailable (see warnings)")
+    for w in result.get("warnings", []):
+        lines.append(f"[verify] WARNING: {w}")
     return "\n".join(lines)

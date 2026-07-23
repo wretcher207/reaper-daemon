@@ -862,6 +862,33 @@ def cmd_measure(args):
     return 0 if result.get("ok") else 1
 
 
+def cmd_verify(args):
+    import verifyloop  # lazy: verifyloop imports reaperd for transport
+    mutation = list(args.mutation)
+    if mutation and mutation[0] == "--":
+        mutation = mutation[1:]
+    if len(mutation) != 2:
+        print("error: verify needs a mutation after '--': "
+              "verify <track> [options] -- <type> '<payload-json>'",
+              file=sys.stderr)
+        return 1
+    try:
+        payload = json.loads(mutation[1])
+    except Exception as e:
+        print(f"error: mutation payload is not valid JSON: {e}", file=sys.stderr)
+        return 1
+    result = verifyloop.verify(args.track, mutation[0], payload,
+                               seconds=args.seconds, start=args.start,
+                               bridge_root=args.bridge_root,
+                               keep_wav=args.keep_wav)
+    if args.json:
+        print(json.dumps(result, separators=(",", ":")))
+    else:
+        out = verifyloop.format_verify(result)
+        print(out) if result.get("ok") else print(out, file=sys.stderr)
+    return result["exit_code"]
+
+
 def cmd_list_maps(args):
     skill_dir = os.path.join(args.bridge_root, "skills", "drum-apparatus")
     if skill_dir not in sys.path:
@@ -1115,6 +1142,27 @@ def build_parser():
     s.add_argument("--json", action="store_true", help="machine-readable output")
     s.set_defaults(func=cmd_measure)
 
+    s = sub.add_parser(
+        "verify",
+        help="measure, apply one mutation, re-measure, report measured deltas",
+        description="Exit codes: 0 VERIFIED (deltas reported), 1 nothing was "
+                    "mutated (pre-measure refused or the mutation failed), "
+                    "2 UNVERIFIED (mutation applied but the post-measure "
+                    "could not prove its effect; it is NOT rolled back).")
+    s.add_argument("track", help="track name or 'master'")
+    s.add_argument("--seconds", type=float, default=None,
+                   help="capture length in seconds (default 10, max 60)")
+    s.add_argument("--start", type=float, default=None,
+                   help="capture start in seconds (default: active time "
+                        "selection, else edit cursor)")
+    s.add_argument("--keep-wav", action="store_true",
+                   help="keep both capture WAVs instead of deleting on success")
+    s.add_argument("--json", action="store_true", help="machine-readable output")
+    # The mutation ("-- <type> '<payload-json>'") is split off in main()
+    # before argparse runs: a REMAINDER positional here would swallow any
+    # option that appears after the track name.
+    s.set_defaults(func=cmd_verify, mutation=[])
+
     s = sub.add_parser("riff",
                        help="read a guitar stem's transients into a proposed kick grid")
     s.add_argument("project", help="path to the saved .rpp project file")
@@ -1155,9 +1203,18 @@ def build_parser():
 
 
 def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    argv = list(argv)
+    mutation = []
+    if "--" in argv:
+        split = argv.index("--")
+        argv, mutation = argv[:split], argv[split + 1:]
     args = build_parser().parse_args(argv)
     if getattr(args, "bridge_root", None):
         args.bridge_root = os.path.abspath(os.path.expanduser(args.bridge_root))
+    if hasattr(args, "mutation"):
+        args.mutation = mutation
     return args.func(args)
 
 

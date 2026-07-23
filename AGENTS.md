@@ -172,6 +172,20 @@ a mix move to know what actually changed, instead of trusting `ok: true`.
   deleted on success unless `--keep-wav` (kept automatically on failure or
   silence, for debugging).
 
+To prove what a mix move actually did, wrap it in `verify` instead of `cmd`:
+
+```bash
+python3 reaperd.py verify <track> [--seconds N] [--start S] [--json] \
+  -- <type> '<payload-json>'
+```
+
+It measures, applies the one mutation (same resolution/repair as `cmd`),
+re-measures the identical frozen window, and reports measured deltas
+(ΔLUFS-I always; per-band spectrum, ΔRMS, Δstereo with Post Mortem). Branch
+on the exit code: `0` VERIFIED, `1` nothing was mutated, `2` UNVERIFIED — the
+mutation IS applied but unproven, and is NOT rolled back (one undo away).
+Never present UNVERIFIED output as evidence the move worked.
+
 ## Generating MIDI (cross-platform)
 
 Write the `.mid` file yourself (anywhere on disk), then send `insert_midi_file`
