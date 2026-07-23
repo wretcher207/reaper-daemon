@@ -315,3 +315,62 @@ Protocol per phase:
 | Date | Phase | Commit | Status | Notes |
 |---|---|---|---|---|
 | 2026-07-23 | spec | — | Spec written, baseline verified (124 tests pass, main@8358a9a) | Authored by prior session; no code yet |
+| 2026-07-23 | 0 | (this commit) | DONE | See "Phase 0 findings" below. Environment: remote Linux session, not David's Windows machine. Branch is `claude/status-last-pushed-h4l7un` (session-mandated), not `feat/verify-loop` — same role, one PR at the end. Codex CLI unavailable here; per David, the per-phase gate is an independent adversarial review by fresh agent sessions hunting the template's seven failure categories (David can re-run real Codex on his machine before merge). |
+
+### Phase 0 findings (2026-07-23)
+
+**Baseline re-verified in this environment:** `main` @ `24b39ab` (spec commit on
+top of `8358a9a`; no code drift). Full CI parity green: 124 pytest, `py_compile`
+OK on all three entry points, `lua bridge/test_bridge.lua` OK (149 checks),
+`lua bridge/test_json.lua` 40 passed (must run from repo root, not `bridge/`).
+Post Mortem installed editable from a fresh clone; `postmortem --help` and
+`from postmortem.analysis import analyze_wav` both work.
+
+**Open question 1 — `analyze_wav` shape → decision (a) CONFIRMED.**
+`analyze_wav(path)` (`postmortem/analysis.py:335`) is a pure function over an
+existing WAV: returns a `TrackStats` dataclass with `duration_seconds`,
+`sample_rate`, `channels`, `sample_peak_db`, `rms_db`, `crest_factor_db`,
+`spectrum_third_octave` (list of `{freq_hz, level_db}`, 31 ISO bands),
+`silence_fraction`, and `stereo` (correlation/mid-side/balance, None for mono).
+Notes that shape the report format: it does NOT compute LUFS (comes from
+RENDER_STATS — which `capture_track_audio` already returns) and has no true
+peak, only sample peak — `verify` must label it `sample_peak_db`, never claim
+true peak. Masking (`masking_overlap`) is a separate pure function over
+multiple tracks' spectra — not applicable to single-track pre/post verify;
+per-band spectrum deltas cover the same ground. So: import
+`postmortem.analysis` guarded in try/except (it needs numpy; this repo stays
+stdlib-only — Post Mortem is an optional external), do our own captures via
+`capture_track_audio`, analyze the WAVs directly. No cross-repo change needed.
+
+**Open question 2 — bounds freezing CONFIRMED safe.** In
+`command_capture_track_audio` (Lua ~2504–2515): when `start_seconds` is
+present, the time-selection branch is never consulted and `duration_seconds`
+is used as-is (the `min(duration, ts_end - ts_start)` clamp lives only in the
+no-`start_seconds` branch). Therefore `verify` freezes bounds by ALWAYS
+passing explicit `start_seconds` + `duration_seconds` on both captures; the
+user moving the time selection or cursor between pre and post cannot shift
+them. `measure` resolves initial bounds client-side from `get_context`
+(`cursor.seconds`, `time_selection.start/end/active`), mirroring the bridge's
+own resolution order.
+
+**Open question 3 — `band_db` metric (Phase 3).** Maps to
+`spectrum_third_octave`: select the 1/3-octave bands whose center `freq_hz`
+lies within the requested range and power-average their `level_db`
+(`10*log10(mean(10^(db/10)))`). Post Mortem computes the bands; no new DSP.
+
+**Open question 4 — temp file convention.** `reaper_mcp.py` already uses
+`tempfile.gettempdir()/reaper-mcp/capture-<UTC stamp>.wav` for captures;
+`reaperd.py` uses `tempfile.NamedTemporaryFile` for scratch MIDI. Convention
+adopted: capture WAVs go to `tempfile.gettempdir()/reaper-verify/` with
+timestamped names, deleted on success, kept on failure for debugging.
+
+**Module placement decision:** new file `verifyloop.py` at repo root
+(measure + verify + formatters will clearly exceed the ~200-line threshold the
+spec set for inlining into `reaperd.py`). `reaperd.py` gains thin `measure` /
+`verify` subcommands delegating to it; all transport through `send_type`.
+
+**Silence thresholds** copied from `reaper_mcp.py::_run_postmortem`:
+silent when `silence_fraction >= 0.85` or `rms_db <= -60`. Without Post
+Mortem (no numpy), RMS/silence-fraction are unavailable; the fallback silence
+signal is `render_loudness_lufs` missing or absurdly low — the report must
+carry `metrics_source: "render_stats"` and say what it could not check.
