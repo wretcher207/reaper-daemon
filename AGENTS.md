@@ -147,6 +147,31 @@ they shift between plugin versions. Query with `scan_fx` or
    you the current normalized value; interpolate from there. When unsure, set
    a value, re-scan, read the `formatted_value`, and adjust.
 
+## Measuring
+
+`measure` closes the feedback loop: instead of trusting `ok: true`, capture a
+track and read what the audio actually measures.
+
+```bash
+python3 reaperd.py measure Bass                    # 10 s from cursor/time selection
+python3 reaperd.py measure Bass --seconds 5 --start 12.5 --json
+```
+
+What it does, in order: (1) `get_capture_preflight` — refuses with the
+blocker list if capture is gated (`allow_risk_level_3` needs a REAPER restart
+after changing it); (2) resolves capture bounds ONCE (active time selection's
+start, else edit cursor; `--start` overrides) and passes them explicitly so a
+later `measure` of the same spot is identical; (3) `capture_track_audio` to a
+unique temp WAV, verifying file freshness; (4) reports metrics: LUFS-I always
+(`metrics_source: "render_stats"`), plus spectrum/peak/RMS/stereo when Post
+Mortem is installed (`metrics_source: "postmortem"`).
+
+Honesty rules baked in: a silent capture (RMS <= -60 dBFS or >= 85% silence)
+is flagged `silent: true` — never build a verdict on it. If `capture_scope`
+is not `isolated_track` with `isolation_verified: true`, the numbers describe
+the capture scope (possibly the full mix), not the track alone — the output
+says so and you must repeat that caveat, not drop it.
+
 ## Generating MIDI (cross-platform)
 
 Write the `.mid` file yourself (anywhere on disk), then send `insert_midi_file`

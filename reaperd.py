@@ -11,6 +11,7 @@ Subcommands:
   cmd        send by <type> + <payload-json> (auto-resolves add_fx names,
              repairs set_fx_param field aliases)
   status     liveness check via the bridge heartbeat
+  measure    capture one track once and print measured audio metrics
   fxload     resolve an installed plugin name and add it to a track
   setparam   set any plugin parameter to a display value, with verify
   eq         set one EQ band (freq/gain/Q) and confirm it took
@@ -475,6 +476,35 @@ def status_ok(bridge_root=None, quiet=False):
     say("       Revive: re-run the bridge action (Actions list), or relaunch REAPER so")
     say("       __startup.lua reloads it. Then re-run this check.")
     return False
+
+
+def _bridge_sender(bridge_root):
+    """A verifyloop-shaped sender bound to one bridge root. Keeps all
+    transport (atomic writes, auth token, timeout handling) in send_type."""
+    def sender(cmd_type, payload, timeout_ms=10000):
+        return send_type(cmd_type, payload, bridge_root=bridge_root,
+                         timeout_ms=timeout_ms, resolve=False, repair=False)
+    return sender
+
+
+def cmd_measure(args):
+    import verifyloop
+    res = verifyloop.measure(
+        _bridge_sender(args.bridge_root), args.track,
+        seconds=args.seconds, start_seconds=args.start,
+        keep_wav=args.keep_wav)
+    if args.json:
+        print(json.dumps(res, separators=(",", ":")))
+    elif res.get("ok"):
+        print(verifyloop.format_measure(res))
+    else:
+        err = res.get("error") or {}
+        print(f"[measure] REFUSED {err.get('code')}: {err.get('details')}",
+              file=sys.stderr)
+        for b in res.get("blockers") or []:
+            print(f"[measure]   blocker {b.get('code')}: {b.get('message')}",
+                  file=sys.stderr)
+    return 0 if res.get("ok") else 1
 
 
 def cmd_fxload(args):
@@ -1053,6 +1083,20 @@ def build_parser():
     s = sub.add_parser("status", help="bridge liveness check")
     s.add_argument("--quiet", action="store_true", help="exit code only")
     s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("measure",
+                       help="capture one track once and print measured audio metrics")
+    s.add_argument("track", help="track name or 'master'")
+    s.add_argument("--seconds", type=float, default=None,
+                   help="capture length 1-60 (default 10)")
+    s.add_argument("--start", type=float, default=None,
+                   help="capture start in seconds (default: time selection start "
+                        "if active, else edit cursor)")
+    s.add_argument("--json", action="store_true",
+                   help="machine-readable JSON instead of the human table")
+    s.add_argument("--keep-wav", action="store_true",
+                   help="keep the capture WAV (default: delete after analysis)")
+    s.set_defaults(func=cmd_measure)
 
     s = sub.add_parser("fxload", help="resolve an installed plugin name and add it")
     s.add_argument("query", help="plugin name query (fuzzy)")

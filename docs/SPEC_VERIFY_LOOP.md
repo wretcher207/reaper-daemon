@@ -315,7 +315,8 @@ Protocol per phase:
 | Date | Phase | Commit | Status | Notes |
 |---|---|---|---|---|
 | 2026-07-23 | spec | — | Spec written, baseline verified (124 tests pass, main@8358a9a) | Authored by prior session; no code yet |
-| 2026-07-23 | 0 | (this commit) | DONE | Recon complete. Details below. |
+| 2026-07-23 | 0 | b483b59 | DONE | Recon complete. Details below. |
+| 2026-07-23 | 1 | (this commit) | CODE DONE, gate pending | `measure` in new `verifyloop.py` (module choice: separate file — it grows through Phases 2–3, well past 200 lines). CLI `reaperd.py measure`. `fake_bridge_script` added (entries may be dicts or callables so a scripted capture reply can actually write the WAV — fake fidelity). 27 new tests, suite 151 green. Decisions: WAV deleted after analysis on success (`--keep-wav` to keep; kept on failure paths); render_stats mode with null LUFS-I is treated as SILENT, not a pass (digital silence renders -inf → bridge maps to null; no other level evidence without Post Mortem). |
 
 ### Phase 0 findings (2026-07-23)
 

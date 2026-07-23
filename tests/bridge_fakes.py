@@ -38,3 +38,45 @@ def fake_bridge(root, reply_body, record=None, delay=0.0):
     t = threading.Thread(target=run, daemon=True)
     t.start()
     return t
+
+
+def fake_bridge_script(root, replies, record=None, delay=0.0):
+    """Watch inbox/, answer up to len(replies) commands IN ORDER, then exit.
+
+    Each entry in replies is either a reply-body dict, or a callable taking
+    the received command dict and returning the reply body — callables let a
+    scripted reply mimic bridge side effects (e.g. writing the capture WAV the
+    reply's file_path points at), keeping fake fidelity with the real
+    protocol. When record is a list, every received command dict is appended.
+    The single-reply fake_bridge above stays untouched; both suites share it.
+    """
+    def run():
+        inbox = os.path.join(root, "inbox")
+        deadline = time.monotonic() + 5.0
+        answered = 0
+        while answered < len(replies) and time.monotonic() < deadline:
+            files = sorted(f for f in os.listdir(inbox)
+                           if f.endswith(".json") and not f.endswith(".tmp"))
+            if not files:
+                time.sleep(0.01)
+                continue
+            cid = files[0][: -len(".json")]
+            path = os.path.join(inbox, files[0])
+            with open(path, "r", encoding="utf-8") as f:
+                command = json.load(f)
+            if record is not None:
+                record.append(command)
+            os.remove(path)
+            time.sleep(delay)
+            body = replies[answered]
+            if callable(body):
+                body = body(command)
+            reply = dict(body, id=cid)
+            out = os.path.join(root, "outbox", cid + ".json")
+            with open(out + ".tmp", "w", encoding="utf-8") as f:
+                f.write(json.dumps(reply))
+            os.replace(out + ".tmp", out)
+            answered += 1
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t

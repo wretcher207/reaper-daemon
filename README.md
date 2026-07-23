@@ -126,6 +126,7 @@ python3 reaperd.py cmd <type> '<payload-json>'  # send by type + payload
 python3 reaperd.py fxload "<plugin query>" <track|master>
 python3 reaperd.py setparam <track> "<fx>" "<param>" "<display value>"
 python3 reaperd.py eq <track> "<fx>" <band> <freqHz> <gaindB> [Q]
+python3 reaperd.py measure <track> [--seconds N] [--start S] [--json]
 python3 reaperd.py groove <beat.dsl> --track Drums [--position SEC] [--map NAME]
 python3 reaperd.py jam                          # DSL drum beat from stdin -> selected track
 python3 reaperd.py list-maps                    # available drum-kit maps
@@ -138,6 +139,17 @@ python3 reaperd.py remove-map <name>
 installed name from the VST/CLAP/AU cache before loading. `setparam` works on
 any plugin by parameter index, binary-searching the normalized value that
 produces a target display value, then verifying.
+
+`measure` captures one track once (behind the same `allow_risk_level_3` gate
+as `capture_track_audio`) and prints measured audio metrics: LUFS-I always,
+plus — when [Post Mortem](https://github.com/wretcher207/post-mortem) is
+installed — sample peak, RMS, crest factor, 1/3-octave spectrum, stereo image,
+and a silence check. Bounds are resolved once (time selection start if active,
+else edit cursor; override with `--start`) and passed explicitly, so a second
+`measure` of the same spot is comparable. The output labels its
+`metrics_source` (`postmortem` or `render_stats`) and its capture scope —
+full-mix fallbacks are reported honestly, never presented as per-track
+evidence.
 
 ## MCP server — talk to REAPER in plain English
 
