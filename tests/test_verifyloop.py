@@ -81,18 +81,22 @@ def _context(cursor=3.5, ts=None):
 
 
 def _capture_responder(lufs=-14.1, raw="LUFSI:-14.10;TRUEPEAK:-3.20;LRA:4.50",
-                       scope="isolated_track", verified=True, stale_by=None,
+                       scope="isolated_track", verified=True,
+                       backdate_by=None, report_other_file=False,
                        bounds_override=None):
     """A scripted reply that mimics the real bridge: writes the WAV the
     payload asked for, echoes the rendered bounds, reports the path back.
-    stale_by backdates the WAV's mtime by that many seconds;
-    bounds_override fakes a bridge that rendered a different window."""
+    backdate_by backdates the reported WAV's mtime by that many seconds;
+    report_other_file reports a DIFFERENT path than requested (the replayed-
+    reply shape); bounds_override fakes a different rendered window."""
     def responder(command):
         payload = command["payload"]
         out = payload["output_file"]
+        if report_other_file:
+            out = out + "-other.wav"
         _write_wav(out)
-        if stale_by is not None:
-            old = time.time() - stale_by
+        if backdate_by is not None:
+            old = time.time() - backdate_by
             os.utime(out, (old, old))
         echoed = {"start_seconds": payload.get("start_seconds"),
                   "duration_seconds": payload.get("duration_seconds")}
@@ -317,12 +321,15 @@ def test_render_stats_mode_null_lufs_is_silent_not_a_pass(root, tmp_path):
 
 # --- freshness / staleness -------------------------------------------------
 
-@pytest.mark.parametrize("stale_by", [3600, 5])
-def test_stale_capture_file_rejected(root, tmp_path, stale_by):
-    # 5s: even a file written moments before the command must be rejected —
-    # there is NO slack window (Codex gate finding, 2026-07-23).
+@pytest.mark.parametrize("stale_by", [3600, 1])
+def test_stale_other_file_rejected(root, tmp_path, stale_by):
+    # A reply reporting a DIFFERENT path than requested (the replayed-reply
+    # shape) gets the strict mtime check: even 1 second pre-send must be
+    # rejected — there is NO slack window (Codex gate findings, 2026-07-23;
+    # the 1 s case exists so reintroducing the old 2 s slack fails the suite).
     fake_bridge_script(root, [PREFLIGHT_OK, _context(),
-                              _capture_responder(stale_by=stale_by)])
+                              _capture_responder(report_other_file=True,
+                                                 backdate_by=stale_by)])
     res = verifyloop.measure(_sender(root), "Bass",
                              output_dir=str(tmp_path / "wavs"),
                              _analyzer_loader=_no_analyzer)
@@ -330,12 +337,30 @@ def test_stale_capture_file_rejected(root, tmp_path, stale_by):
     assert res["error"]["code"] == "STALE_CAPTURE_FILE"
 
 
-def test_bounds_mismatch_rejected(root, tmp_path):
-    # A bridge that rendered a different window than requested must be
-    # refused: the audio is evidence for the wrong spot.
+def test_own_unique_path_accepted_despite_coarse_mtime(root, tmp_path):
+    # Coarse-timestamp filesystems can round mtime BELOW the send time for a
+    # genuinely fresh file. When the reply reports our own unique output path
+    # (proven non-existent before the send), the file is fresh by
+    # construction and a rounded-down mtime must NOT reject it.
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(),
+                              _capture_responder(backdate_by=1)])
+    res = verifyloop.measure(_sender(root), "Bass",
+                             output_dir=str(tmp_path / "wavs"),
+                             _analyzer_loader=_no_analyzer)
+    assert res["ok"] is True
+
+
+@pytest.mark.parametrize("override", [
+    {"start_seconds": 8.5},            # real mismatch
+    {"start_seconds": None},           # missing/null echo — cannot confirm
+    {"start_seconds": float("nan")},   # non-finite echo (arrives as NaN/null)
+    {"duration_seconds": "bogus"},     # non-numeric echo must not crash
+])
+def test_unconfirmed_or_mismatched_bounds_rejected(root, tmp_path, override):
+    # "Cannot confirm the rendered window" must never read as "verified" —
+    # missing, null, non-finite, and non-numeric echoes all fail closed.
     fake_bridge_script(root, [PREFLIGHT_OK, _context(cursor=3.5),
-                              _capture_responder(
-                                  bounds_override={"start_seconds": 8.5})])
+                              _capture_responder(bounds_override=override)])
     res = verifyloop.measure(_sender(root), "Bass",
                              output_dir=str(tmp_path / "wavs"),
                              _analyzer_loader=_no_analyzer)

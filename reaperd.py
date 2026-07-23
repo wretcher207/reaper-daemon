@@ -524,6 +524,10 @@ def cmd_measure(args):
         for b in res.get("blockers") or []:
             print(f"[measure]   blocker {b.get('code')}: {b.get('message')}",
                   file=sys.stderr)
+        kept = res.get("file_path") or res.get("output_file")
+        if kept and os.path.isfile(kept):
+            print(f"[measure]   capture WAV (kept for debugging): {kept}",
+                  file=sys.stderr)
     return 0 if res.get("ok") else 1
 
 

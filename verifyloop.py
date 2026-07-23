@@ -7,8 +7,9 @@ commands (capture_track_audio, get_capture_preflight, get_context) — the
 bridge itself needs no changes.
 
 Stdlib only, like the rest of this repo. Post Mortem's analysis module
-(numpy) is imported ONLY when installed; without it every capture still
-yields LUFS-I from REAPER's RENDER_STATS and the result is labeled
+(numpy) is imported ONLY when installed; without it a capture still yields
+LUFS-I whenever REAPER reports one (digital silence reads -inf, which the
+bridge maps to null — flagged silent here) and the result is labeled
 `metrics_source: "render_stats"` instead of `"postmortem"`. Deliberately
 does NOT import `postmortem.diagnose` (it pulls in the anthropic SDK at
 module top); the small RENDER_STATS string parser lives here instead.
@@ -215,8 +216,14 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
     if not bounds.get("ok"):
         return bounds
 
-    # 3. Capture.
+    # 3. Capture. The output path is unique per invocation; prove it does not
+    # exist BEFORE sending — then a file appearing at that exact path can only
+    # have been created after the command, which is the freshness guarantee
+    # (independent of filesystem mtime granularity).
     output_file = _capture_output_path(output_dir)
+    if os.path.exists(output_file):
+        return _error("OUTPUT_PATH_COLLISION",
+                      f"fresh capture path already exists: {output_file}")
     sent_at = time.time()
     res = sender("capture_track_audio", {
         "target_track_name": track,
@@ -240,24 +247,34 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
         return _error("CAPTURE_FILE_MISSING",
                       f"capture reported ok but no file at {file_path!r}")
     # The schema demands the client verify freshness: a stale or replayed
-    # reply pointing at an old WAV must never become evidence. Strict: the
-    # file must not predate the send at all (same machine, same clock; REAPER
-    # writes it strictly after the command was queued).
-    if os.path.getmtime(file_path) < sent_at:
+    # reply pointing at an old WAV must never become evidence. Two cases:
+    # - reply reports OUR unique output path: fresh by construction (it did
+    #   not exist before the send — proven above), no mtime guessing needed,
+    #   so coarse-timestamp filesystems cannot false-reject a good capture;
+    # - reply reports any OTHER path (REAPER renamed, or a replayed reply):
+    #   strict mtime — the file must not predate the send at all.
+    same_file = (os.path.normcase(os.path.abspath(file_path))
+                 == os.path.normcase(os.path.abspath(output_file)))
+    if not same_file and os.path.getmtime(file_path) < sent_at:
         return _error("STALE_CAPTURE_FILE",
                       f"{file_path} predates the capture command "
                       "(mtime older than send time); refusing to trust it",
                       file_path=file_path)
-    # Bounds honesty: the bridge echoes the window it actually rendered. If
-    # that differs from what we asked for, the audio is evidence for a
-    # different window — refuse rather than mislabel it.
+    # Bounds honesty: the bridge echoes the window it actually rendered. A
+    # missing, null, or non-numeric echo is treated exactly like a mismatch —
+    # fail closed; "cannot confirm the window" must never read as "verified".
     for key, requested in (("start_seconds", bounds["start_seconds"]),
                            ("duration_seconds", bounds["duration_seconds"])):
         echoed = data.get(key)
-        if echoed is not None and abs(float(echoed) - requested) > BOUNDS_ECHO_TOLERANCE:
+        try:
+            echoed_f = float(echoed)
+        except (TypeError, ValueError):
+            echoed_f = None
+        if (echoed_f is None or not math.isfinite(echoed_f)
+                or abs(echoed_f - requested) > BOUNDS_ECHO_TOLERANCE):
             return _error("BOUNDS_MISMATCH",
-                          f"bridge captured {key}={echoed} but {requested} was "
-                          "requested; the audio does not describe the "
+                          f"bridge echoed {key}={echoed!r} but {requested} was "
+                          "requested; cannot confirm the audio describes the "
                           "requested window", file_path=file_path)
 
     # 4. Metrics. LUFS-I and provenance always; Post Mortem analysis on top
