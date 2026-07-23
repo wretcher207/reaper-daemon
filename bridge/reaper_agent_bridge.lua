@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.11.3
+-- @version 3.12.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -13,6 +13,11 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.12.0: Closed-loop verify release. The bridge script itself is unchanged
+--   (the loop is a client-side sequencer of existing commands); the version
+--   moves in lockstep with the repo release that adds `reaperd.py measure` /
+--   `verify` (capture -> mutate -> capture with frozen bounds and measured
+--   deltas) and the MCP `verify_change` / `tune_param` tools.
 --   3.11.3: First-run captures temporarily enable REAPER 7.75+'s render-stats
 --   retention bit as well as auto-close, preventing a modal from blocking the
 --   bridge, then restore the user's exact render preference.
