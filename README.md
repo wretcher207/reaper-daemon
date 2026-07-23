@@ -132,12 +132,22 @@ python3 reaperd.py list-maps                    # available drum-kit maps
 python3 reaperd.py discover-map <track> [--save <name>]
 python3 reaperd.py add-map <name> --file <map.json>   # or --roles '{...}' / stdin
 python3 reaperd.py remove-map <name>
+python3 reaperd.py measure <track> [--seconds N] [--start S] [--json]
 ```
 
 `fxload` and `cmd add_fx` resolve a fuzzy plugin query to REAPER's exact
 installed name from the VST/CLAP/AU cache before loading. `setparam` works on
 any plugin by parameter index, binary-searching the normalized value that
 produces a target display value, then verifying.
+
+`measure` captures one track (needs `allow_risk_level_3: true`, same gate as
+render) and prints what it actually sounds like: LUFS-I always, plus RMS,
+sample peak, crest, 1/3-octave spectrum, and stereo image when
+[Post Mortem](https://github.com/wretcher207/post-mortem) is installed — the
+output labels which mode produced it (`metrics_source`). It refuses when the
+capture preflight blocks, flags mostly-silent captures instead of reporting
+numbers diluted by dead air, and reports the capture scope honestly (an
+unverified or full-mix capture is never presented as per-track evidence).
 
 ## MCP server — talk to REAPER in plain English
 
