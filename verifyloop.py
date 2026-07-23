@@ -297,18 +297,41 @@ UNVERIFIED_NOTE = ("The mutation is NOT rolled back — it is one Ctrl/Cmd+Z "
 MUTATION_TIMEOUT_MS = 30000
 
 
-def _delta_metrics(pre, post):
+def _capture_mismatch(pre, post):
+    """A reason the two captures' CONTENT metrics cannot be compared (format
+    drift, truncated render), or None. LUFS-I stays comparable — it describes
+    whatever actually rendered — but spectrum/RMS/stereo/silence compared
+    across different formats or lengths would be a quiet lie."""
+    pm, qm = pre.get("metrics", {}), post.get("metrics", {})
+    drifts = []
+    for key, tol in (("sample_rate", 0), ("channels", 0),
+                     ("duration_seconds", 0.1)):
+        a, b = pm.get(key), qm.get(key)
+        if a is not None and b is not None and abs(a - b) > tol:
+            drifts.append(f"{key} {a} -> {b}")
+    if drifts:
+        return ("pre and post captures are not directly comparable ("
+                + ", ".join(drifts) + "); content deltas (spectrum/RMS/stereo/"
+                "silence) are omitted, only LUFS-I is compared")
+    return None
+
+
+def _delta_metrics(pre, post, content_comparable=True):
     """Measured deltas between two measure() results. Only fields that are
     numeric on BOTH sides are compared — a metric that exists on one side only
     (e.g. Post Mortem analysis degraded once) is silently absent, never
-    guessed."""
+    guessed. content_comparable=False (format/length drift between the WAVs)
+    restricts the comparison to LUFS-I."""
     pm, qm = pre.get("metrics", {}), post.get("metrics", {})
     deltas = {}
-    for key in ("lufs_i", "sample_peak_db", "rms_db", "crest_factor_db",
-                "silence_fraction"):
+    content_keys = (("sample_peak_db", "rms_db", "crest_factor_db",
+                     "silence_fraction") if content_comparable else ())
+    for key in ("lufs_i",) + content_keys:
         a, b = pm.get(key), qm.get(key)
         if isinstance(a, (int, float)) and isinstance(b, (int, float)):
             deltas[key] = {"pre": a, "post": b, "delta": round(b - a, 2)}
+    if not content_comparable:
+        return deltas
     pa, qa = pm.get("stereo") or {}, qm.get("stereo") or {}
     stereo = {}
     for key in ("correlation", "side_rms_db", "mid_rms_db", "balance_db"):
@@ -351,14 +374,32 @@ def _scope_warnings(pre, post):
     return warnings
 
 
+# A mutation "failure" with one of these codes means NO REPLY was read — the
+# command was withdrawn from the inbox, but the bridge may have grabbed it
+# first (it moves inbox -> processing before executing) or replied just after
+# the deadline. The mutation state is UNKNOWN, never "not applied".
+UNKNOWN_MUTATION_CODES = ("TIMEOUT", "NO_REPLY", "BAD_REPLY")
+
+
 def verify(track, cmd_type, payload, seconds=None, start=None,
            bridge_root=None, keep_wav=False):
     """measure -> mutate -> measure with frozen bounds -> measured deltas.
 
     Returns a result whose exit_code field implements the contract above.
-    The mutation goes through the same send path as `reaperd.py cmd` (add_fx
-    name resolution and set_fx_param alias repair included).
+    mutation_applied is three-valued: True, False, or None (unknown — e.g. a
+    mutation timeout, or a batch that failed partway). The mutation goes
+    through the same send path as `reaperd.py cmd` (add_fx name resolution and
+    set_fx_param alias repair included).
     """
+    if not isinstance(payload, dict):
+        return {"ok": False, "verdict": "BAD_PAYLOAD",
+                "exit_code": EXIT_MUTATION_FAILED, "mutation_applied": False,
+                "error": {"code": "BAD_PAYLOAD",
+                          "details": f"mutation payload must be a JSON object, "
+                                     f"got {type(payload).__name__}"},
+                "message": "mutation payload must be a JSON object; nothing "
+                           "was captured or mutated."}
+
     pre = measure(track, seconds=seconds, start=start, bridge_root=bridge_root,
                   keep_wav=keep_wav)
     if not pre.get("ok"):
@@ -375,21 +416,55 @@ def verify(track, cmd_type, payload, seconds=None, start=None,
                            "anything; nothing was mutated. Park the capture "
                            "window where the track is playing, or use `cmd` "
                            "for an unverified change."}
+    if pre.get("silence_basis") is None:
+        return {"ok": False, "verdict": "PRE_MEASURE_UNMEASURABLE",
+                "exit_code": EXIT_MUTATION_FAILED, "mutation_applied": False,
+                "pre": pre,
+                "message": "pre-capture produced no assessable level metrics "
+                           "(no LUFS-I in RENDER_STATS and Post Mortem is not "
+                           "installed), so no delta could prove anything; "
+                           "nothing was mutated. Install Post Mortem, or use "
+                           "`cmd` for an unverified change."}
 
     mut = reaperd.send_type(cmd_type, dict(payload), bridge_root=bridge_root,
                             timeout_ms=MUTATION_TIMEOUT_MS)
     if not mut.get("ok"):
+        code = (mut.get("error") or {}).get("code")
+        if code in UNKNOWN_MUTATION_CODES:
+            return {"ok": False, "verdict": "MUTATION_UNKNOWN",
+                    "exit_code": EXIT_UNVERIFIED, "mutation_applied": None,
+                    "error": mut.get("error"), "pre": pre,
+                    "message": f"no reply for mutation {cmd_type} ({code}). "
+                               f"The command was withdrawn, but the bridge may "
+                               f"have grabbed it first and may still execute "
+                               f"it — the project state is UNKNOWN. Re-scan "
+                               f"(get_fx_parameters / get_context) before "
+                               f"deciding anything; do NOT blindly resend."}
+        if cmd_type == "batch":
+            return {"ok": False, "verdict": "MUTATION_FAILED",
+                    "exit_code": EXIT_UNVERIFIED, "mutation_applied": None,
+                    "error": mut.get("error"), "pre": pre,
+                    "message": "batch failed partway: any sub-commands that "
+                               "ran before the failure ARE applied (they share "
+                               "one undo point — Ctrl/Cmd+Z reverts them). No "
+                               "post-capture attempted."}
         return {"ok": False, "verdict": "MUTATION_FAILED",
                 "exit_code": EXIT_MUTATION_FAILED, "mutation_applied": False,
                 "error": mut.get("error"), "pre": pre,
                 "message": f"mutation {cmd_type} failed; no post-capture "
                            f"attempted, nothing to roll back."}
 
-    post = measure(track, bounds=pre["bounds"], bridge_root=bridge_root,
-                   keep_wav=keep_wav)
-    if not post.get("ok") or post.get("silent"):
+    try:
+        post = measure(track, bounds=pre["bounds"], bridge_root=bridge_root,
+                       keep_wav=keep_wav)
+    except Exception as e:  # measure() shouldn't raise; the mutation IS
+        post = _err("POST_MEASURE_CRASH",     # applied, so never exit 1 here.
+                    f"unexpected error during post-measure: {e!r}")
+    if not post.get("ok") or post.get("silent") \
+            or post.get("silence_basis") is None:
         why = ("post-capture failed" if not post.get("ok")
-               else "post-capture is silent")
+               else "post-capture is silent" if post.get("silent")
+               else "post-capture level could not be assessed")
         return {"ok": False, "verdict": "UNVERIFIED",
                 "exit_code": EXIT_UNVERIFIED, "mutation_applied": True,
                 "error": post.get("error"), "pre": pre, "post": post,
@@ -397,11 +472,23 @@ def verify(track, cmd_type, payload, seconds=None, start=None,
                            f"its effect is unproven. {UNVERIFIED_NOTE}"}
 
     warnings = _scope_warnings(pre, post)
+    mismatch = _capture_mismatch(pre, post)
+    if mismatch:
+        warnings.append(mismatch)
+    # Per-measure warnings (e.g. Post Mortem analysis degrading) must reach
+    # the report a reader actually sees, not just the nested pre/post dicts.
+    # Scope warnings are excluded: _scope_warnings already covers scope at
+    # the verify level.
+    for label, m in (("pre", pre), ("post", post)):
+        for w in m.get("warnings", []):
+            if not w.startswith("capture_scope is"):
+                warnings.append(f"{label}-measure: {w}")
     return {"ok": True, "verdict": "VERIFIED", "exit_code": EXIT_VERIFIED,
             "mutation_applied": True, "mutation": {"type": cmd_type,
                                                    "result": mut.get("data")},
             "pre": pre, "post": post, "bounds": pre["bounds"],
-            "deltas": _delta_metrics(pre, post), "warnings": warnings}
+            "deltas": _delta_metrics(pre, post, content_comparable=not mismatch),
+            "warnings": warnings}
 
 
 def _fmt_db(value, unit="dB"):
@@ -449,8 +536,11 @@ def format_verify(result):
     always states whether the project was mutated — that is the one thing a
     reader must never be wrong about."""
     verdict = result.get("verdict")
-    lines = [f"[verify] VERDICT: {verdict}  (mutation applied: "
-             f"{'yes' if result.get('mutation_applied') else 'NO'})"]
+    applied = result.get("mutation_applied")
+    applied_text = ("yes" if applied is True
+                    else "NO" if applied is False
+                    else "UNKNOWN")
+    lines = [f"[verify] VERDICT: {verdict}  (mutation applied: {applied_text})"]
     if result.get("message"):
         lines.append(f"[verify] {result['message']}")
     if result.get("error"):
@@ -464,11 +554,12 @@ def format_verify(result):
         d = deltas.get(key)
         if d:
             lines.append(f"[verify] {name}: {d['pre']:g} -> {d['post']:g}  "
-                         f"(delta {d['delta']:+g}{' ' + unit if unit else ''})")
+                         f"(delta {d['delta'] or 0:+g}"
+                         f"{' ' + unit if unit else ''})")
     stereo = deltas.get("stereo") or {}
     for key, d in stereo.items():
         lines.append(f"[verify] stereo {key}: {d['pre']:g} -> {d['post']:g}  "
-                     f"(delta {d['delta']:+g})")
+                     f"(delta {d['delta'] or 0:+g})")
     bands = deltas.get("spectrum_third_octave") or []
     moved = [b for b in bands if abs(b["delta"]) >= 1.0]
     if bands:

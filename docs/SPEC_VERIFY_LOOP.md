@@ -315,7 +315,47 @@ Protocol per phase:
 | Date | Phase | Commit | Status | Notes |
 |---|---|---|---|---|
 | 2026-07-23 | spec | — | Spec written, baseline verified (124 tests pass, main@8358a9a) | Authored by prior session; no code yet |
-| 2026-07-23 | 0 | (this commit) | DONE | See "Phase 0 findings" below. Environment: remote Linux session, not David's Windows machine. Branch is `claude/status-last-pushed-h4l7un` (session-mandated), not `feat/verify-loop` — same role, one PR at the end. Codex CLI unavailable here; per David, the per-phase gate is an independent adversarial review by fresh agent sessions hunting the template's seven failure categories (David can re-run real Codex on his machine before merge). |
+| 2026-07-23 | 0 | 2af3a92 | DONE | See "Phase 0 findings" below. Environment: remote Linux session, not David's Windows machine. Branch is `claude/status-last-pushed-h4l7un` (session-mandated), not `feat/verify-loop` — same role, one PR at the end (#25). Codex CLI unavailable here; per David, the per-phase gate is an independent adversarial review by fresh agent sessions hunting the template's seven failure categories (David can re-run real Codex on his machine before merge). |
+| 2026-07-23 | 1 | 0b3fba3 | DONE, gate pending | `measure` + `verifyloop.py` + scripted fake + 19 tests. Three independent reviewers dispatched (protocol/bounds, Windows/lifecycle, honesty lenses); findings pending. |
+| 2026-07-23 | 2 | c876f5d + fixes | DONE, gate round 1 FAILED → fixed | Two independent reviewers. Round 1: 1 BLOCKER + 4 MAJOR (2 shared), all confirmed real and fixed same day (see "Phase 2 gate round 1" below). Re-review scoped to the fixes pending. |
+
+### Phase 2 gate round 1 (2026-07-23, reviewed c876f5d)
+
+Findings and resolutions — reviewers: 2 independent agents, lenses per the
+review template. **BLOCKER/MAJOR: 5 (1 shared pair collapsed), all fixed.**
+
+- **B1 (BLOCKER)** Mutation TIMEOUT reported as definite `mutation_applied:
+  false` / "nothing to roll back", but the bridge moves inbox→processing
+  before executing, so a timed-out command may still run. FIX: TIMEOUT /
+  NO_REPLY / BAD_REPLY → verdict `MUTATION_UNKNOWN`, `mutation_applied: null`,
+  exit 2, message says re-scan before deciding and never blindly resend.
+- **M1 (MAJOR)** `batch` partial execution reported as "nothing to roll
+  back" (stop_on_error leaves sub-commands 1..k-1 applied). FIX: failed batch
+  → `mutation_applied: null`, exit 2, message states applied sub-commands
+  share one undo point.
+- **M2 (MAJOR)** argparse usage errors exit 2 = the UNVERIFIED verdict. FIX:
+  verify usage errors remap to 64 (EX_USAGE).
+- **M3 (MAJOR, found independently by both)** Unassessable silence (no
+  LUFS-I, no Post Mortem) still produced VERIFIED exit 0 with empty deltas.
+  FIX: verdict-grade rule — pre-capture without an assessable level basis
+  refuses (`PRE_MEASURE_UNMEASURABLE`, exit 1, nothing mutated); post-capture
+  without one is UNVERIFIED exit 2. VERIFIED now always carries ≥1 delta.
+- **M4 (MAJOR, found independently by both)** The argv `--` split applied to
+  every subcommand, silently discarding tails (`fxload ReaEQ -- Bass` added
+  the FX to the MASTER bus). FIX: split only when the subcommand is `verify`;
+  everything else keeps argparse's native `--`.
+
+MINOR fixes: non-dict payload refused before the pre-render (`BAD_PAYLOAD`);
+per-measure warnings bubble into the verify report; pre/post format drift
+(sample_rate/channels/duration) restricts deltas to LUFS-I with a warning;
+dead double-strip removed; README/tests payloads carry an explicit track
+selector (the real bridge has no selected-track fallback); `-0` delta display
+normalized. MINOR accepted with justification: WAVs kept on failure/silence
+accumulate in `<tmp>/reaper-verify` unbounded (deliberate — they are debug
+evidence; OS temp cleaning reaps them); a reply arriving after the capture
+deadline leaves an unread outbox file (pre-existing send_command semantics,
+not Phase 2 scope); the ≥1 dB spectrum display filter operates on deltas
+rounded to source precision (0.1 dB).
 
 ### Phase 0 findings (2026-07-23)
 

@@ -865,8 +865,6 @@ def cmd_measure(args):
 def cmd_verify(args):
     import verifyloop  # lazy: verifyloop imports reaperd for transport
     mutation = list(args.mutation)
-    if mutation and mutation[0] == "--":
-        mutation = mutation[1:]
     if len(mutation) != 2:
         print("error: verify needs a mutation after '--': "
               "verify <track> [options] -- <type> '<payload-json>'",
@@ -1202,15 +1200,43 @@ def build_parser():
     return p
 
 
+def _subcommand(argv):
+    """First positional token = the subcommand, skipping --bridge-root and its
+    value. Used to scope the verify-only '--' split below; every other
+    subcommand keeps argparse's native '--' behavior (e.g. `fxload ReaEQ --
+    Bass` must still parse Bass as the track, not drop it)."""
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--bridge-root":
+            i += 2
+            continue
+        if tok == "--":
+            return None
+        if not tok.startswith("-"):
+            return tok
+        i += 1
+    return None
+
+
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
     argv = list(argv)
     mutation = []
-    if "--" in argv:
+    is_verify = _subcommand(argv) == "verify"
+    if is_verify and "--" in argv:
         split = argv.index("--")
         argv, mutation = argv[:split], argv[split + 1:]
-    args = build_parser().parse_args(argv)
+    try:
+        args = build_parser().parse_args(argv)
+    except SystemExit as e:
+        # argparse exits 2 on usage errors, but verify's contract defines
+        # exit 2 as UNVERIFIED ("the mutation IS applied"). A typo'd flag must
+        # never read as an applied mutation: remap to 64 (EX_USAGE).
+        if is_verify and e.code == 2:
+            raise SystemExit(64)
+        raise
     if getattr(args, "bridge_root", None):
         args.bridge_root = os.path.abspath(os.path.expanduser(args.bridge_root))
     if hasattr(args, "mutation"):

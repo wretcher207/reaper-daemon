@@ -159,7 +159,7 @@ difference:
 ```bash
 # cut 2.5 dB at 320 Hz on the bass, and prove what it did:
 python3 reaperd.py verify Bass -- set_fx_param \
-  '{"fx_name_contains":"ReaEQ","param_name_contains":"Gain","formatted_value":"-2.5 dB"}'
+  '{"target_track_name":"Bass","fx_name_contains":"ReaEQ","param_name_contains":"Gain","formatted_value":"-2.5 dB"}'
 
 # [verify] VERDICT: VERIFIED  (mutation applied: yes)
 # [verify] LUFS-I: -14.1 -> -14.9  (delta -0.8 LUFS)

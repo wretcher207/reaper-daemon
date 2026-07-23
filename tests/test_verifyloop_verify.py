@@ -22,6 +22,13 @@ from test_verifyloop import (  # noqa: E402
     write_wav, preflight_ok, context_reply, capture_reply, no_postmortem)
 
 
+# Realistic mutation payload: the real bridge has NO implicit selected-track
+# fallback, so a set_fx_param without an explicit track selector would be
+# rejected NO_TARGET_TRACK — tests must not normalize an unusable shape.
+MUT_PAYLOAD = {"target_track_name": "Bass", "param_index": 1,
+               "normalized_value": 0.4}
+
+
 def set_param_ok():
     return {"ok": True, "type": "set_fx_param",
             "data": {"normalized_value": 0.42, "formatted_value": "-3.00 dB"}}
@@ -40,7 +47,7 @@ def test_verified_happy_path(root, tmp_path, monkeypatch):
         preflight_ok(), capture_reply(wav2, lufs=-14.9),
     ], record=record)
     result = verifyloop.verify("Bass", "set_fx_param",
-                               {"param_index": 3, "normalized_value": 0.4},
+                               MUT_PAYLOAD,
                                start=0.0, bridge_root=root)
     assert result["verdict"] == "VERIFIED"
     assert result["exit_code"] == 0
@@ -61,7 +68,7 @@ def test_pre_measure_blocked_mutates_nothing(root):
             "risk_gate": {"allow_risk_level_3": False,
                           "requires_restart_to_change": True}}},
     ], record=record)
-    result = verifyloop.verify("Bass", "set_fx_param", {"param_index": 1},
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
                                start=0.0, bridge_root=root)
     assert result["verdict"] == "PRE_MEASURE_BLOCKED"
     assert result["exit_code"] == 1
@@ -76,7 +83,7 @@ def test_pre_measure_silent_mutates_nothing(root, tmp_path, monkeypatch):
     record = []
     fake_bridge_script(root, [preflight_ok(), capture_reply(wav, lufs=-80.0)],
                        record=record)
-    result = verifyloop.verify("Bass", "set_fx_param", {"param_index": 1},
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
                                start=0.0, bridge_root=root)
     assert result["verdict"] == "PRE_MEASURE_SILENT"
     assert result["exit_code"] == 1
@@ -94,7 +101,7 @@ def test_mutation_failed_no_post_capture(root, tmp_path, monkeypatch):
         preflight_ok(), capture_reply(wav),
         {"ok": False, "error": {"code": "NO_FX", "details": "no such fx"}},
     ], record=record)
-    result = verifyloop.verify("Bass", "set_fx_param", {"param_index": 1},
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
                                start=0.0, bridge_root=root)
     assert result["verdict"] == "MUTATION_FAILED"
     assert result["exit_code"] == 1
@@ -114,7 +121,7 @@ def test_post_capture_failure_is_unverified_not_rolled_back(root, tmp_path,
         preflight_ok(),
         {"ok": False, "error": {"code": "CAPTURE_FAILED", "details": "boom"}},
     ])
-    result = verifyloop.verify("Bass", "set_fx_param", {"param_index": 1},
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
                                start=0.0, bridge_root=root)
     assert result["verdict"] == "UNVERIFIED"
     assert result["exit_code"] == 2
@@ -132,7 +139,7 @@ def test_post_capture_silent_is_unverified(root, tmp_path, monkeypatch):
         set_param_ok(),
         preflight_ok(), capture_reply(wav2, lufs=-90.0),
     ])
-    result = verifyloop.verify("Bass", "set_fx_param", {"param_index": 1},
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
                                start=0.0, bridge_root=root)
     assert result["verdict"] == "UNVERIFIED"
     assert result["exit_code"] == 2
@@ -152,7 +159,7 @@ def test_pre_and_post_bounds_sent_byte_identical(root, tmp_path, monkeypatch):
         set_param_ok(),
         preflight_ok(), capture_reply(wav2),
     ], record=record)
-    result = verifyloop.verify("Bass", "set_fx_param", {"param_index": 1},
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
                                bridge_root=root)
     assert result["verdict"] == "VERIFIED"
     captures = [c for c in record if c["type"] == "capture_track_audio"]
@@ -177,7 +184,7 @@ def test_scope_change_between_measures_warns(root, tmp_path, monkeypatch):
         set_param_ok(),
         preflight_ok(), capture_reply(wav2, scope="full_mix", verified=False),
     ])
-    result = verifyloop.verify("Bass", "set_fx_param", {"param_index": 1},
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
                                start=0.0, bridge_root=root)
     assert result["verdict"] == "VERIFIED"
     assert any("CHANGED" in w for w in result["warnings"])
@@ -192,7 +199,7 @@ def test_unisolated_but_stable_scope_warns_of_scope(root, tmp_path, monkeypatch)
         set_param_ok(),
         preflight_ok(), capture_reply(wav2, scope="full_mix", verified=False),
     ])
-    result = verifyloop.verify("Bass", "set_fx_param", {"param_index": 1},
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
                                start=0.0, bridge_root=root)
     assert any("full_mix" in w and "not necessarily this track alone" in w
                for w in result["warnings"])
@@ -292,7 +299,159 @@ def test_cmd_verify_exit_code_passthrough(root, tmp_path, monkeypatch, capsys):
     # Options after the track name must survive the `--` split in main().
     rc = reaperd.main(["--bridge-root", root, "verify", "Bass",
                        "--start", "0", "--json",
-                       "--", "set_fx_param", '{"param_index": 1}'])
+                       "--", "set_fx_param", json.dumps(MUT_PAYLOAD)])
     assert rc == 1
     out = json.loads(capsys.readouterr().out)
     assert out["verdict"] == "MUTATION_FAILED"
+
+
+# --- gate findings: mutation-state honesty ----------------------------------
+
+def test_bad_payload_refused_before_any_capture(root):
+    record = []
+    fake_bridge_script(root, [], record=record)
+    result = verifyloop.verify("Bass", "set_fx_param", [1, 2, 3],
+                               start=0.0, bridge_root=root)
+    assert result["verdict"] == "BAD_PAYLOAD"
+    assert result["exit_code"] == 1
+    assert result["mutation_applied"] is False
+    time.sleep(0.1)
+    assert record == []  # not even a preflight was sent
+
+
+def test_unmeasurable_pre_refuses_verdict(root, tmp_path, monkeypatch):
+    # RENDER_STATS gave no LUFS and Post Mortem is absent: silence cannot be
+    # assessed, so no verdict may be grounded — and nothing may be mutated.
+    no_postmortem(monkeypatch)
+    wav = write_wav(str(tmp_path / "pre.wav"))
+    record = []
+    fake_bridge_script(root, [preflight_ok(), capture_reply(wav, lufs=None)],
+                       record=record)
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
+                               start=0.0, bridge_root=root)
+    assert result["verdict"] == "PRE_MEASURE_UNMEASURABLE"
+    assert result["exit_code"] == 1
+    assert result["mutation_applied"] is False
+    time.sleep(0.1)
+    assert all(c["type"] != "set_fx_param" for c in record)
+
+
+def test_unmeasurable_post_is_unverified(root, tmp_path, monkeypatch):
+    no_postmortem(monkeypatch)
+    wav1 = write_wav(str(tmp_path / "pre.wav"))
+    wav2 = write_wav(str(tmp_path / "post.wav"))
+    fake_bridge_script(root, [
+        preflight_ok(), capture_reply(wav1, lufs=-14.0),
+        set_param_ok(),
+        preflight_ok(), capture_reply(wav2, lufs=None),
+    ])
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
+                               start=0.0, bridge_root=root)
+    assert result["verdict"] == "UNVERIFIED"
+    assert result["exit_code"] == 2
+    assert result["mutation_applied"] is True
+    assert "could not be assessed" in result["message"]
+
+
+def test_mutation_timeout_is_unknown_not_denied(root, tmp_path, monkeypatch):
+    # The bridge moves inbox -> processing before executing, so a timed-out
+    # mutation may still run: state is UNKNOWN, never "not applied".
+    no_postmortem(monkeypatch)
+    monkeypatch.setattr(verifyloop, "MUTATION_TIMEOUT_MS", 300)
+    wav = write_wav(str(tmp_path / "pre.wav"))
+    fake_bridge_script(root, [preflight_ok(), capture_reply(wav)])
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
+                               start=0.0, bridge_root=root)
+    assert result["verdict"] == "MUTATION_UNKNOWN"
+    assert result["exit_code"] == 2
+    assert result["mutation_applied"] is None
+    assert "do NOT blindly resend" in result["message"]
+    text = verifyloop.format_verify(result)
+    assert "mutation applied: UNKNOWN" in text
+
+
+def test_batch_failure_is_partial_not_nothing(root, tmp_path, monkeypatch):
+    no_postmortem(monkeypatch)
+    wav = write_wav(str(tmp_path / "pre.wav"))
+    fake_bridge_script(root, [
+        preflight_ok(), capture_reply(wav),
+        {"ok": False, "error": {"code": "NO_FX", "details": "cmd 3 of 5"}},
+    ])
+    result = verifyloop.verify("Bass", "batch",
+                               {"commands": [], "stop_on_error": True},
+                               start=0.0, bridge_root=root)
+    assert result["verdict"] == "MUTATION_FAILED"
+    assert result["exit_code"] == 2  # the project may well be mutated
+    assert result["mutation_applied"] is None
+    assert "ARE applied" in result["message"]
+
+
+def test_verify_usage_error_never_exits_2(root):
+    with pytest.raises(SystemExit) as e:
+        reaperd.main(["--bridge-root", root, "verify", "Bass", "--secondz", "5",
+                      "--", "set_fx_param", "{}"])
+    assert e.value.code == 64  # EX_USAGE, never the UNVERIFIED verdict
+
+
+def test_dashdash_stays_native_for_other_subcommands(root):
+    from bridge_fakes import fake_bridge
+    fake_bridge(root, {"ok": True, "type": "get_context", "data": {}})
+    # Standard argparse idiom: `--` ends option parsing. Before the fix the
+    # global split discarded the tail and cmd exited 2 on missing arguments.
+    rc = reaperd.main(["--bridge-root", root, "cmd", "--", "get_context", "{}"])
+    assert rc == 0
+
+
+# --- gate findings: comparability and warning bubbling -----------------------
+
+def test_capture_mismatch_restricts_deltas_to_lufs():
+    pre = canned()
+    post = canned(lufs=-15.0)
+    pre["metrics"].update({"duration_seconds": 10.0, "sample_rate": 48000,
+                           "channels": 2})
+    post["metrics"].update({"duration_seconds": 4.2, "sample_rate": 48000,
+                            "channels": 2})
+    mismatch = verifyloop._capture_mismatch(pre, post)
+    assert mismatch and "duration_seconds" in mismatch
+    deltas = verifyloop._delta_metrics(pre, post, content_comparable=False)
+    assert "lufs_i" in deltas
+    assert "rms_db" not in deltas and "spectrum_third_octave" not in deltas
+
+
+def test_degraded_analysis_warnings_bubble_to_verify_report(root, tmp_path):
+    pytest.importorskip("postmortem")
+    bad1, bad2 = str(tmp_path / "b1.wav"), str(tmp_path / "b2.wav")
+    for p in (bad1, bad2):
+        with open(p, "wb") as f:
+            f.write(b"not a wav")
+    fake_bridge_script(root, [
+        preflight_ok(), capture_reply(bad1, lufs=-14.0),
+        set_param_ok(),
+        preflight_ok(), capture_reply(bad2, lufs=-14.6),
+    ])
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
+                               start=0.0, bridge_root=root)
+    assert result["verdict"] == "VERIFIED"  # LUFS basis still held
+    assert any(w.startswith("pre-measure: Post Mortem analysis failed")
+               for w in result["warnings"])
+    assert "WARNING" in verifyloop.format_verify(result)
+
+
+def test_verified_postmortem_end_to_end_spectrum_deltas(root, tmp_path):
+    pytest.importorskip("postmortem")
+    wav1 = write_wav(str(tmp_path / "pre.wav"), amp=0.5)
+    wav2 = write_wav(str(tmp_path / "post.wav"), amp=0.25)
+    fake_bridge_script(root, [
+        preflight_ok(), capture_reply(wav1, lufs=-14.0),
+        set_param_ok(),
+        preflight_ok(), capture_reply(wav2, lufs=-20.0),
+    ])
+    result = verifyloop.verify("Bass", "set_fx_param", MUT_PAYLOAD,
+                               start=0.0, bridge_root=root)
+    assert result["verdict"] == "VERIFIED"
+    assert result["deltas"]["lufs_i"]["delta"] == -6.0
+    # Halving amplitude: RMS drops ~6 dB, and the 440 Hz band moves with it.
+    assert abs(result["deltas"]["rms_db"]["delta"] + 6.0) < 0.5
+    moved = [b for b in result["deltas"]["spectrum_third_octave"]
+             if abs(b["delta"]) >= 1.0]
+    assert moved
