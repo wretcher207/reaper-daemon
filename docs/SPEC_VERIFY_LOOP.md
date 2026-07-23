@@ -315,3 +315,79 @@ Protocol per phase:
 | Date | Phase | Commit | Status | Notes |
 |---|---|---|---|---|
 | 2026-07-23 | spec | — | Spec written, baseline verified (124 tests pass, main@8358a9a) | Authored by prior session; no code yet |
+| 2026-07-23 | 0 | (this commit) | DONE | Recon complete. Details below. |
+
+### Phase 0 findings (2026-07-23)
+
+**Baseline re-check.** `main` moved from `8358a9a` to `24b39ab` — the diff is
+this spec document itself, nothing else. Working tree clean, in sync with
+origin. Branch `feat/verify-loop` created off `24b39ab`.
+
+**CI-parity suite (all green).**
+- `python -m pytest tests skills/drum-apparatus/tests -q` → 124 passed.
+- `python -m py_compile reaperd.py reaper_mcp.py setup/install.py` → OK.
+- Lua was NOT on PATH on this machine (CI installs it via gh-actions-lua).
+  Installed Lua 5.4.6 via `winget install DEVCOM.Lua` →
+  `%LOCALAPPDATA%\Programs\Lua\bin\lua.exe` (not on persistent PATH; invoke
+  with the full path or extend PATH per shell).
+  `lua bridge/test_bridge.lua` → OK (149 checks); `lua bridge/test_json.lua`
+  → 40 passed, 0 failed.
+
+**Post Mortem install.** `pip install --user -e ../post-mortem` succeeded;
+`postmortem --help` runs (on PATH) and
+`from postmortem.analysis import analyze_wav` imports.
+
+**Decision — rich metrics for a captured WAV: option (a), with a twist.**
+- `analyze_wav(path)` (`../post-mortem/postmortem/analysis.py:335`) returns a
+  `TrackStats` dataclass: `duration_seconds`, `sample_rate`, `channels`,
+  `sample_peak_db`, `rms_db`, `crest_factor_db`,
+  `spectrum_third_octave` (list of `{freq_hz, level_db}`, 31 bands 20 Hz–20 kHz),
+  `silence_fraction`, `stereo` (dict or None). Depends only on numpy.
+- The masking table (`masking_overlap`) is a separate PURE function taking
+  `{name: spectrum}` — it does NOT require the multi-track capture path. It is
+  cross-track by nature; single-track `verify` v1 has no masking deltas
+  (report says "not applicable: single track").
+- Twist: true peak / LRA / momentary-LUFS parsing lives in
+  `postmortem.diagnose.parse_render_stats`, but `postmortem.diagnose` imports
+  `anthropic` at module top — importing it would couple the verify loop to the
+  model-SDK dependency. So `verifyloop` imports ONLY `postmortem.analysis`
+  (numpy) and carries its own tiny stdlib RENDER_STATS parser (string split,
+  same key mappings: TRUEPEAK/TPEAK/TPK, LRA, LUFSI…). String parsing, not DSP.
+- Rejected (b): cross-repo CLI change is unnecessary given (a). Rejected (c):
+  double-couples capture bounds to cursor state — exactly the drift the spec
+  bans.
+
+**Open question 2 — `start_seconds` vs time selection.** Confirmed in
+`bridge/reaper_agent_bridge.lua` (`command_capture_track_audio`, lines
+2503–2515): when `payload.start_seconds` is present the time selection is
+NEVER read and `duration_seconds` is used exactly as passed (the
+`min(duration, ts_end - ts_start)` clamp only applies on the
+no-start_seconds path). Passing explicit `start_seconds` + `duration_seconds`
+fully freezes bounds; no guard against a user moving the time selection
+between pre and post is needed. Bounds still must be resolved ONCE by
+`measure` (via `get_selected_track`-style resolution or preflight) and
+passed explicitly to both captures.
+
+**Open question 3 — `band_db` metric.** Post Mortem's
+`spectrum_third_octave` `level_db` per band is the clean mapping. For a
+`band_hz: [lo, hi]` range: select the 1/3-octave bands whose center lies in
+the range and power-sum them (`10*log10(sum(10^(L/10)))`). That is arithmetic
+over already-computed band levels, not new DSP. Finalize in Phase 3.
+
+**Open question 4 — temp file convention.** `reaper_mcp.py`
+`tool_capture_track_audio` uses `tempfile.gettempdir()/reaper-mcp/`
+with `capture-<UTC stamp>.wav`. The verify loop follows suit:
+`tempfile.gettempdir()/reaper-verify/` + timestamped names, cleanup on
+success, keep on failure for debugging. Never inside the repo (OneDrive).
+
+**Other recon notes.**
+- `fake_bridge` (`tests/bridge_fakes.py`) answers exactly one command;
+  Phase 1 adds `fake_bridge_script(root, replies)` alongside it.
+- `send_type` returns `{"ok": False, "error": {...}}` on timeout/bad reply —
+  the verify loop can treat every bridge interaction uniformly.
+- Capture reply carries `render_stats_raw` (semicolon `KEY:value` string) —
+  the LUFS-I the bridge parses plus whatever else REAPER measured; our parser
+  reads true peak et al. from it without Post Mortem's diagnose module.
+- MCP `_capture_safety_error` refuses non-`isolated_track` /
+  unverified captures for *diagnosis*; `verify` mirrors the stance as scope
+  honesty (report, don't silently present full-mix deltas as per-track).
