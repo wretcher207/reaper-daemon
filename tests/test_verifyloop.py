@@ -506,17 +506,26 @@ def test_verify_pre_post_bounds_byte_identical(root, tmp_path):
     assert [c["type"] for c in record].count("get_context") == 1
 
 
-def test_verify_mutation_failed_stops_before_post_capture(root, tmp_path):
+@pytest.mark.parametrize("code", ["NO_TARGET_TRACK",     # resolution-stage
+                                  "SET_PARAM_FAILED"])   # mid-handler
+def test_verify_bridge_rejection_is_unverified_exit_2(root, tmp_path, code):
+    # A readable rejection code is NOT proof of a clean project: a handler
+    # that failed mid-edit leaves its partial change in one closed undo
+    # block, and that cannot be told apart from a clean resolution
+    # rejection from this side (nor across bridge versions). Exit 1's
+    # "nothing was changed" promise is reserved for pre-send refusals;
+    # every post-send rejection fails toward exit 2.
     record = []
     res = _run_verify(root, tmp_path, [
-        PREFLIGHT_OK, _context(), _capture_responder(), MUT_FAIL,
+        PREFLIGHT_OK, _context(), _capture_responder(),
+        {"ok": False, "error": {"code": code, "details": "rejected"}},
     ], record=record)
-    assert res["status"] == "MUTATION_FAILED"
-    assert res["exit_code"] == 1
+    assert res["status"] == "UNVERIFIED"
+    assert res["exit_code"] == 2
     assert res["post"] is None
-    # honest about the bridge's real semantics: a handler that failed
-    # mid-edit leaves the partial change in one closed undo block
+    assert res["mutation"]["rejection_code"] == code
     assert "rejected" in res["note"]
+    assert "Do not retry blindly" in res["note"]
     assert "Ctrl/Cmd+Z" in res["note"]
     assert [c["type"] for c in record].count("capture_track_audio") == 1
 
@@ -946,3 +955,236 @@ def test_parse_render_stats_first_spelling_wins_and_skips_junk():
 @pytest.mark.parametrize("raw", [None, "", "FILE:C:\\x.wav"])
 def test_parse_render_stats_empty(raw):
     assert verifyloop.parse_render_stats(raw) == {}
+
+
+# --- malformed reply data shapes (fail closed, never crash) ------------------
+
+def test_default_sender_timeout_constant_is_the_shared_contract():
+    # reaperd._bridge_sender and reaper_mcp._verify_sender default to this.
+    assert verifyloop.DEFAULT_SENDER_TIMEOUT_MS == 10000
+
+
+@pytest.mark.parametrize("bad_data", ["oops", [1, 2, 3]])
+def test_malformed_capture_data_is_error_not_crash(root, tmp_path, bad_data):
+    # A wrong-shaped capture `data` passes send_type (only the TOP-LEVEL
+    # reply must be a dict) — measure must return a structured error, never
+    # crash into a traceback (adversarial review P2, 2026-07-29).
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(),
+                              {"ok": True, "type": "capture_track_audio",
+                               "data": bad_data}])
+    res = verifyloop.measure(_sender(root), "Bass",
+                             output_dir=str(tmp_path / "wavs"),
+                             _analyzer_loader=_no_analyzer)
+    assert res["ok"] is False
+    assert res["error"]["code"] == "CAPTURE_FILE_MISSING"
+
+
+def test_malformed_preflight_data_is_error_not_crash(root):
+    fake_bridge_script(root, [{"ok": True, "type": "get_capture_preflight",
+                               "data": [1, 2]}])
+    res = verifyloop.measure(_sender(root), "Bass",
+                             _analyzer_loader=_no_analyzer)
+    assert res["ok"] is False
+    assert res["error"]["code"] == "CAPTURE_BLOCKED"
+
+
+@pytest.mark.parametrize("ts", [
+    {"active": True, "start": "x", "end": 14.0},
+    {"active": True, "start": 10.0, "end": "x"},
+])
+def test_non_numeric_time_selection_is_bounds_unresolved(root, ts):
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(ts=ts)])
+    res = verifyloop.measure(_sender(root), "Bass",
+                             _analyzer_loader=_no_analyzer)
+    assert res["ok"] is False
+    assert res["error"]["code"] == "BOUNDS_UNRESOLVED"
+    assert "non-numeric" in res["error"]["details"]
+
+
+def test_non_numeric_cursor_is_bounds_unresolved(root):
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(cursor="soon")])
+    res = verifyloop.measure(_sender(root), "Bass",
+                             _analyzer_loader=_no_analyzer)
+    assert res["ok"] is False
+    assert res["error"]["code"] == "BOUNDS_UNRESOLVED"
+
+
+def test_sub_second_time_selection_refused(root):
+    # The 1 s floor measure enforces on explicit seconds must not be
+    # silently bypassed by a stray tiny time selection (review P2).
+    fake_bridge_script(root, [
+        PREFLIGHT_OK,
+        _context(ts={"active": True, "start": 10.0, "end": 10.05}),
+    ])
+    res = verifyloop.measure(_sender(root), "Bass",
+                             _analyzer_loader=_no_analyzer)
+    assert res["ok"] is False
+    assert res["error"]["code"] == "BOUNDS_UNRESOLVED"
+    assert "shorter than the 1 s minimum" in res["error"]["details"]
+    assert "0.05" in res["error"]["details"]
+
+
+def test_vanished_capture_file_is_error_not_crash(root, tmp_path, monkeypatch):
+    # The reported file can vanish between the isfile check and the mtime
+    # stat (getmtime raises OSError) — must be the structured staleness
+    # refusal, not a traceback (review P2).
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(),
+                              _capture_responder(report_other_file=True)])
+
+    def raising_getmtime(path):
+        raise OSError("vanished between isfile and stat")
+    monkeypatch.setattr(verifyloop.os.path, "getmtime", raising_getmtime)
+    res = verifyloop.measure(_sender(root), "Bass",
+                             output_dir=str(tmp_path / "wavs"),
+                             _analyzer_loader=_no_analyzer)
+    assert res["ok"] is False
+    assert res["error"]["code"] == "STALE_CAPTURE_FILE"
+
+
+# --- bool-as-number rejection -------------------------------------------------
+
+def test_band_energy_db_rejects_bool_freq_and_level():
+    # bool is an int subclass: True must not read as a 1 Hz band center or
+    # a 1 dB level (review P3; matches compute_deltas' fin() convention).
+    assert verifyloop.band_energy_db(
+        [{"freq_hz": True, "level_db": -10.0}], [0, 2]) is None
+    assert verifyloop.band_energy_db(
+        [{"freq_hz": 100, "level_db": True}], [90, 130]) is None
+
+
+def test_tune_metric_rejects_bool_lufs():
+    assert verifyloop._tune_metric({"lufs_i": True},
+                                   {"metric": "lufs_i"}) is None
+
+
+# --- tune_param: scripted-sender unit tests -----------------------------------
+
+def _scan_data(fx_guid="{FX}"):
+    return {"track": {"guid": "{B}", "name": "Bass"},
+            "fx": {"guid": fx_guid, "index": 0, "scope": "track",
+                   "name": "EQ"},
+            "parameters": [{"index": 3, "name": "Gain",
+                            "normalized_value": 0.5,
+                            "formatted_value": "0.0 dB"}]}
+
+
+def _static_scanner(fx_guid="{FX}"):
+    def scanner(base):
+        return _scan_data(fx_guid), None
+    return scanner
+
+
+def _tune_sender(steps):
+    """A plain scripted sender: pops one step per call. A step is a reply
+    dict or a callable(cmd_type, payload) -> reply. Records every call on
+    .calls."""
+    calls = []
+
+    def sender(cmd_type, payload, timeout_ms=10000):
+        calls.append({"type": cmd_type, "payload": payload})
+        step = steps.pop(0)
+        if callable(step):
+            return step(cmd_type, payload)
+        return step
+    sender.calls = calls
+    return sender
+
+
+def _cap(lufs, track=None):
+    """Capture responder for the scripted sender; `track` overrides the
+    reply's track object (e.g. with a malformed non-dict shape)."""
+    resp = _capture_responder(lufs=lufs, raw=f"LUFSI:{lufs:.2f}")
+
+    def step(cmd_type, payload):
+        reply = resp({"payload": payload})
+        if track is not None:
+            reply["data"]["track"] = track
+        return reply
+    return step
+
+
+TUNE_SET_OK = {"ok": True, "type": "set_fx_param", "data": {"applied": True}}
+
+
+def _run_tune(sender, scanner, tmp_path, delta=-3.0):
+    return verifyloop.tune_param(
+        sender, scanner, "Bass", {"fx_name_contains": "EQ"},
+        {"param_index": 3}, {"metric": "lufs_i", "delta": delta},
+        output_dir=str(tmp_path / "wavs"), _analyzer_loader=_no_analyzer)
+
+
+def test_tune_malformed_capture_data_is_measure_failed_not_crash(tmp_path):
+    # A wrong-shaped iteration capture `data` AFTER a successful set must
+    # end as an honest MEASURE_FAILED with the read-back `final`, never a
+    # crash that hides the applied mutation (review P1/P2, 2026-07-29).
+    sender = _tune_sender([
+        PREFLIGHT_OK, _context(), _cap(-14.0),           # baseline
+        TUNE_SET_OK, PREFLIGHT_OK, {"ok": True, "data": "oops"},
+    ])
+    res = _run_tune(sender, _static_scanner(), tmp_path)
+    assert res["status"] == "MEASURE_FAILED"
+    assert res["final"]["read_back"] is True
+    assert res["iterations"][-1] == {"normalized": 0.0, "metric": None}
+
+
+def test_tune_malformed_capture_reply_runs_finish_and_discloses(tmp_path):
+    # A capture reply whose track field is a bare string crashes past
+    # measure's own guards mid-iteration; the tune-wide guard must route it
+    # through finish() — restore policy evaluated, `final` read back, and
+    # the applied mutation DISCLOSED — instead of the P1 crash escape that
+    # produced no status, no restore, and no read-back (review, 2026-07-29).
+    sender = _tune_sender([
+        PREFLIGHT_OK, _context(), _cap(-14.0),           # baseline
+        TUNE_SET_OK, PREFLIGHT_OK,
+        _cap(-20.0, track="not-an-object"),              # malformed mid-run
+    ])
+    res = _run_tune(sender, _static_scanner(), tmp_path)
+    assert res["status"] == "INTERNAL_ERROR"
+    assert "AttributeError" in res["note"]
+    assert "NOT rolled back" in res["note"]
+    assert "0.0000" in res["note"]        # the applied value is disclosed
+    assert res["iterations_used"] == 1
+    assert res["final"]["read_back"] is True
+
+
+def test_tune_finish_restore_skipped_when_identity_changed(tmp_path):
+    # An FX-chain edit between the last iteration and finish(): the restore
+    # set must be SKIPPED with the IDENTITY_CHANGED note appended, not
+    # written to the retargeted FX (review P2).
+    scan_calls = {"n": 0}
+
+    def scanner(base):
+        scan_calls["n"] += 1
+        # calls 1-3: resolve + the two pre-set identity checks pass;
+        # afterwards (pre-restore check, read-back) the FX was swapped.
+        return _scan_data("{FX}" if scan_calls["n"] <= 3 else "{OTHER}"), None
+    sender = _tune_sender([
+        PREFLIGHT_OK, _context(), _cap(-14.0),           # baseline
+        TUNE_SET_OK, PREFLIGHT_OK, _cap(-20.0),          # probe brackets goal
+        TUNE_SET_OK, PREFLIGHT_OK, _cap(-10.0),          # midpoint escapes
+    ])
+    res = _run_tune(sender, scanner, tmp_path)
+    assert res["status"] == "NON_MONOTONE"
+    sets = [c for c in sender.calls if c["type"] == "set_fx_param"]
+    assert len(sets) == 2                 # no restore write went out
+    assert "SKIPPED (IDENTITY_CHANGED)" in res["note"]
+    assert "different plugin" in res["note"]
+    assert res["final"]["read_back"] is False
+
+
+def test_tune_unreachable_flat_note_reports_both_probes(tmp_path):
+    # First probe moves the metric AWAY, second boundary is flat: the note
+    # must report both probes, not claim the parameter "does not move the
+    # metric anywhere" while the iterations list shows a 5 dB move
+    # (review P3, 2026-07-29).
+    sender = _tune_sender([
+        PREFLIGHT_OK, _context(), _cap(-14.0),           # baseline
+        TUNE_SET_OK, PREFLIGHT_OK, _cap(-19.0),          # up probe: away
+        TUNE_SET_OK, PREFLIGHT_OK, _cap(-14.0),          # down probe: flat
+        TUNE_SET_OK,                                     # best-observed restore
+    ])
+    res = _run_tune(sender, _static_scanner(), tmp_path, delta=3.0)
+    assert res["status"] == "UNREACHABLE"
+    assert "up: -5.00" in res["note"]
+    assert "down: +0.00" in res["note"]
+    assert "anywhere in its range" not in res["note"]

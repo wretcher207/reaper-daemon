@@ -180,13 +180,16 @@ python3 reaperd.py verify Bass -- set_fx_param '{"target_track_name":"Bass","fx_
 
 It measures, mutates (same resolution/repair path as `cmd`), re-measures with
 byte-identical frozen bounds on the GUID-pinned track, and reports deltas.
-Exit codes: 0 VERIFIED; 1 mutation NOT applied (bridge rejected it, or the
-pre-capture refused); 2 UNVERIFIED — the project MAY have changed (applied,
-partially applied on a failed `batch`, or unknown after a transport timeout)
-but could not be measured. NOT rolled back; one Ctrl/Cmd+Z reverts it. Never
-retry blindly on exit 2 — the change may already be live. Report these
-outcomes to the user exactly; never claim an unverified change improved
-anything.
+Exit codes: 0 VERIFIED; 1 REFUSED, meaning the mutation was never sent (the
+pre-capture failed or was silent), so nothing was mutated; 2 UNVERIFIED,
+meaning the mutation WAS sent and the project MAY have changed (applied but
+unmeasured, partially applied on a failed `batch`, rejected by the bridge
+where a handler that failed mid-edit can leave a partial change inside one
+closed undo block, or unknown after a transport timeout). The JSON carries
+the rejection code when the bridge gave one. NOT rolled back; one Ctrl/Cmd+Z
+reverts it. Never retry blindly on exit 2: the change may already be live.
+Report these outcomes to the user exactly; never claim an unverified change
+improved anything.
 
 Honesty rules baked in: a silent capture (RMS <= -60 dBFS or >= 85% silence)
 is flagged `silent: true` — never build a verdict on it. If `capture_scope`

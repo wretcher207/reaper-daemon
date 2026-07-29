@@ -87,6 +87,11 @@ def _send(cmd_type, payload, timeout_ms=DEFAULT_TIMEOUT_MS, dry_run=False):
             cmd, wait=True, timeout_ms=timeout_ms, bridge_root=BRIDGE_ROOT)
     except TimeoutError as e:
         return {"ok": False, "error": {"code": "TIMEOUT", "details": str(e)}}
+    except reaperd.StaleReplyError as e:
+        # Same structured shape send_type gives the non-dry-run path: a
+        # locked stale reply is a fail-closed refusal, not a generic crash.
+        return {"ok": False, "error": {"code": "STALE_REPLY_LOCKED",
+                                       "details": str(e)}}
     if raw is None:
         return {"ok": False, "error": {"code": "NO_REPLY", "details": "no reply"}}
     try:
@@ -388,9 +393,11 @@ def tool_raw_command(args):
 
 # --- Closed-loop verify / tune ----------------------------------------------
 
-def _verify_sender(cmd_type, payload, timeout_ms=DEFAULT_TIMEOUT_MS):
+def _verify_sender(cmd_type, payload, timeout_ms=verifyloop.DEFAULT_SENDER_TIMEOUT_MS):
     """Read/capture transport for verifyloop: no name resolution, honors the
-    per-call timeout (captures pass their own long render timeout)."""
+    per-call timeout (captures pass their own long render timeout). The
+    default is the shared verifyloop constant so the CLI and MCP senders
+    cannot drift apart."""
     return reaperd.send_type(cmd_type, payload, bridge_root=BRIDGE_ROOT,
                              timeout_ms=timeout_ms, resolve=False, repair=False)
 
@@ -413,6 +420,13 @@ def _verify_result_text(res, error_statuses):
 
 
 def tool_verify_change(args):
+    if args.get("dry_run") is not None:
+        # Silently dropping this would invert the caller's intent: the tool
+        # has no dry_run and REALLY mutates (two renders plus an applied
+        # change). raw_command with dry_run:true is the preview path.
+        return _text("verify_change has no dry_run: it REALLY mutates the "
+                     "project. Use raw_command with dry_run:true to preview "
+                     "a command instead.", is_error=True)
     track = args.get("track")
     cmd_type = args.get("command_type")
     payload = args.get("payload")
@@ -425,16 +439,29 @@ def tool_verify_change(args):
     res = verifyloop.verify(_verify_sender, _verify_mutator, track, cmd_type,
                             payload, seconds=args.get("seconds"))
     # isError ONLY when provably nothing ran (REFUSED happens before the
-    # mutation). Every other status — including MUTATION_FAILED, whose
-    # rejected handler can still have made a partial mid-edit change — is a
-    # real outcome the model must read and relay, never auto-retry.
+    # mutation is sent). Every other outcome — including a bridge rejection,
+    # whose handler can still have made a partial mid-edit change — is
+    # UNVERIFIED: a real outcome the model must read and relay, never
+    # auto-retry.
     return _verify_result_text(res, ("REFUSED",))
 
 
 def tool_tune_param(args):
+    if args.get("dry_run") is not None:
+        # Same guard as verify_change: this tool applies up to 6 live
+        # parameter sets; a dropped dry_run would invert the caller's intent.
+        return _text("tune_param has no dry_run: it REALLY mutates the "
+                     "project. Use raw_command with dry_run:true to preview "
+                     "a command instead.", is_error=True)
     track = args.get("track")
     if not track or not isinstance(track, str):
         return _text("tune_param needs a 'track' name", is_error=True)
+    if (args.get("fx_name_contains") is not None
+            and args.get("fx_index") is not None):
+        # Every iteration is a real mutation: ambiguous targeting fails
+        # closed instead of letting the bridge pick a precedence silently.
+        return _text("tune_param needs ONE FX selector: fx_name_contains or "
+                     "fx_index, not both", is_error=True)
     fx_selector = {}
     if args.get("fx_name_contains") is not None:
         fx_selector["fx_name_contains"] = args["fx_name_contains"]
@@ -444,6 +471,10 @@ def tool_tune_param(args):
     if not fx_selector:
         return _text("tune_param needs fx_name_contains or fx_index",
                      is_error=True)
+    if (args.get("param_index") is not None
+            and args.get("param_name_contains") is not None):
+        return _text("tune_param needs ONE parameter selector: param_index "
+                     "or param_name_contains, not both", is_error=True)
     param_selector = {}
     if args.get("param_index") is not None:
         param_selector["param_index"] = args["param_index"]
@@ -1001,14 +1032,13 @@ TOOLS = [
                         "(delete_track, delete_items_in_range, remove_fx). "
                         "Costs TWO renders; each blocks REAPER's UI for the "
                         "capture duration. Statuses: VERIFIED (deltas are "
-                        "real measurements); REFUSED (refused before "
-                        "mutating, nothing ran); MUTATION_FAILED (the bridge "
-                        "rejected the command — but a handler that failed "
-                        "mid-edit can leave a partial change in one undo "
-                        "block, so read the note); UNVERIFIED (the project "
-                        "MAY have changed — applied, partial batch, or "
-                        "unknown outcome — but could not be measured; NOT "
-                        "rolled back; do NOT retry blindly). Relay the "
+                        "real measurements); REFUSED (refused before the "
+                        "mutation was sent, no mutation ran); UNVERIFIED "
+                        "(the project MAY have changed: applied, partial "
+                        "batch, rejected by the bridge with a possible "
+                        "mid-edit partial change, or unknown outcome; not "
+                        "measured either way; NOT rolled back; do NOT retry "
+                        "blindly). Relay the "
                         "status honestly; never present UNVERIFIED as "
                         "success. Needs allow_risk_level_3 (see "
                         "capture_track_audio)."),

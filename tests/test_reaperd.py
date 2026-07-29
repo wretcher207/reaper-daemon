@@ -476,3 +476,84 @@ def test_startup_block_watchdog_understands_json_locks():
     assert "RENDER_LOCK_MAX_AGE = 6 * 3600" in block
     assert "reaper.defer(watchdog)" in block
     assert "os.remove(lockfile)" not in block
+
+
+# --- verify/measure --json honesty on non-finite floats ---------------------
+
+def _verify_args(root, payload):
+    return reaperd.build_parser().parse_args(
+        ["--bridge-root", root, "verify", "Bass", "--json", "--",
+         "set_track_volume", payload])
+
+
+def test_verify_json_survives_nan_result_and_keeps_exit_code(
+    root, monkeypatch, capsys
+):
+    # A NaN embedded in the result (e.g. copied verbatim from a bridge
+    # reply) used to crash the --json dump into a traceback and exit 1
+    # ("not applied") after the mutation may have run.
+    import verifyloop
+    res = {"status": "UNVERIFIED", "exit_code": 2,
+           "post": {"metrics": {"lufs_i": float("nan")}}}
+    monkeypatch.setattr(verifyloop, "verify", lambda *a, **k: res)
+    rc = reaperd.cmd_verify(_verify_args(root, '{"volume_db":-3.0}'))
+    out = capsys.readouterr().out
+    assert "NaN" not in out
+    assert json.loads(out)["post"]["metrics"]["lufs_i"] is None
+    assert rc == 2
+
+
+def test_verify_missing_exit_code_fails_toward_unverified(
+    root, monkeypatch, capsys
+):
+    # No exit_code in the result: by then the mutation may have run, so the
+    # fallback must be 2 (unverified), never 1 (not applied).
+    import verifyloop
+    monkeypatch.setattr(verifyloop, "verify",
+                        lambda *a, **k: {"status": "VERIFIED"})
+    assert reaperd.cmd_verify(_verify_args(root, '{"volume_db":-3.0}')) == 2
+
+
+def test_verify_rejects_nonfinite_payload_before_any_mutation(
+    root, monkeypatch, capsys
+):
+    import verifyloop
+
+    def boom(*a, **k):
+        raise AssertionError("verify must not run on a non-finite payload")
+
+    monkeypatch.setattr(verifyloop, "verify", boom)
+    rc = reaperd.cmd_verify(_verify_args(root, '{"volume_db":NaN}'))
+    assert rc == 1
+    assert "non-finite" in capsys.readouterr().err
+
+
+def test_measure_json_survives_nonfinite_metric(root, monkeypatch, capsys):
+    import verifyloop
+    monkeypatch.setattr(
+        verifyloop, "measure",
+        lambda *a, **k: {"ok": True, "metrics": {"rms_db": float("inf")}})
+    args = argparse.Namespace(track="Bass", seconds=None, start=None,
+                              keep_wav=False, json=True, bridge_root=root)
+    rc = reaperd.cmd_measure(args)
+    out = capsys.readouterr().out
+    assert "Infinity" not in out
+    assert json.loads(out)["metrics"]["rms_db"] is None
+    assert rc == 0
+
+
+def test_bridge_sender_default_timeout_is_the_shared_constant(
+    root, monkeypatch
+):
+    # CLI and MCP senders must not drift (10 s vs 15 s gave two verdicts for
+    # one project state on a slow REAPER).
+    import verifyloop
+    seen = {}
+
+    def fake(cmd_type, payload, **kw):
+        seen.update(kw)
+        return {"ok": True}
+
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    reaperd._bridge_sender(root)("get_context", {})
+    assert seen["timeout_ms"] == verifyloop.DEFAULT_SENDER_TIMEOUT_MS == 10000

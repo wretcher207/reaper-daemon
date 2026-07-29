@@ -516,7 +516,9 @@ def status_ok(bridge_root=None, quiet=False):
 def _bridge_sender(bridge_root):
     """A verifyloop-shaped sender bound to one bridge root. Keeps all
     transport (atomic writes, auth token, timeout handling) in send_type."""
-    def sender(cmd_type, payload, timeout_ms=10000):
+    import verifyloop  # callers (cmd_measure/cmd_verify) already import it
+
+    def sender(cmd_type, payload, timeout_ms=verifyloop.DEFAULT_SENDER_TIMEOUT_MS):
         return send_type(cmd_type, payload, bridge_root=bridge_root,
                          timeout_ms=timeout_ms, resolve=False, repair=False)
     return sender
@@ -531,7 +533,14 @@ def cmd_measure(args):
     if args.json:
         # allow_nan=False: emitting bare NaN would be invalid JSON for the
         # MCP path; verifyloop sanitizes non-finite values, this enforces it.
-        print(json.dumps(res, separators=(",", ":"), allow_nan=False))
+        try:
+            print(json.dumps(res, separators=(",", ":"), allow_nan=False))
+        except ValueError:
+            # Same fallback the MCP result path uses: a non-finite float
+            # that slipped through (e.g. copied verbatim from a bridge
+            # reply) must not turn --json mode into a traceback.
+            print(json.dumps(verifyloop._sanitize_nonfinite(res),
+                             separators=(",", ":"), allow_nan=False))
     elif res.get("ok"):
         print(verifyloop.format_measure(res))
     else:
@@ -619,8 +628,16 @@ def cmd_verify(args):
     if parse_error:
         print(f"error: {parse_error}", file=sys.stderr)
         return 1
+
+    def _reject_nonfinite(text):
+        # json.loads happily parses NaN/Infinity, but the result could never
+        # be re-emitted as valid JSON and NaN poisons every threshold
+        # comparison downstream. Refusing here is honest: nothing has run yet.
+        raise ValueError(f"non-finite constant {text} is not allowed in the "
+                         "payload (NaN/Infinity cannot round-trip as JSON)")
+
     try:
-        payload = json.loads(payload_text)
+        payload = json.loads(payload_text, parse_constant=_reject_nonfinite)
     except Exception as e:
         print(f"error: payload is not valid JSON: {e}", file=sys.stderr)
         return 1
@@ -648,10 +665,19 @@ def cmd_verify(args):
         seconds=args.seconds, start_seconds=args.start,
         keep_wav=args.keep_wav, progress=progress)
     if args.json:
-        print(json.dumps(res, separators=(",", ":"), allow_nan=False))
+        try:
+            print(json.dumps(res, separators=(",", ":"), allow_nan=False))
+        except ValueError:
+            # A non-finite float in the result (embedded payload or bridge
+            # reply) must not crash --json into exit 1 ("not applied") after
+            # the mutation may already have run. Same guard as the MCP path.
+            print(json.dumps(verifyloop._sanitize_nonfinite(res),
+                             separators=(",", ":"), allow_nan=False))
     else:
         print(verifyloop.format_verify(res))
-    return res.get("exit_code", 1)
+    # Default 2, not 1: by this point the mutation may have run, so a result
+    # missing exit_code must fail toward "unverified", never "not applied".
+    return res.get("exit_code", 2)
 
 
 def cmd_fxload(args):
@@ -1296,11 +1322,12 @@ def build_parser():
         description="Capture the track, run the mutation, capture again with "
                     "the SAME bounds, and report measured deltas. Exit codes: "
                     "0 VERIFIED (clean comparable captures, deltas reported), "
-                    "1 mutation NOT applied (rejected, or refused before "
-                    "mutating), 2 UNVERIFIED (the project may have changed — "
-                    "applied, partial, or unknown — but it could not be "
-                    "measured; NOT rolled back, one Ctrl/Cmd+Z reverts it; "
-                    "do not retry blindly).")
+                    "1 REFUSED (the mutation was never sent: pre-capture "
+                    "failed or was silent, so nothing was mutated), "
+                    "2 UNVERIFIED (the mutation was sent but not verified: "
+                    "applied, partial, rejected by the bridge, or unknown; "
+                    "the project may have changed; NOT rolled back, one "
+                    "Ctrl/Cmd+Z reverts it; do not retry blindly).")
     s.add_argument("track", help="track name or 'master'")
     _add_verify_options(s)
     s.add_argument("mutation", nargs=argparse.REMAINDER,

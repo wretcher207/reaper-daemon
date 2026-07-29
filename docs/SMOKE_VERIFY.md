@@ -85,8 +85,9 @@ Pass looks like:
 
 - The model warns you it will take several renders (it should — the tool
   description tells it to).
-- Up to 5 quick renders, then a result with `"status": "CONVERGED"`, a final
-  parameter display value, and a measured delta within ±0.5 of −3.0.
+- A baseline render plus up to 5 more (6 total), then a result with
+  `"status": "CONVERGED"`, a final parameter display value, and a measured
+  delta within ±0.5 of −3.0.
 - `UNCONVERGED` with an honest "best value left applied" note also counts as
   the tool working — some parameters can't hit an exact target in 5 steps.
 

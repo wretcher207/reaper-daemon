@@ -749,7 +749,7 @@ def test_tune_param_set_failure_reads_back_final_state(root):
     assert resp["result"].get("isError") is not True
 
 
-def test_verify_change_mutation_failed_is_not_a_tool_error(root):
+def test_verify_change_bridge_rejection_is_not_a_tool_error(root):
     # A rejected handler can still leave a partial mid-edit change; marking
     # it isError invites a retry on top of it (Codex gate BLOCKER).
     def respond(cmd):
@@ -776,7 +776,12 @@ def test_verify_change_mutation_failed_is_not_a_tool_error(root):
         "payload": {"target_track_name": "Bass", "param_index": 99,
                     "normalized_value": 0.2}})
     body = json.loads(result_text(resp))
-    assert body["status"] == "MUTATION_FAILED"
+    # A post-send rejection is UNVERIFIED (the handler may have made a
+    # partial mid-edit change), and it is a real outcome the model must
+    # read and relay, never an isError the client would auto-retry.
+    assert body["status"] == "UNVERIFIED"
+    assert body["exit_code"] == 2
+    assert body["mutation"]["rejection_code"] == "NO_FX_PARAM"
     assert resp["result"].get("isError") is not True
 
 
@@ -797,6 +802,68 @@ def test_tune_param_refused_on_gated_capture(root):
     body = json.loads(result_text(resp))
     assert body["status"] == "REFUSED"
     assert "nothing was changed" in body["note"].lower()
+
+
+@pytest.mark.parametrize("tool", ["verify_change", "tune_param"])
+@pytest.mark.parametrize("flag", [True, False])
+def test_mutating_tools_reject_dry_run_outright(root, tool, flag):
+    # These tools have no dry_run; silently dropping it would hand a caller
+    # who asked for a preview a REAL mutation. Even dry_run=false is intent-
+    # bearing and must be refused before any bridge call.
+    resp = call(tool, {"track": "Bass", "dry_run": flag})
+    assert resp["result"]["isError"] is True
+    text = result_text(resp)
+    assert "dry_run" in text and "raw_command" in text
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_tune_param_rejects_conflicting_fx_selectors(root):
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "ReaEQ", "fx_index": 0,
+        "param_index": 3, "target": {"metric": "lufs_i", "delta": -3.0}})
+    assert resp["result"]["isError"] is True
+    assert "not both" in result_text(resp)
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_tune_param_rejects_conflicting_param_selectors(root):
+    resp = call("tune_param", {
+        "track": "Bass", "fx_name_contains": "ReaEQ",
+        "param_index": 3, "param_name_contains": "Gain",
+        "target": {"metric": "lufs_i", "delta": -3.0}})
+    assert resp["result"]["isError"] is True
+    text = result_text(resp)
+    assert "param_index" in text and "not both" in text
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_dry_run_stale_reply_lock_is_structured_not_a_crash(root, monkeypatch):
+    # The dry_run branch calls reaperd.send_command directly; StaleReplyError
+    # must map to the same STALE_REPLY_LOCKED shape send_type produces, not
+    # fall through to the dispatcher's generic "tool error".
+    def raise_stale(*a, **k):
+        raise reaper_mcp.reaperd.StaleReplyError("outbox reply locked")
+
+    monkeypatch.setattr(reaper_mcp.reaperd, "send_command", raise_stale)
+    resp = call("raw_command", {"type": "play", "dry_run": True})
+    assert resp["result"]["isError"] is True
+    body = json.loads(result_text(resp))
+    assert body["error"]["code"] == "STALE_REPLY_LOCKED"
+
+
+def test_verify_sender_default_timeout_is_the_shared_constant(root, monkeypatch):
+    # CLI and MCP senders must not drift (10 s vs 15 s gave two verdicts for
+    # one project state on a slow REAPER).
+    seen = {}
+
+    def fake(cmd_type, payload, **kw):
+        seen.update(kw)
+        return {"ok": True}
+
+    monkeypatch.setattr(reaper_mcp.reaperd, "send_type", fake)
+    reaper_mcp._verify_sender("get_context", {})
+    assert (seen["timeout_ms"]
+            == reaper_mcp.verifyloop.DEFAULT_SENDER_TIMEOUT_MS == 10000)
 
 
 # --- stdio subprocess smoke test ---------------------------------------------

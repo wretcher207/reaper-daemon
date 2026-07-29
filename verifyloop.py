@@ -30,6 +30,9 @@ from datetime import datetime, timezone
 DEFAULT_SECONDS = 10          # Post Mortem's own single-track default
 MAX_SECONDS = 60              # verify captures are short; 600s renders are not verify material
 CAPTURE_TIMEOUT_MS = 180000   # a capture blocks the bridge for the render duration
+# Default reply timeout for ordinary (non-capture) sends. Shared contract:
+# reaperd._bridge_sender and reaper_mcp._verify_sender default to this.
+DEFAULT_SENDER_TIMEOUT_MS = 10000
 
 # Silence guard thresholds, copied from reaper_mcp._run_postmortem /
 # postmortem.cli — a verdict on dead air would be accurate and useless.
@@ -107,6 +110,13 @@ def _error(code, details, **extra):
     return {"ok": False, "error": {"code": code, "details": details}, **extra}
 
 
+def _as_dict(value):
+    """value when it is a dict, else {}. Reply `data` and its sub-objects
+    are bridge-controlled: a wrong-shaped one must read as absent and fail
+    closed through the normal error paths, never crash into a traceback."""
+    return value if isinstance(value, dict) else {}
+
+
 def _sanitize_nonfinite(value):
     """Replace every non-finite float (NaN, +/-inf) with None, recursively.
     NaN poisons threshold comparisons (every one is False, so a NaN RMS would
@@ -135,20 +145,42 @@ def resolve_bounds(sender, seconds, start_seconds=None):
         return _error("BOUNDS_UNRESOLVED",
                       "get_context failed while resolving capture bounds: "
                       f"{ctx.get('error')}")
-    data = ctx.get("data") or {}
-    ts = data.get("time_selection") or {}
+    data = _as_dict(ctx.get("data"))
+    ts = _as_dict(data.get("time_selection"))
     if ts.get("active"):
-        length = float(ts.get("end", 0)) - float(ts.get("start", 0))
+        try:
+            start = float(ts.get("start", 0))
+            end = float(ts.get("end", 0))
+        except (TypeError, ValueError):
+            return _error("BOUNDS_UNRESOLVED",
+                          "active time selection has non-numeric bounds "
+                          f"(start={ts.get('start')!r}, "
+                          f"end={ts.get('end')!r})")
+        length = end - start
         if length <= 0:
             return _error("BOUNDS_UNRESOLVED",
                           "active time selection has non-positive length")
-        return {"ok": True, "start_seconds": float(ts.get("start", 0)),
+        if length < 1.0:
+            # The same 1 s floor measure enforces on explicit seconds: a
+            # stray tiny selection must not silently produce verdicts on
+            # windows the module's own validation deems too short.
+            return _error("BOUNDS_UNRESOLVED",
+                          f"active time selection is {length:g} s long, "
+                          "shorter than the 1 s minimum capture duration; "
+                          "move or clear the selection, or pass an explicit "
+                          "start")
+        return {"ok": True, "start_seconds": start,
                 "duration_seconds": min(float(seconds), length),
                 "bounds_source": "time_selection"}
-    cursor = (data.get("cursor") or {}).get("seconds")
+    cursor = _as_dict(data.get("cursor")).get("seconds")
     if cursor is None:
         return _error("BOUNDS_UNRESOLVED", "get_context reply has no cursor position")
-    return {"ok": True, "start_seconds": float(cursor),
+    try:
+        cursor = float(cursor)
+    except (TypeError, ValueError):
+        return _error("BOUNDS_UNRESOLVED",
+                      f"get_context cursor position is not a number ({cursor!r})")
+    return {"ok": True, "start_seconds": cursor,
             "duration_seconds": float(seconds), "bounds_source": "edit_cursor"}
 
 
@@ -204,7 +236,7 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
     if not pre.get("ok"):
         return _error("PREFLIGHT_FAILED",
                       f"get_capture_preflight failed: {pre.get('error')}")
-    pdata = pre.get("data") or {}
+    pdata = _as_dict(pre.get("data"))
     if not pdata.get("capture_allowed"):
         blockers = pdata.get("blockers") or []
         risk_gate = pdata.get("risk_gate") or {}
@@ -259,7 +291,7 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
                       output_file=output_file,
                       note="a partial capture WAV may exist at output_file; "
                            "it is kept for debugging")
-    data = res.get("data") or {}
+    data = _as_dict(res.get("data"))
     file_path = data.get("file_path")
     if not file_path or not os.path.isfile(file_path):
         return _error("CAPTURE_FILE_MISSING",
@@ -273,11 +305,21 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
     #   strict mtime — the file must not predate the send at all.
     same_file = (os.path.normcase(os.path.abspath(file_path))
                  == os.path.normcase(os.path.abspath(output_file)))
-    if not same_file and os.path.getmtime(file_path) < sent_at:
-        return _error("STALE_CAPTURE_FILE",
-                      f"{file_path} predates the capture command "
-                      "(mtime older than send time); refusing to trust it",
-                      file_path=file_path)
+    if not same_file:
+        try:
+            mtime = os.path.getmtime(file_path)
+        except OSError as e:
+            # The file vanished between the isfile check and the stat: its
+            # freshness can no longer be proven — same refusal as stale.
+            return _error("STALE_CAPTURE_FILE",
+                          f"{file_path} vanished before its freshness could "
+                          f"be checked ({e}); refusing to trust it",
+                          file_path=file_path)
+        if mtime < sent_at:
+            return _error("STALE_CAPTURE_FILE",
+                          f"{file_path} predates the capture command "
+                          "(mtime older than send time); refusing to trust it",
+                          file_path=file_path)
     # Bounds honesty: the bridge echoes the window it actually rendered. A
     # missing, null, or non-numeric echo is treated exactly like a mismatch —
     # fail closed; "cannot confirm the window" must never read as "verified".
@@ -511,12 +553,15 @@ def verify(sender, mutator, track, cmd_type, payload, seconds=None,
 
     Exit-code contract (agents branch on it):
     0 VERIFIED — clean, comparable pre/post captures, deltas reported.
-    1 mutation NOT applied — pre-measure refused, or the bridge rejected the
-      command. (A rejected single command that failed mid-edit can leave a
-      partial change inside one closed undo block; the note says so.)
-    2 UNVERIFIED — the project MAY have changed (mutation applied, partially
-      applied, or outcome unknown) but the change could not be measured.
-      Nothing is rolled back. Do not retry blindly on exit 2.
+    1 REFUSED — the mutation command was never sent (pre-measure failed,
+      silent pre-capture, or no pinnable GUID; only read/capture traffic
+      reached the bridge). Only here is "nothing was mutated" honest.
+    2 UNVERIFIED — the mutation was SENT and the outcome is not a verified
+      measurement: applied-but-unmeasured, partially applied, rejected by
+      the bridge (a handler that failed mid-edit can leave a partial change
+      inside one closed undo block, indistinguishable from a clean
+      resolution rejection from this side), or transport-unknown. Nothing
+      is rolled back. Do not retry blindly on exit 2.
     """
     def report(msg):
         if progress is not None:
@@ -642,13 +687,24 @@ def verify(sender, mutator, track, cmd_type, payload, seconds=None,
             # not a provable clean rejection — outcome unknown.
             return _uncertain(
                 code or f"wrong-shaped error field: {reply.get('error')!r}")
-        result["status"] = "MUTATION_FAILED"
-        result["exit_code"] = EXIT_MUTATION_FAILED
+        # A readable rejection code is still NOT proof of a clean project:
+        # resolution-stage rejections (NO_TARGET_TRACK, AMBIGUOUS_FX, ...)
+        # change nothing, but a handler that threw mid-edit leaves a partial
+        # change inside one closed undo block, and this side cannot tell the
+        # two apart without trusting a code audit of whatever bridge version
+        # happens to be installed. Exit 1's "nothing was changed" promise is
+        # therefore reserved for refusals BEFORE the mutation was sent; every
+        # post-send rejection fails toward exit 2.
+        result["status"] = "UNVERIFIED"
+        result["exit_code"] = EXIT_UNVERIFIED
+        result["mutation"]["rejection_code"] = code
         result["note"] = (
             f"the bridge rejected {cmd_type} ({code}); no post-capture "
-            "attempted. A command that fails during resolution changes "
-            "nothing; if the handler failed mid-edit, any partial change "
-            "sits in one closed undo block — one Ctrl/Cmd+Z reverts it.")
+            "attempted. A rejection during resolution changes nothing, but "
+            "if the handler failed mid-edit a partial change sits in one "
+            "closed undo block, and that cannot be told apart from here, "
+            "so the project MAY have changed. Do not retry blindly; one "
+            "Ctrl/Cmd+Z reverts any partial change.")
         return result
 
     def _unote(text):
@@ -777,8 +833,10 @@ def band_energy_db(spectrum, band_hz):
         if not isinstance(band, dict):
             continue
         freq, level = band.get("freq_hz"), band.get("level_db")
-        if (isinstance(freq, (int, float)) and lo <= freq <= hi
-                and isinstance(level, (int, float)) and math.isfinite(level)):
+        if (isinstance(freq, (int, float)) and not isinstance(freq, bool)
+                and lo <= freq <= hi
+                and isinstance(level, (int, float))
+                and not isinstance(level, bool) and math.isfinite(level)):
             levels.append(level)
     if not levels:
         return None
@@ -792,7 +850,8 @@ def _tune_metric(m, target):
     """Extract the target metric's value from a measure dict, or None."""
     if target["metric"] == "lufs_i":
         value = m.get("lufs_i")
-        return value if isinstance(value, (int, float)) else None
+        return (value if isinstance(value, (int, float))
+                and not isinstance(value, bool) else None)
     return band_energy_db(m.get("spectrum_third_octave"), target["band_hz"])
 
 
@@ -1032,21 +1091,30 @@ def tune_param(sender, scanner, track, fx_selector, param_selector, target,
         elif status == "NON_MONOTONE":
             restore_n, restore_v, why = n0, baseline, "initial"
         if restore_n is not None and abs(restore_n - applied["n"]) > 1e-12:
-            set_reply = sender("set_fx_param",
-                               {**pin, "normalized_value": restore_n})
-            if isinstance(set_reply, dict) and set_reply.get("ok"):
-                applied["n"] = restore_n
-                note += (f" The {why} value (normalized {restore_n:.4f}, "
-                         f"metric {restore_v:.2f}) was re-applied.")
+            id_fail = _identity_check()
+            if id_fail is not None:
+                # The stable-identity contract covers the restore write too:
+                # never set a parameter on a retargeted FX.
+                note += (f" Re-applying the {why} value was SKIPPED "
+                         "(IDENTITY_CHANGED): " + id_fail["note"])
             else:
-                code = _error_code(set_reply)
-                if code is None or code in UNCERTAIN_MUTATION_CODES:
-                    note += (f" Re-applying the {why} value got no readable "
-                             f"reply ({code}): whether it took is UNKNOWN — "
-                             "trust the read-back below, not this note.")
+                set_reply = sender("set_fx_param",
+                                   {**pin, "normalized_value": restore_n})
+                if isinstance(set_reply, dict) and set_reply.get("ok"):
+                    applied["n"] = restore_n
+                    note += (f" The {why} value (normalized {restore_n:.4f}, "
+                             f"metric {restore_v:.2f}) was re-applied.")
                 else:
-                    note += (f" Re-applying the {why} value was rejected "
-                             f"({code}); the last set value should remain.")
+                    code = _error_code(set_reply)
+                    if code is None or code in UNCERTAIN_MUTATION_CODES:
+                        note += (f" Re-applying the {why} value got no "
+                                 f"readable reply ({code}): whether it took "
+                                 "is UNKNOWN: trust the read-back below, "
+                                 "not this note.")
+                    else:
+                        note += (f" Re-applying the {why} value was rejected "
+                                 f"({code}); the last set value should "
+                                 "remain.")
         rb_norm, rb_fmt, rb_err = _read_back()
         final = {"normalized": rb_norm, "formatted_value": rb_fmt,
                  "read_back": rb_err is None}
@@ -1147,72 +1215,121 @@ def tune_param(sender, scanner, track, fx_selector, param_selector, target,
     # flip to the other boundary (starting AT a boundary uses the flip
     # immediately). Probe results are direction DETECTION — NON_MONOTONE is
     # only ever declared from a bracket violation during bisection.
-    primary = 1.0 if delta > 0 else 0.0
-    b = primary if abs(primary - n0) > 1e-9 else 1.0 - primary
-    flipped = abs(primary - n0) <= 1e-9
-    m_b = None
-    while True:
-        if iterations_used >= TUNE_MAX_ITERATIONS:
-            return finish("UNCONVERGED",
-                          "iteration budget exhausted during the direction "
-                          "probe.")
-        m_b, failure = set_and_measure(b)
-        if failure:
-            return finish(failure["status"], failure["note"])
-        if abs(m_b - goal) <= tolerance:
-            return finish("CONVERGED",
-                          f"target reached at normalized {b:g}.")
-        if (goal - baseline) * (goal - m_b) <= 0:
-            break  # goal bracketed between baseline and this boundary
-        progressed = abs(m_b - goal) < abs(baseline - goal) - 1e-12
-        flip_target = 1.0 - b
-        if not progressed and not flipped and abs(flip_target - n0) > 1e-9:
-            flipped = True
-            b = flip_target
-            continue
-        if abs(m_b - baseline) <= slack:
+    #
+    # From the first set onward, any internal failure must come back as an
+    # honest result that still runs the restore policy and the final
+    # read-back — never a crash that leaves a mutation applied and
+    # undisclosed (mirrors verify's post-mutation guard).
+    try:
+        primary = 1.0 if delta > 0 else 0.0
+        b = primary if abs(primary - n0) > 1e-9 else 1.0 - primary
+        flipped = abs(primary - n0) <= 1e-9
+        m_b = None
+        probe_results = []
+        while True:
+            if iterations_used >= TUNE_MAX_ITERATIONS:
+                return finish("UNCONVERGED",
+                              "iteration budget exhausted during the "
+                              "direction probe.")
+            m_b, failure = set_and_measure(b)
+            if failure:
+                return finish(failure["status"], failure["note"])
+            probe_results.append((b, m_b))
+            if abs(m_b - goal) <= tolerance:
+                return finish("CONVERGED",
+                              f"target reached at normalized {b:g}.")
+            if (goal - baseline) * (goal - m_b) <= 0:
+                break  # goal bracketed between baseline and this boundary
+            progressed = abs(m_b - goal) < abs(baseline - goal) - 1e-12
+            flip_target = 1.0 - b
+            if (not progressed and not flipped
+                    and abs(flip_target - n0) > 1e-9):
+                flipped = True
+                b = flip_target
+                continue
+            if abs(m_b - baseline) <= slack:
+                moved = [p for p in probe_results
+                         if abs(p[1] - baseline) > slack]
+                if moved:
+                    # An earlier probe DID move the metric (away from the
+                    # target); "does not move anywhere" would contradict
+                    # the recorded iterations. Report BOTH probes.
+                    desc = ", ".join(
+                        f"{'up' if pn > n0 else 'down'}: "
+                        f"{pm - baseline:+.2f}"
+                        for pn, pm in probe_results)
+                    return finish("UNREACHABLE",
+                                  "neither probed direction approaches the "
+                                  f"target for {target['metric']} ({desc} "
+                                  "vs baseline); unreachable with this "
+                                  "parameter.")
+                return finish("UNREACHABLE",
+                              f"the parameter does not move "
+                              f"{target['metric']} anywhere in its range "
+                              f"(full-range change {m_b - baseline:+.2f}, "
+                              "within noise); a flat metric is monotone but "
+                              "the target is unreachable with this "
+                              "parameter.")
+            if progressed:
+                return finish("UNREACHABLE",
+                              f"the target ({goal:.2f}) lies beyond what "
+                              f"this parameter can reach (its extreme gives "
+                              f"{m_b:.2f}).")
             return finish("UNREACHABLE",
-                          f"the parameter does not move {target['metric']} "
-                          f"anywhere in its range (full-range change "
-                          f"{m_b - baseline:+.2f}, within noise); a flat "
-                          "metric is monotone but the target is unreachable "
-                          "with this parameter.")
-        if progressed:
-            return finish("UNREACHABLE",
-                          f"the target ({goal:.2f}) lies beyond what this "
-                          f"parameter can reach (its extreme gives "
-                          f"{m_b:.2f}).")
-        return finish("UNREACHABLE",
-                      f"every probed direction moves {target['metric']} away "
-                      f"from the target (baseline {baseline:.2f} is the "
-                      "closest achievable); unreachable with this parameter.")
+                          f"every probed direction moves {target['metric']} "
+                          f"away from the target (baseline {baseline:.2f} "
+                          "is the closest achievable); unreachable with "
+                          "this parameter.")
 
-    # -- bisection inside the bracket --------------------------------------
-    lo_n, lo_m = n0, baseline
-    hi_n, hi_m = b, m_b
-    while iterations_used < TUNE_MAX_ITERATIONS:
-        mid_n = (lo_n + hi_n) / 2.0
-        mid_m, failure = set_and_measure(mid_n)
-        if failure:
-            return finish(failure["status"], failure["note"])
-        low, high = min(lo_m, hi_m), max(lo_m, hi_m)
-        if not (low - slack <= mid_m <= high + slack):
-            return finish("NON_MONOTONE",
-                          f"the metric at normalized {mid_n:.4f} ({mid_m:.2f}) "
-                          f"fell outside its bracket [{low:.2f}, {high:.2f}] "
-                          "(plus noise); the parameter is not monotone here. "
-                          "Refusing to thrash.")
-        if abs(mid_m - goal) <= tolerance:
-            return finish("CONVERGED",
-                          f"target hit within tolerance after "
-                          f"{iterations_used} iteration(s).")
-        if (mid_m < goal) == (lo_m < goal):
-            lo_n, lo_m = mid_n, mid_m
+        # -- bisection inside the bracket -----------------------------------
+        lo_n, lo_m = n0, baseline
+        hi_n, hi_m = b, m_b
+        while iterations_used < TUNE_MAX_ITERATIONS:
+            mid_n = (lo_n + hi_n) / 2.0
+            mid_m, failure = set_and_measure(mid_n)
+            if failure:
+                return finish(failure["status"], failure["note"])
+            low, high = min(lo_m, hi_m), max(lo_m, hi_m)
+            if not (low - slack <= mid_m <= high + slack):
+                return finish("NON_MONOTONE",
+                              f"the metric at normalized {mid_n:.4f} "
+                              f"({mid_m:.2f}) fell outside its bracket "
+                              f"[{low:.2f}, {high:.2f}] (plus noise); the "
+                              "parameter is not monotone here. Refusing to "
+                              "thrash.")
+            if abs(mid_m - goal) <= tolerance:
+                return finish("CONVERGED",
+                              f"target hit within tolerance after "
+                              f"{iterations_used} iteration(s).")
+            if (mid_m < goal) == (lo_m < goal):
+                lo_n, lo_m = mid_n, mid_m
+            else:
+                hi_n, hi_m = mid_n, mid_m
+        return finish("UNCONVERGED",
+                      f"not within tolerance after {TUNE_MAX_ITERATIONS} "
+                      "iterations.")
+    except Exception as e:  # noqa: BLE001 — honest result beats a traceback
+        note = ("tune_param hit an internal error "
+                f"({type(e).__name__}: {e}) after {iterations_used} "
+                "iteration(s).")
+        if abs(applied["n"] - n0) > 1e-12:
+            note += (f" A set_fx_param mutation IS applied (normalized "
+                     f"{applied['n']:.4f}, initially {n0:.4f}) and is NOT "
+                     "rolled back; one Ctrl/Cmd+Z per applied set reverts "
+                     "it.")
         else:
-            hi_n, hi_m = mid_n, mid_m
-    return finish("UNCONVERGED",
-                  f"not within tolerance after {TUNE_MAX_ITERATIONS} "
-                  "iterations.")
+            note += " No applied value differs from the initial state."
+        try:
+            return finish("INTERNAL_ERROR", note)
+        except Exception:  # noqa: BLE001 — finish() itself may be poisoned
+            result.update({
+                "status": "INTERNAL_ERROR", "note": note,
+                "iterations_used": iterations_used,
+                "final": {"normalized": None, "formatted_value": None,
+                          "metric": None, "delta_achieved": None,
+                          "error_from_target": None, "read_back": False,
+                          "last_known_normalized": round(applied["n"], 6)}})
+            return result
 
 
 # ---------------------------------------------------------------------------

@@ -183,10 +183,15 @@ Behavior:
 4. Report deltas: ΔLUFS-I always; with Post Mortem, per-band spectrum deltas,
    Δtrue-peak, Δstereo width, masking deltas when applicable.
 5. Verdict semantics (exit codes matter — agents branch on them):
-   - `0` VERIFIED — both captures clean, deltas reported.
-   - `1` MUTATION_FAILED — mutation error, no post capture attempted.
-   - `2` UNVERIFIED — mutation applied but post-capture failed or was silent.
-     **The mutation is NOT rolled back** (it's one Ctrl/Cmd+Z away — say so
+   - `0` VERIFIED: both captures clean, deltas reported.
+   - `1` REFUSED: the mutation was never sent (pre-capture blocked/silent);
+     nothing was mutated.
+   - `2` UNVERIFIED: the mutation was sent but not verified: applied with a
+     failed/silent post-capture, partially applied, rejected by the bridge
+     (a mid-edit handler failure can leave a partial change in one closed
+     undo block, unprovable from outside, so rejections fail toward 2 and
+     the JSON carries `mutation.rejection_code`), or transport-unknown.
+     **The mutation is NOT rolled back** (it's one Ctrl/Cmd+Z away, say so
      verbatim in the output). This asymmetry is deliberate: never destroy a
      user-visible change because measurement hiccupped.
 6. Scope honesty: if pre and post `capture_scope` differ, or either is not
