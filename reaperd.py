@@ -1070,11 +1070,14 @@ def cmd_profile(args):
         print(f"[profile] ERROR: drum skill not found at {skill_dir}", file=sys.stderr)
         return 1
     cmd = [sys.executable, "-m", "drumgen.profile", args.project, args.track]
-    if args.bars is not None or args.start_bar or args.max_seconds:
+    # is-not-None, not truthiness: --max-seconds 0 must reach drumgen and
+    # be rejected there, not silently turn into "profile the whole item".
+    if (args.bars is not None or args.start_bar
+            or args.max_seconds is not None):
         cmd.append(str(args.bars if args.bars is not None else 0))  # 0 = whole item
-        if args.start_bar or args.max_seconds:
+        if args.start_bar or args.max_seconds is not None:
             cmd.append(str(args.start_bar))
-        if args.max_seconds:
+        if args.max_seconds is not None:
             cmd.append(str(args.max_seconds))
     if args.json:
         cmd.append("--json")

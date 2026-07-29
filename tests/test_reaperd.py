@@ -557,3 +557,30 @@ def test_bridge_sender_default_timeout_is_the_shared_constant(
     monkeypatch.setattr(reaperd, "send_type", fake)
     reaperd._bridge_sender(root)("get_context", {})
     assert seen["timeout_ms"] == verifyloop.DEFAULT_SENDER_TIMEOUT_MS == 10000
+
+
+# --- profile: --max-seconds 0 must be forwarded, not dropped ---------------
+
+def test_profile_forwards_zero_max_seconds_for_rejection(monkeypatch, tmp_path):
+    """--max-seconds 0 must reach drumgen.profile (which rejects it with a
+    clear error), not vanish behind a truthiness check and silently profile
+    the whole item."""
+    import types
+    proj = tmp_path / "song.rpp"
+    proj.write_text("<REAPER_PROJECT 0.1\n>\n")
+    (tmp_path / "skills" / "drum-apparatus").mkdir(parents=True)
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return types.SimpleNamespace(
+            returncode=1, stdout="",
+            stderr="error: max_seconds must be positive (got 0)")
+    monkeypatch.setattr(reaperd.subprocess, "run", fake_run)
+    args = types.SimpleNamespace(project=str(proj), track="gtr", bars=None,
+                                 start_bar=0, max_seconds=0.0, json=False,
+                                 bridge_root=str(tmp_path))
+    rc = reaperd.cmd_profile(args)
+    assert rc == 1
+    # wire protocol: [bars sentinel, start_bar, max_seconds] all present
+    assert seen["cmd"][-3:] == ["0", "0", "0.0"]

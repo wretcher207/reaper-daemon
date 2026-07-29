@@ -142,21 +142,34 @@ def bar_grid(bar_steps, grid=16):
     return "".join(cells)
 
 
-def profile_bars(samples, sr, tempo, bars, start_bar=0, hop=HOP, grid=16):
+def profile_bars(samples, sr, tempo, bars, start_bar=0, hop=HOP, grid=16,
+                 origin_hops=0):
     """The core table: one feature dict per bar. Assumes 4/4 (every stem of
     David's so far; revisit if a 7/8 riff ever shows up).
 
     Bars are counted from ITEM time 0, same anchor riff.py documents — a
     stem whose musical downbeat sits off the item start gets start_bar /
-    riff's offset_steps treatment, not silent correction here."""
+    riff's offset_steps treatment, not silent correction here.
+
+    origin_hops: samples[0] sits origin_hops*hop samples into the item
+    (profile_track's windowed analysis). Bar windows and onset bucketing
+    use item-absolute time via integer hop arithmetic, so a windowed run
+    reproduces the full run's rows exactly instead of drifting by hop
+    phase. start_bar stays item-absolute."""
     bar_s = 60.0 / tempo * 4.0
     step_s = bar_s / grid
     energy = hop_energy(samples, hop)
     lo_e, hi_e, zc = band_energies_zc(samples, sr, hop)
     onsets = detect_onsets(samples, sr, hop=hop, energy=energy)
     # Time to the next onset ANYWHERE in the stem (not just this bar), so
-    # decay windows never swallow the following hit's attack.
-    next_gap = {t: (onsets[i + 1][0] - t if i + 1 < len(onsets) else None)
+    # decay windows never swallow the following hit's attack. Gaps come from
+    # INTEGER hop indices, not t2 - t1: the float subtraction wiggles by an
+    # ulp depending on where the analysis window was cut, and 0.6*gap lands
+    # exactly on a hop edge for common IOIs, so that ulp used to flip a
+    # decay window by a whole hop between windowed and full runs.
+    _ohops = [int(round(t * sr / hop)) for t, _ in onsets]
+    next_gap = {t: ((_ohops[i + 1] - _ohops[i]) * hop / sr
+                    if i + 1 < len(onsets) else None)
                 for i, (t, _) in enumerate(onsets)}
 
     # Silence threshold: 30 dB under the stem's loud reference (95th pct of
@@ -170,14 +183,18 @@ def profile_bars(samples, sr, tempo, bars, start_bar=0, hop=HOP, grid=16):
     # detected 20ms early belongs to THIS bar, not the previous one.
     per_bar = {}
     for t, s in onsets:
-        gi = round(t / step_s)
+        gi = round((t + origin_hops * hop / sr) / step_s)
         per_bar.setdefault(gi // grid, []).append((gi % grid, s, t))
 
     rows = []
     for b in range(start_bar, start_bar + bars):
         t0 = b * bar_s
         t1 = t0 + bar_s
-        k0, k1 = int(t0 * sr / hop), int(t1 * sr / hop)
+        k0 = int(t0 * sr / hop) - origin_hops
+        k1 = int(t1 * sr / hop) - origin_hops
+        if k1 <= 0:
+            continue
+        k0 = max(k0, 0)
         seg = energy[k0:k1]
         if not seg:
             break
@@ -196,7 +213,7 @@ def profile_bars(samples, sr, tempo, bars, start_bar=0, hop=HOP, grid=16):
         # decay: median over the bar's onsets (robust to one weird hit)
         decays = []
         for t, _ in b_on:
-            r = onset_decay_ratio(energy, int(t * sr / hop), sr, hop,
+            r = onset_decay_ratio(energy, int(round(t * sr / hop)), sr, hop,
                                   next_gap_s=next_gap.get(t))
             if r is not None:
                 decays.append(min(r, 4.0))  # cap: tail>attack blowups are noise
@@ -332,31 +349,94 @@ def group_segments(rows, segs, sim_threshold=0.90):
 
 # ---- end to end ------------------------------------------------------------
 
+# Bars of audio kept around the requested window so the slice analyzes like
+# the full stem. PRE: the band IIRs settle (time constants are
+# milliseconds), the onset detector's ±170ms local mean has real context,
+# and a hit ringing across the start boundary isn't misread as a fresh
+# onset at sample 0. POST: the last requested bar's decay tails (≤220ms)
+# and next-onset gaps (they only bind under 250ms, well inside one bar)
+# see the audio they need. The rolls are analyzed and then discarded —
+# only requested bars are reported.
+PRE_ROLL_BARS = 1
+POST_ROLL_BARS = 1
+
+
 def profile_track(rpp_path, track_name, bars=None, start_bar=0,
                   max_seconds=None):
     """Project + track name -> full profile dict. bars=None profiles the
     whole first item (comped tracks get riff.py's same first-item-only rule).
 
-    max_seconds caps how much MUSIC gets analyzed, not how much file gets
-    read: with a nonzero start_bar the read runs through start_bar +
-    max_seconds, so the two flags compose instead of the cap starving the
-    requested window (a start past a time-0 cap profiled zero bars)."""
+    max_seconds caps how much MUSIC gets analyzed, measured from start_bar,
+    so the two flags compose instead of the cap starving the requested
+    window (a start past a time-0 cap profiled zero bars). Analysis is
+    windowed: the signal passes run over the requested bars plus one
+    pre-roll and one post-roll bar, never the whole prefix or tail. (The
+    WAV read itself still decodes from the file start through the window's
+    end; the per-sample passes are what get windowed.)"""
     proj = parse_project(rpp_path, track_name)
     if not proj["items"]:
         raise ValueError(f"no audio items on track {track_name!r} in {rpp_path}")
     it = proj["items"][0]
     bar_s = 60.0 / proj["tempo"] * 4.0
-    read_cap = None if max_seconds is None else start_bar * bar_s + max_seconds
+
+    # argparse type=float happily parses "inf" and "nan"; inf overflows the
+    # read-length int() in read_wav_mono and nan dies in floor() later —
+    # both as tracebacks. Refuse them here with the same clean error path.
+    if max_seconds is not None and not (math.isfinite(max_seconds)
+                                        and max_seconds > 0):
+        raise ValueError(
+            f"max_seconds must be a positive finite number (got "
+            f"{max_seconds:g}); omit it to profile the whole item")
+
+    # Requested musical endpoint (None = whole item), and the read/analysis
+    # cap one post-roll bar past it.
+    ends = []
+    if bars is not None:
+        ends.append((start_bar + bars) * bar_s)
+    if max_seconds is not None:
+        ends.append(start_bar * bar_s + max_seconds)
+    end_s = min(ends) if ends else None
+    read_cap = None if end_s is None else end_s + POST_ROLL_BARS * bar_s
     sr, mono = read_wav_mono(it["source"], max_seconds=read_cap)
+
+    # Window: drop audio before start_bar minus the pre-roll. The cut is
+    # floored to a HOP multiple and passed as origin_hops so every energy
+    # hop and bar window covers the SAME samples as a full-stem run —
+    # timing, onset, grid, decay, and band fields reproduce the full run
+    # exactly past the pre-roll. Window-local by design (documented, not
+    # drift): the silence threshold's loud reference, and the boundary /
+    # section z-scores, which always describe only the profiled rows.
+    skip_hops = 0
+    if start_bar > PRE_ROLL_BARS:
+        cut = (int((start_bar - PRE_ROLL_BARS) * bar_s * sr) // HOP) * HOP
+        skip_hops = cut // HOP
+        mono = mono[cut:] if cut < len(mono) else mono[:0]
+
     if bars is None:
-        avail = len(mono) / sr
-        # Glued/trimmed stems routinely land a few samples SHORT of the exact
-        # bar line; int() truncation then silently drops the entire final bar
-        # (a 40-bar song profiled as 39 — real bug, real session). Count a
-        # trailing partial bar whenever at least 2% of it exists; below that
-        # it's an edit sliver, not music.
+        avail = skip_hops * HOP / sr + len(mono) / sr
+        # NATURAL endpoint (the item's audio): ceil with a 2% sliver guard.
+        # Glued/trimmed stems routinely land a few samples SHORT of the
+        # exact bar line; int() truncation then silently dropped the entire
+        # final bar (a 40-bar song profiled as 39 — real bug, real
+        # session). Count a trailing partial bar whenever at least 2% of it
+        # exists; below that it's an edit sliver, not music.
         bars = max(1, math.ceil(avail / bar_s - 0.02) - start_bar)
-    rows = profile_bars(mono, sr, proj["tempo"], bars, start_bar)
+    if max_seconds is not None:
+        # ARTIFICIAL endpoint (the user's cap): floor, mirrored 2%
+        # tolerance. Only bars that FIT inside the cap are reported — ceil
+        # here would report a bar of music the user did not ask for, and
+        # the post-roll read supplies its audio, so it WOULD leak (a 4s cap
+        # at 146 BPM is 2.43 bars and reported 3). The tolerance still
+        # forgives a cap typed a hair short of an exact bar line.
+        cap = math.floor(max_seconds / bar_s + 0.02)
+        if cap < 1:
+            raise ValueError(
+                f"max_seconds {max_seconds:g} is shorter than one bar "
+                f"({bar_s:.2f}s at {proj['tempo']:g} BPM); raise the cap "
+                "or drop it")
+        bars = min(bars, cap)
+    rows = profile_bars(mono, sr, proj["tempo"], bars, start_bar,
+                        origin_hops=skip_hops)
     bounds = find_boundaries(rows)
     segs = group_segments(rows, segment(rows, bounds))
     return {"tempo": proj["tempo"], "sr": sr, "source": it["source"],
@@ -401,7 +481,12 @@ if __name__ == "__main__":
         bars = None                       # reaperd forwards 0 for "whole item"
     start = int(argv[3]) if len(argv) > 3 else 0
     max_s = float(argv[4]) if len(argv) > 4 else None
-    if max_s is not None and max_s <= 0:
-        max_s = None                      # reaperd forwards 0 for "no cap"
-    p = profile_track(rpp, track, bars=bars, start_bar=start, max_seconds=max_s)
+    # A non-positive cap is rejected by profile_track — passing it through
+    # keeps the CLI honest instead of silently profiling the whole item.
+    try:
+        p = profile_track(rpp, track, bars=bars, start_bar=start,
+                          max_seconds=max_s)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
     print(json.dumps(p, indent=2) if as_json else format_profile(p))

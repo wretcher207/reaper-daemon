@@ -11,7 +11,10 @@ matching the module's own rule that only same-stem comparisons mean anything.
 import math
 import os
 import struct
+import sys
 import tempfile
+
+import pytest
 
 from drumgen.profile import (profile_bars, profile_track, find_boundaries,
                              segment, group_segments, format_profile)
@@ -268,3 +271,232 @@ def test_max_seconds_composes_with_start_bar():
         prof = profile_track(p, "GTR_DI", start_bar=2, max_seconds=2 * BAR_S)
         assert [r["bar"] for r in prof["bars"]] == [3, 4]  # the two open bars
         assert all(r["n_onsets"] == 2 for r in prof["bars"])
+
+
+def test_windowed_start_bar_reproduces_full_profile_rows():
+    """start_bar analysis is windowed: audio before start_bar minus one
+    pre-roll bar is never run through the signal passes. The windowed rows
+    must reproduce the full run's rows EXACTLY past the pre-roll: the cut
+    is hop-aligned and passed as origin_hops (hop phase and bar grid stay
+    on the item's ruler), and decay gaps come from integer hop indices (a
+    t2-t1 float gap wiggles by an ulp with the cut and used to flip decay
+    windows by a whole hop). silence_ratio alone gets tolerance: its loud
+    reference is window-local by design."""
+    audio = ([chug_bar()] * 2 + [open_bar()] * 2
+             + [trem_bar()] * 2 + [stopstart_bar()] * 2)
+    samples = [v for bar in audio for v in bar]
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "di.wav")
+        _write_float_wav(wav, samples)
+        rpp = (
+            '<REAPER_PROJECT 0.1\n  TEMPO 120 4 4 0\n'
+            '  <TRACK {AAA}\n    NAME GTR_DI\n'
+            '    <ITEM\n      POSITION 0\n      LENGTH 16\n'
+            f'      <SOURCE WAVE\n        FILE "di.wav"\n      >\n    >\n  >\n>\n'
+        )
+        p = os.path.join(d, "song.RPP")
+        open(p, "w").write(rpp)
+        full = profile_track(p, "GTR_DI")
+        win = profile_track(p, "GTR_DI", start_bar=4)
+        assert [r["bar"] for r in win["bars"]] == [5, 6, 7, 8]
+        by_bar = {r["bar"]: r for r in full["bars"]}
+        for r in win["bars"]:
+            f = by_bar[r["bar"]]
+            for k in r:
+                if k == "silence_ratio":
+                    assert abs(f[k] - r[k]) < 0.05, (r["bar"], k, f[k], r[k])
+                else:
+                    assert f[k] == r[k], (r["bar"], k, f[k], r[k])
+
+
+def test_decay_stable_when_gap_fraction_lands_on_hop_boundary():
+    """IOI of exactly 5 hops puts 60% of the gap exactly on a hop edge —
+    the fragile spot: a gap computed as t2 - t1 differs by an ulp between
+    windowed and full runs (different integer hop offsets behind the same
+    float times) and used to flip the decay tail window by a whole hop.
+    Gaps must come from integer hop indices so windowed decay is identical
+    to the full run, bit for bit."""
+    hop = 512
+    ioi = 5 * hop                       # 2560 samples, exactly 5 hops
+    bar_len = 16 * ioi                  # 40960 samples = 80 hops exactly
+    tempo = 240.0 * SR / bar_len        # 140.625 BPM at SR 24000
+    hits = [i / 16 for i in range(16)]
+    bar = _bar_at(hits, freq=100, tau=0.03, tempo=tempo)
+    assert len(bar) == bar_len
+    samples = bar * 6
+    full = profile_bars(samples, SR, tempo, 3, start_bar=3)
+    cut = 2 * bar_len                   # skip 2 bars; bar 3 is the pre-roll
+    assert cut % hop == 0
+    win = profile_bars(samples[cut:], SR, tempo, 3, start_bar=3,
+                       origin_hops=cut // hop)
+    assert [r["bar"] for r in win] == [r["bar"] for r in full]
+    for f, w in zip(full, win):
+        assert f["decay_ratio"] == w["decay_ratio"], (f["bar"], f, w)
+        assert f["grid"] == w["grid"]
+        assert f["n_onsets"] == w["n_onsets"]
+
+
+@pytest.mark.parametrize("bars,expect_bars_analyzed", [
+    (None, 5),   # pre-roll + bars 5-8 (whole remainder)
+    (2, 4),      # pre-roll + bars 5-6 + post-roll, NOT through EOF
+])
+def test_windowed_start_bar_skips_prefix_analysis(monkeypatch, bars,
+                                                  expect_bars_analyzed):
+    """The windowing is about COST, not just output: a late start_bar must
+    run the signal passes on one pre-roll bar plus the requested window
+    (plus one post-roll bar when the request has an end), never the whole
+    prefix or tail (that regression would keep this suite green while
+    restoring O(stem) analysis time)."""
+    import drumgen.profile as profile_mod
+    audio = [chug_bar()] * 8
+    samples = [v for bar in audio for v in bar]
+    seen = {}
+    real = profile_mod.band_energies_zc
+
+    def spy(s, sr, hop=512, **kw):
+        seen["n"] = len(s)
+        return real(s, sr, hop, **kw)
+    monkeypatch.setattr(profile_mod, "band_energies_zc", spy)
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "di.wav")
+        _write_float_wav(wav, samples)
+        rpp = (
+            '<REAPER_PROJECT 0.1\n  TEMPO 120 4 4 0\n'
+            '  <TRACK {AAA}\n    NAME GTR_DI\n'
+            '    <ITEM\n      POSITION 0\n      LENGTH 16\n'
+            f'      <SOURCE WAVE\n        FILE "di.wav"\n      >\n    >\n  >\n>\n'
+        )
+        p = os.path.join(d, "song.RPP")
+        open(p, "w").write(rpp)
+        prof = profile_track(p, "GTR_DI", start_bar=4, bars=bars)
+    assert [r["bar"] for r in prof["bars"]] == \
+        list(range(5, 5 + (bars or 4)))
+    bar_len = len(audio[0])
+    assert abs(seen["n"] - expect_bars_analyzed * bar_len) <= 512, seen
+
+
+def test_explicit_bars_clamped_by_max_seconds():
+    """Both flags together: the tighter one wins. An explicit bars larger
+    than the max_seconds window used to run profile_bars into the analysis
+    post-roll and report it as a requested bar."""
+    audio = [chug_bar()] * 2 + [open_bar()] * 2
+    samples = [v for bar in audio for v in bar]
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "di.wav")
+        _write_float_wav(wav, samples)
+        rpp = (
+            '<REAPER_PROJECT 0.1\n  TEMPO 120 4 4 0\n'
+            '  <TRACK {AAA}\n    NAME GTR_DI\n'
+            '    <ITEM\n      POSITION 0\n      LENGTH 8\n'
+            f'      <SOURCE WAVE\n        FILE "di.wav"\n      >\n    >\n  >\n>\n'
+        )
+        p = os.path.join(d, "song.RPP")
+        open(p, "w").write(rpp)
+        prof = profile_track(p, "GTR_DI", bars=10,
+                             start_bar=1, max_seconds=2 * BAR_S)
+        assert [r["bar"] for r in prof["bars"]] == [2, 3]  # not the post-roll
+        # and the reverse: a tight bars beats a loose max_seconds
+        prof = profile_track(p, "GTR_DI", bars=1,
+                             start_bar=1, max_seconds=10 * BAR_S)
+        assert [r["bar"] for r in prof["bars"]] == [2]
+
+
+def test_max_seconds_partial_bar_does_not_leak_a_full_bar():
+    """An artificial cap uses FLOOR: 2.43 bars of max_seconds must report
+    2 bars, not 3 — the post-roll read supplies the third bar's audio, so
+    a ceil there reported a full bar of music past the requested span
+    (real leak: --max-seconds 4 at 146 BPM printed 3 bars). A cap typed a
+    hair short of an exact bar line still gets the 2% tolerance."""
+    audio = [chug_bar()] * 4
+    samples = [v for bar in audio for v in bar]
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "di.wav")
+        _write_float_wav(wav, samples)
+        rpp = (
+            '<REAPER_PROJECT 0.1\n  TEMPO 120 4 4 0\n'
+            '  <TRACK {AAA}\n    NAME GTR_DI\n'
+            '    <ITEM\n      POSITION 0\n      LENGTH 8\n'
+            f'      <SOURCE WAVE\n        FILE "di.wav"\n      >\n    >\n  >\n>\n'
+        )
+        p = os.path.join(d, "song.RPP")
+        open(p, "w").write(rpp)
+        # 2.435 bars requested -> 2 bars reported (bars=None and explicit)
+        prof = profile_track(p, "GTR_DI", max_seconds=2.435 * BAR_S)
+        assert [r["bar"] for r in prof["bars"]] == [1, 2]
+        prof = profile_track(p, "GTR_DI", bars=10, max_seconds=2.435 * BAR_S)
+        assert [r["bar"] for r in prof["bars"]] == [1, 2]
+        # a cap 1.5% short of two exact bars still counts both
+        prof = profile_track(p, "GTR_DI", max_seconds=1.985 * BAR_S)
+        assert [r["bar"] for r in prof["bars"]] == [1, 2]
+
+
+def test_max_seconds_shorter_than_one_bar_is_rejected():
+    """A cap that cannot hold one complete bar must refuse loudly, not
+    silently report a bar of music outside the requested span."""
+    audio = [chug_bar()] * 2
+    samples = [v for bar in audio for v in bar]
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "di.wav")
+        _write_float_wav(wav, samples)
+        rpp = (
+            '<REAPER_PROJECT 0.1\n  TEMPO 120 4 4 0\n'
+            '  <TRACK {AAA}\n    NAME GTR_DI\n'
+            '    <ITEM\n      POSITION 0\n      LENGTH 4\n'
+            f'      <SOURCE WAVE\n        FILE "di.wav"\n      >\n    >\n  >\n>\n'
+        )
+        p = os.path.join(d, "song.RPP")
+        open(p, "w").write(rpp)
+        with pytest.raises(ValueError, match="shorter than one bar"):
+            profile_track(p, "GTR_DI", max_seconds=0.5 * BAR_S)
+
+
+def test_max_seconds_zero_negative_or_nonfinite_is_rejected():
+    """A non-positive or non-finite cap is a mistake, not 'no cap':
+    silently profiling the whole item behind --max-seconds 0 would be the
+    opposite of the flag's promise, inf used to overflow the read-length
+    int() as a traceback, and nan used to die in floor(). All four refuse
+    with the same clean error."""
+    audio = [chug_bar()] * 2
+    samples = [v for bar in audio for v in bar]
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "di.wav")
+        _write_float_wav(wav, samples)
+        rpp = (
+            '<REAPER_PROJECT 0.1\n  TEMPO 120 4 4 0\n'
+            '  <TRACK {AAA}\n    NAME GTR_DI\n'
+            '    <ITEM\n      POSITION 0\n      LENGTH 4\n'
+            f'      <SOURCE WAVE\n        FILE "di.wav"\n      >\n    >\n  >\n>\n'
+        )
+        p = os.path.join(d, "song.RPP")
+        open(p, "w").write(rpp)
+        for bad in (0.0, -3.0, float("inf"), float("nan")):
+            with pytest.raises(ValueError, match="positive finite"):
+                profile_track(p, "GTR_DI", max_seconds=bad)
+
+
+def test_cli_rejects_nonfinite_max_seconds_cleanly():
+    """End to end through drumgen.profile's __main__: 'inf' from the CLI
+    must exit 1 with a one-line error, not a traceback."""
+    import subprocess
+    skill_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    audio = [chug_bar()] * 2
+    samples = [v for bar in audio for v in bar]
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "di.wav")
+        _write_float_wav(wav, samples)
+        rpp = (
+            '<REAPER_PROJECT 0.1\n  TEMPO 120 4 4 0\n'
+            '  <TRACK {AAA}\n    NAME GTR_DI\n'
+            '    <ITEM\n      POSITION 0\n      LENGTH 4\n'
+            f'      <SOURCE WAVE\n        FILE "di.wav"\n      >\n    >\n  >\n>\n'
+        )
+        p = os.path.join(d, "song.RPP")
+        open(p, "w").write(rpp)
+        for bad in ("inf", "nan"):
+            r = subprocess.run(
+                [sys.executable, "-m", "drumgen.profile", p, "GTR_DI",
+                 "0", "0", bad],
+                cwd=skill_root, capture_output=True, text=True, timeout=120)
+            assert r.returncode == 1, r.stderr
+            assert "positive finite" in r.stderr
+            assert "Traceback" not in r.stderr
