@@ -1026,6 +1026,49 @@ def cmd_riff(args):
     return 0
 
 
+def cmd_profile(args):
+    """Profile a guitar stem bar-by-bar (David's analyze step, before kicks).
+
+    Same reading model as riff: parses the SAVED .rpp on disk for the track's
+    audio item. Prints a per-bar feature table (density, decay, silence, band
+    balance, accent grid) plus suggested section boundaries and repeated-
+    section groups. The numbers are for the AGENT to label and David to
+    correct — profile never claims 'this is a breakdown' itself. Run it on
+    the DI track when there is one; distortion flattens the decay contrast
+    that separates open notes from palm mutes."""
+    if not os.path.isfile(args.project):
+        print(f"[profile] ERROR: project not found: {args.project}", file=sys.stderr)
+        return 1
+    skill_dir = os.path.join(args.bridge_root, "skills", "drum-apparatus")
+    if not os.path.isdir(skill_dir):
+        print(f"[profile] ERROR: drum skill not found at {skill_dir}", file=sys.stderr)
+        return 1
+    cmd = [sys.executable, "-m", "drumgen.profile", args.project, args.track]
+    if args.bars is not None or args.start_bar:
+        cmd.append(str(args.bars if args.bars is not None else 0))  # 0 = whole item
+        if args.start_bar:
+            cmd.append(str(args.start_bar))
+    if args.json:
+        cmd.append("--json")
+    try:
+        r = subprocess.run(cmd, cwd=skill_dir, capture_output=True, text=True,
+                           timeout=600)
+    except subprocess.TimeoutExpired:
+        print("[profile] ERROR: analysis did not finish in 600s "
+              "(very long stem? pass --bars / --max-seconds)", file=sys.stderr)
+        return 1
+    if r.stdout:
+        print(r.stdout.rstrip())
+    if r.returncode != 0:
+        print(r.stderr.rstrip() or "[profile] failed to read the project",
+              file=sys.stderr)
+        return 1
+    if not args.json:
+        print("\n[profile] Numbers, not verdicts - label sections with David, "
+              "then build per-section: reaperd.py riff for kicks, groove to place.")
+    return 0
+
+
 def cmd_list_maps(args):
     skill_dir = os.path.join(args.bridge_root, "skills", "drum-apparatus")
     if skill_dir not in sys.path:
@@ -1306,6 +1349,20 @@ def build_parser():
     s.add_argument("--start-bar", type=int, default=0,
                    help="first bar to read, 0-indexed (default 0)")
     s.set_defaults(func=cmd_riff)
+
+    s = sub.add_parser("profile",
+                       help="profile a guitar stem bar-by-bar: technique + "
+                            "section features for groove planning")
+    s.add_argument("project", help="path to the saved .rpp project file")
+    s.add_argument("track", help="name of the guitar track to profile "
+                                 "(prefer the DI over the amped stem)")
+    s.add_argument("--bars", type=int, default=None,
+                   help="bars to profile (default: the whole first item)")
+    s.add_argument("--start-bar", type=int, default=0,
+                   help="first bar to profile, 0-indexed (default 0)")
+    s.add_argument("--json", action="store_true",
+                   help="emit the raw profile JSON instead of the table")
+    s.set_defaults(func=cmd_profile)
 
     s = sub.add_parser("list-maps", help="print available drum-kit maps")
     s.set_defaults(func=cmd_list_maps)

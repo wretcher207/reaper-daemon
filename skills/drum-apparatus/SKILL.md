@@ -1,6 +1,6 @@
 ---
 name: drum-apparatus
-description: Program heavy / death-metal drums into the user's live REAPER session the way David does it — kicks built off the guitar riff first, snare by his call, cymbals by feel, spicy fills, humanized at placement time. Use when the user asks for a drum groove, beat, blast, breakdown, fill, or a multi-section drum part, or says "give me a <subgenre> groove" / "program drums for this riff". Drops generated MIDI into REAPER via the agent bridge.
+description: Program heavy / death-metal drums into the user's live REAPER session the way David does it — kicks built off the guitar riff first, snare by his call, cymbals by feel, spicy fills, humanized at placement time. Use when the user asks for a drum groove, beat, blast, breakdown, fill, or a multi-section drum part, says "give me a <subgenre> groove" / "program drums for this riff", or asks to analyze/profile a guitar track to plan drums (open vs muted, tremolo, breakdowns, section map). Drops generated MIDI into REAPER via the agent bridge.
 ---
 
 # Drum Apparatus — David's drum-programming SOP
@@ -11,6 +11,35 @@ beat from the riff up. The catalog is a vocabulary to reach into mid-build, not 
 menu to order from.
 
 ## The procedure (in this order, always)
+
+### 0. Profile the song first (multi-section work only)
+For a full song or anything spanning sections, run the profiler BEFORE touching
+kicks — it turns the guitar stem into a per-bar feature table + a section map,
+so the whole build is planned once instead of discovered bar by bar. For a
+single riff/section, skip straight to step 1.
+
+- `python reaperd.py profile <project.RPP> <track> [--bars N] [--start-bar N]
+  [--json]` — per-bar: onset density, IOI regularity, **decay_ratio** (palm-mute
+  vs ringing open — low ≈ dead chug, high ≈ ringing), silence ratio, low/bright
+  band balance, RMS/crest, and a 16th accent grid (X accent / x hit / . rest).
+  Plus suggested section boundaries and repeated-section groups (A/B/A...).
+- **Point it at the DI track, not the amped stem.** David keeps DIs. Distortion
+  flattens the decay contrast that separates open notes from mutes; density and
+  silence survive the amp, decay_ratio doesn't. Say which track you used.
+- **The table is numbers; YOU do the labeling, David corrects it.** Read the
+  rows and propose: "bars 1-8 tight chugs (decay .05, half the bar silent) —
+  verse; 9-16 dense regular 16ths (density 8, ioi .06) — tremolo part; 17-24
+  rings out (decay .6) and repeats at 41-48 — chorus?" There are NO fixed
+  thresholds; judge each stem against ITSELF (a bar's decay only means
+  something next to its neighbors' decay).
+- Repetition ≠ chorus automatically: the profiler only says "these chunks are
+  the same music". David names them. Present the section map, get his
+  corrections, THEN build — per section, in the order below.
+- Rough label heuristics (starting points, not rules): tremolo = high density +
+  ioi_cv near 0 + little silence. Chug/djent riffing = low decay + notable
+  silence + strong low band. Breakdown candidates = sparse accented stabs, high
+  crest, lots of air — confirm with him. Open/big sections = high decay, low
+  silence, often the repeated group.
 
 ### 1. Kicks first — built off the guitar riff
 Drums start as kicks ALONE, matched to the guitar. David tracks the guitar as

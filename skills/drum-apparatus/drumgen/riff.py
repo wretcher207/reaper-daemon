@@ -127,6 +127,11 @@ def detect_onsets(samples, sr, hop=512, sensitivity=1.6, min_gap_s=0.05):
             v = samples[i]; s += v * v
         energy[k] = s
     flux = [0.0] * nh
+    # k=0's predecessor is the silence before the file: a stem trimmed tight
+    # to its downbeat starts hot, and that first hit is as real as any other
+    # (found by profile.py's uniform-song test — bar 1 kept losing a hit).
+    if nh:
+        flux[0] = energy[0]
     for k in range(1, nh):
         d = energy[k] - energy[k - 1]
         flux[k] = d if d > 0 else 0.0
@@ -134,12 +139,12 @@ def detect_onsets(samples, sr, hop=512, sensitivity=1.6, min_gap_s=0.05):
     onsets = []  # (time_seconds, strength)
     last = -1e9
     win = 16  # ~170ms either side at hop 512 / 48k
-    for k in range(1, nh - 1):
+    for k in range(0, nh - 1):
         lo, hi = max(0, k - win), min(nh, k + win + 1)
         local = sum(flux[lo:hi]) / (hi - lo)
         t = k * hop / sr
         if (flux[k] > local * sensitivity + 1e-12
-                and flux[k] >= flux[k - 1] and flux[k] >= flux[k + 1]
+                and (k == 0 or flux[k] >= flux[k - 1]) and flux[k] >= flux[k + 1]
                 and t - last >= min_gap_s):
             onsets.append((t, flux[k]))
             last = t
