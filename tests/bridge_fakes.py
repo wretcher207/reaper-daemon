@@ -29,6 +29,44 @@ def write_test_wav(path, seconds=0.05, rate=8000, amplitude=0.5):
         w.writeframes(frames)
 
 
+def _read_command(path):
+    """Read an inbox command, retrying transient Windows file locks.
+
+    The same phenomenon the CLI's reply reader handles (Codex gate BLOCKER,
+    2026-07-23): on Windows a freshly os.replace()d JSON can throw
+    PermissionError on the first open while the rename settles or an
+    indexer holds it. The real Lua bridge polls, so it never dies to this;
+    a fake that crashes instead leaves the command unanswered and fails
+    the test as a phantom protocol bug (seen live on windows-latest /
+    Python 3.14, run 30472609660). Returns None if the file vanished."""
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
+def _remove_command(path):
+    """Delete an inbox command with the same transient-lock retry."""
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            os.remove(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 def fake_bridge(root, reply_body, record=None, delay=0.0):
     """Watch inbox/, answer the first command with reply_body, like the bridge.
     When record is a list, the received command dict is appended to it."""
@@ -42,9 +80,11 @@ def fake_bridge(root, reply_body, record=None, delay=0.0):
                 cid = files[0][: -len(".json")]
                 path = os.path.join(inbox, files[0])
                 if record is not None:
-                    with open(path, "r", encoding="utf-8") as f:
-                        record.append(json.load(f))
-                os.remove(path)
+                    command = _read_command(path)
+                    if command is None:
+                        continue
+                    record.append(command)
+                _remove_command(path)
                 time.sleep(delay)
                 reply = dict(reply_body, id=cid)
                 out = os.path.join(root, "outbox", cid + ".json")
@@ -80,11 +120,12 @@ def fake_bridge_script(root, replies, record=None, delay=0.0):
                 continue
             cid = files[0][: -len(".json")]
             path = os.path.join(inbox, files[0])
-            with open(path, "r", encoding="utf-8") as f:
-                command = json.load(f)
+            command = _read_command(path)
+            if command is None:
+                continue
             if record is not None:
                 record.append(command)
-            os.remove(path)
+            _remove_command(path)
             time.sleep(delay)
             body = replies[answered]
             if callable(body):
