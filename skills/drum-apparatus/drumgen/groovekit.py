@@ -38,6 +38,13 @@ ROLE_FALLBACKS = {
     "TOM_2": "TOM_1", "TOM_3": "TOM_2", "TOM_4": "TOM_3",
     "BELL": "RIDE_BELL",
     "STACK": "CHINA_R",
+    # Choke articulations (hit-and-grab) are OPTIONAL roles — not in
+    # ROLE_KEYS, so maps aren't required to have them. A kit without choke
+    # notes (GM, Monarch, ...) degrades to the open cymbal instead of
+    # dropping the hit.
+    "CHINA_CHOKE": "CHINA_R",
+    "CRASH_CHOKE": "CRASH_R",
+    "SPLASH_CHOKE": "SPLASH_R",
 }
 
 # ---------------------------------------------------------------------------
@@ -72,6 +79,9 @@ ROLE_LIMB = {
     "STACK": "right_hand",
     "SPLASH_R": "right_hand",
     "SPLASH_L": "left_hand",
+    "CHINA_CHOKE": "right_hand",
+    "CRASH_CHOKE": "right_hand",
+    "SPLASH_CHOKE": "right_hand",
     "BELL": "right_hand",
     "TOM_1": "right_hand",
     "TOM_2": "left_hand",
@@ -143,7 +153,10 @@ LANE_ROLE = {
     "crash_r": ("CRASH_R", "plain"),
     "crash_l": ("CRASH_L", "plain"),
     "china": ("CHINA_R", "plain"),
+    "china_choke": ("CHINA_CHOKE", "plain"),
+    "crash_choke": ("CRASH_CHOKE", "plain"),
     "splash": ("SPLASH_R", "plain"),
+    "splash_choke": ("SPLASH_CHOKE", "plain"),
     "stack": ("STACK", "plain"),
     "bell": ("BELL", "plain"),
     "tom1": ("TOM_1", "plain"),

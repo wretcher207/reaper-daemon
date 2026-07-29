@@ -98,6 +98,10 @@ anything, and it's usually several cymbals at once.
 - Verses lean open hi-hat, but crashes and ride are all fair game.
 - Breakdowns lean **china + crash on the stabs**, never a hat grid. (See
   Breakdowns below — they're not grooves.)
+- **Chokes:** `china_choke` / `crash_choke` / `splash_choke` lanes play the
+  kit's hit-and-grab articulation — the genre move on stabs, dead stops, and
+  endings. Optional roles: on a kit without choke notes (GM, Monarch) they
+  fall back to the open cymbal, so the DSL stays portable.
 - When in doubt, ask which cymbal. It's a taste call, not a rule.
 
 ### 4. Fills — last, and get spicy
