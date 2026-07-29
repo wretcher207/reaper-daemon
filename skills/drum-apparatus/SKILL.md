@@ -85,6 +85,13 @@ Kick + snare are the backbone; the cymbal choice is what sets the mood. There is
 **no fixed section→cymbal rule** (the old rigid table was wrong). It can be
 anything, and it's usually several cymbals at once.
 
+- **Cymbals dictate the pace of the song — write them with nuance and accents,
+  not spam** (David's correction, 2026-07-28, after a build walled crashes on
+  every 8th for 16 bars). A cymbal grid at constant spacing and constant weight
+  is the tell of a programmed part. Vary the placement (phrase starts, pushes,
+  chord changes), vary the weight (X vs x), and leave air — a wall is a COLOR
+  for a peak moment, one or two bars, not the default treatment of a loud
+  section.
 - Hi-hats → more mellow groove. Crashes / chinas → loud, lots of noise.
 - The ONE default: in heavy parts, **steer away from closed hi-hats** unless he
   asks — closed-hat breakdowns are the off-putting tell of a bad beat.
@@ -153,7 +160,10 @@ as the reference for how his layers actually behave:
   garnish — they're the top of the dynamic stack.
 - **Snare placement is by feel, not a fixed backbeat** (landed on 1.4, 2.3, 3.1,
   4.1, 4.3), and he'll drop a 16th-apart double rimshot for flavor.
-- **Loud sections = a crash wall** on ~8th spacing, never a hi-hat grid.
+- **Loud sections in the sample used a crash wall** on ~8th spacing, never a
+  hi-hat grid. CAUTION: that was ONE 4-bar part — David has since corrected
+  that walls are not the default; cymbals carry pace/nuance/accents (see the
+  cymbal rule above). Reach for a wall briefly, at a peak, not section-wide.
 - **Tom fills roll across the kit with velocity ramping up** (observed 92→106).
 
 ## Generate & insert
