@@ -128,6 +128,7 @@ python3 reaperd.py setparam <track> "<fx>" "<param>" "<display value>"
 python3 reaperd.py eq <track> "<fx>" <band> <freqHz> <gaindB> [Q]
 python3 reaperd.py measure <track> [--seconds N] [--start S] [--json]
 python3 reaperd.py verify <track> [--seconds N] [--json] -- <type> '<payload-json>'
+python3 reaperd.py profile <project.rpp> <track> [--start-bar N] [--bars N] [--max-seconds S]
 python3 reaperd.py groove <beat.dsl> --track Drums [--position SEC] [--map NAME]
 python3 reaperd.py jam                          # DSL drum beat from stdin -> selected track
 python3 reaperd.py list-maps                    # available drum-kit maps
@@ -290,6 +291,31 @@ map by hand with `add-map`:
 ```bash
 python3 reaperd.py add-map MyKontactKit --roles '{"KICK_R":36,"SNARE":38,"HH_OPEN_1":46,"CRASH_R":49,"CHINA_R":52}'
 ```
+
+## Needle Drop: profile a stem before you write drums
+
+`profile` reads a guitar stem bar by bar and prints the numbers an agent
+needs to plan drums: onset density, timing regularity, palm-mute vs ringing
+decay, silence, low/bright band balance, and a 16th-note accent grid, plus
+suggested section boundaries and repeat groups (A / B / A). Numbers, not
+verdicts: the agent proposes section labels, you correct them.
+
+```bash
+python3 reaperd.py profile song.rpp guitar-di
+python3 reaperd.py profile song.rpp guitar-di --start-bar 32 --bars 8
+python3 reaperd.py profile song.rpp guitar-di --start-bar 32 --max-seconds 10
+```
+
+The needle drop: point it at any bar and it analyzes just that window (plus
+one bar of pre-roll and post-roll for context), never the whole stem. The
+cut is hop-aligned, so timing, onset, grid, decay, and band numbers from a
+window match a full pass; only the silence ratio is scored against a
+window-local loudness reference. `--max-seconds` counts whole bars that fit
+inside the cap, and refuses caps shorter than one bar instead of padding.
+
+Prefer the DI track when there is one; distortion flattens the decay
+contrast that separates open notes from palm mutes. Ships in the cloned
+repo (`skills/drum-apparatus/`), not via ReaPack.
 
 ## For agents
 

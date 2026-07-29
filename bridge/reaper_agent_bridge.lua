@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.12.0
+-- @version 3.13.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -13,6 +13,17 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.13.0: Needle Drop release. The bridge script itself is unchanged; the
+--   version moves in lockstep with the repo release. In the cloned repo
+--   (ReaPack installs only this bridge): the guitar stem profiler reads any
+--   window of a song without analyzing the rest (--start-bar / --bars /
+--   --max-seconds; hop-aligned, so timing, onset, grid, decay, and band
+--   numbers match a full pass, with only the silence ratio scored against
+--   a window-local loudness reference), the palm-mute vs open decay read
+--   survives real tempos, the
+--   analysis passes run about 2x faster, and the verify loop fails toward
+--   honesty (every post-send rejection is exit 2 with the rejection code in
+--   the JSON; malformed replies return structured errors).
 --   3.12.0: Closed-loop verify release. The bridge script itself is unchanged
 --   (the loop is a client-side sequencer of existing commands); the version
 --   moves in lockstep with the repo release that adds `reaperd.py measure` /
