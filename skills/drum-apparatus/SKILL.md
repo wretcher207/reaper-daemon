@@ -149,10 +149,12 @@ already humanized, nothing to fix after. These are physics, not taste:
 8. **Kicks don't typically play alone in featured moments** (David's correction,
    2026-07-29, on an ending kick run with nothing on top). Inside a groove a
    kick under hats/ride is fine — but an EXPOSED kick passage (ending run,
-   dead-stop chug answer, build) wants hands doing something over it: toms
-   riding the kicks (tom run descending into the smash) or cymbals on the
-   accents. A naked kick run in a spotlight moment is a programmed-part tell.
-   *(judgment — apply at authoring time)*
+   dead-stop chug answer, build) wants hands doing something over it — and
+   "something" means a REAL FILL: doubles rolling down the kit (snare-snare,
+   tom1-tom1, tom2-tom2...), flam to kick it off, ramping into the smash.
+   One polite hit per tom is its own programmed-part tell — David rejected
+   that too ("I meant like a fill, man"). A naked kick run in a spotlight
+   moment is the bug either way. *(judgment — apply at authoring time)*
 
 ## Velocity targets & per-kit voices (David's mix preferences)
 - **Kicks stay under ~114.** Punchy, not maxed. *(in code: groovekit KICK_VEL_MAX,
