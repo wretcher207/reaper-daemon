@@ -13,7 +13,7 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
---   3.13.0: Needle Drop release. The bridge script itself is unchanged; the
+--   3.13.0: Daemon Beater release. The bridge script itself is unchanged; the
 --   version moves in lockstep with the repo release. In the cloned repo
 --   (ReaPack installs only this bridge): the guitar stem profiler reads any
 --   window of a song without analyzing the rest (--start-bar / --bars /

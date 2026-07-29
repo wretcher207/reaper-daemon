@@ -292,7 +292,7 @@ map by hand with `add-map`:
 python3 reaperd.py add-map MyKontactKit --roles '{"KICK_R":36,"SNARE":38,"HH_OPEN_1":46,"CRASH_R":49,"CHINA_R":52}'
 ```
 
-## Needle Drop: profile a stem before you write drums
+## Daemon Beater: profile a stem before you write drums
 
 `profile` reads a guitar stem bar by bar and prints the numbers an agent
 needs to plan drums: onset density, timing regularity, palm-mute vs ringing
@@ -306,7 +306,7 @@ python3 reaperd.py profile song.rpp guitar-di --start-bar 32 --bars 8
 python3 reaperd.py profile song.rpp guitar-di --start-bar 32 --max-seconds 10
 ```
 
-The needle drop: point it at any bar and it analyzes just that window (plus
+Point it at any bar and it analyzes just that window (plus
 one bar of pre-roll and post-roll for context), never the whole stem. The
 cut is hop-aligned, so timing, onset, grid, decay, and band numbers from a
 window match a full pass; only the silence ratio is scored against a
