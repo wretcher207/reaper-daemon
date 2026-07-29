@@ -162,3 +162,42 @@ def test_profile_track_end_to_end():
         assert prof["bars"][0]["decay_ratio"] < prof["bars"][3]["decay_ratio"]
         text = format_profile(prof)
         assert "sections:" in text and "GTR_DI" in text
+
+
+def test_stem_a_few_samples_short_still_counts_final_bar():
+    """Glued/trimmed stems land a hair short of the exact bar line; the whole
+    final bar of music must not be silently dropped (40-bar song read as 39)."""
+    audio = [chug_bar()] * 3 + [open_bar()]
+    samples = [v for bar in audio for v in bar][:-200]  # ~8ms short of 4 bars
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "di.wav")
+        _write_float_wav(wav, samples)
+        rpp = (
+            '<REAPER_PROJECT 0.1\n  TEMPO 120 4 4 0\n'
+            '  <TRACK {AAA}\n    NAME GTR_DI\n'
+            '    <ITEM\n      POSITION 0\n      LENGTH 8\n'
+            f'      <SOURCE WAVE\n        FILE "di.wav"\n      >\n    >\n  >\n>\n'
+        )
+        p = os.path.join(d, "song.RPP")
+        open(p, "w").write(rpp)
+        prof = profile_track(p, "GTR_DI")
+        assert len(prof["bars"]) == 4  # int() truncation would say 3
+
+
+def test_edit_sliver_past_bar_line_does_not_add_a_bar():
+    """A few extra samples past the bar line are an edit artifact, not a bar."""
+    audio = [chug_bar()] * 4
+    samples = [v for bar in audio for v in bar] + [0.0] * 200
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "di.wav")
+        _write_float_wav(wav, samples)
+        rpp = (
+            '<REAPER_PROJECT 0.1\n  TEMPO 120 4 4 0\n'
+            '  <TRACK {AAA}\n    NAME GTR_DI\n'
+            '    <ITEM\n      POSITION 0\n      LENGTH 8\n'
+            f'      <SOURCE WAVE\n        FILE "di.wav"\n      >\n    >\n  >\n>\n'
+        )
+        p = os.path.join(d, "song.RPP")
+        open(p, "w").write(rpp)
+        prof = profile_track(p, "GTR_DI")
+        assert len(prof["bars"]) == 4  # ceil() alone would say 5

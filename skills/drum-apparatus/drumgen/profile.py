@@ -337,7 +337,12 @@ def profile_track(rpp_path, track_name, bars=None, start_bar=0,
     bar_s = 60.0 / proj["tempo"] * 4.0
     if bars is None:
         avail = len(mono) / sr
-        bars = max(1, int(avail / bar_s) - start_bar)
+        # Glued/trimmed stems routinely land a few samples SHORT of the exact
+        # bar line; int() truncation then silently drops the entire final bar
+        # (a 40-bar song profiled as 39 — real bug, real session). Count a
+        # trailing partial bar whenever at least 2% of it exists; below that
+        # it's an edit sliver, not music.
+        bars = max(1, math.ceil(avail / bar_s - 0.02) - start_bar)
     rows = profile_bars(mono, sr, proj["tempo"], bars, start_bar)
     bounds = find_boundaries(rows)
     segs = group_segments(rows, segment(rows, bounds))
