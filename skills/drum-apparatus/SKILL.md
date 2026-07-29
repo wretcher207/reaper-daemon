@@ -99,9 +99,14 @@ anything, and it's usually several cymbals at once.
 - Breakdowns lean **china + crash on the stabs**, never a hat grid. (See
   Breakdowns below — they're not grooves.)
 - **Chokes:** `china_choke` / `crash_choke` / `splash_choke` lanes play the
-  kit's hit-and-grab articulation — the genre move on stabs, dead stops, and
+  kit's choke articulation — the genre move on stabs, dead stops, and
   endings. Optional roles: on a kit without choke notes (GM, Monarch) they
   fall back to the open cymbal, so the DSL stays portable.
+  **Authoring rule (verified live on MDL Tone, 2026-07-28):** kit choke
+  notes are MUTE TRIGGERS, not hits — fired alone they play nothing. Always
+  author the real cymbal hit first, then the choke lane one grid step later
+  (hit rings a 16th, then gets grabbed). A choke with no ringing cymbal
+  under it is silence where the smash should be.
 - When in doubt, ask which cymbal. It's a taste call, not a rule.
 
 ### 4. Fills — last, and get spicy
@@ -141,6 +146,13 @@ already humanized, nothing to fix after. These are physics, not taste:
    after); the focal hits want something with them. *(judgment — apply by ear; the
    engine also FLAGS bare focal snare/cymbal hits as warnings — groovekit
    exposed_focal_hits — so they surface for review)*
+8. **Kicks don't typically play alone in featured moments** (David's correction,
+   2026-07-29, on an ending kick run with nothing on top). Inside a groove a
+   kick under hats/ride is fine — but an EXPOSED kick passage (ending run,
+   dead-stop chug answer, build) wants hands doing something over it: toms
+   riding the kicks (tom run descending into the smash) or cymbals on the
+   accents. A naked kick run in a spotlight moment is a programmed-part tell.
+   *(judgment — apply at authoring time)*
 
 ## Velocity targets & per-kit voices (David's mix preferences)
 - **Kicks stay under ~114.** Punchy, not maxed. *(in code: groovekit KICK_VEL_MAX,
