@@ -201,3 +201,70 @@ def test_edit_sliver_past_bar_line_does_not_add_a_bar():
         open(p, "w").write(rpp)
         prof = profile_track(p, "GTR_DI")
         assert len(prof["bars"]) == 4  # ceil() alone would say 5
+
+
+# ---- decay at real tempos ---------------------------------------------------
+
+def _bar_at(hits, freq, tau, tempo, amp=0.9):
+    """One bar at an arbitrary tempo (the module-level _bar is pinned to 120)."""
+    bar_s = 60.0 / tempo * 4.0
+    out = [0.0] * int(bar_s * SR)
+    for h in hits:
+        b = _burst(freq, tau, bar_s, amp)
+        start = int(h * bar_s * SR)
+        for i, v in enumerate(b):
+            if start + i < len(out):
+                out[start + i] += v
+    return out
+
+
+def test_decay_separates_mutes_from_rings_at_dense_tempos():
+    """16th-note dead mutes must read muted at ANY tempo. The fixed 150-220ms
+    tail window used to swallow the next hit's attack once the IOI dropped
+    under ~220ms: a dead-mute chug at 100 BPM (IOI 150ms) measured decay 0.85
+    — MORE ringing than actual open chords. Hidden because the test chug was
+    8ths at 120 BPM (IOI 250ms, just clear of the window).
+
+    Thresholds carry slack for this suite's 24 kHz rate (21.3ms hops blur
+    the shrunken windows); at the production 48 kHz, measured margins are
+    far wider (mute <= 0.08, ring >= 0.73 through 180 BPM)."""
+    sixteenths = [i / 16 for i in range(16)]
+    for tempo in (100.0, 146.0, 180.0):
+        mute = _bar_at(sixteenths, freq=100, tau=0.03, tempo=tempo)
+        ring = _bar_at(sixteenths, freq=100, tau=0.5, tempo=tempo)
+        m = profile_bars(mute * 2, SR, tempo, 2)[0]["decay_ratio"]
+        r = profile_bars(ring * 2, SR, tempo, 2)[0]["decay_ratio"]
+        assert m is not None and m < 0.25, f"tempo {tempo}: mute read {m}"
+        assert r is not None and r > 0.6, f"tempo {tempo}: ring read {r}"
+        assert r - m > 0.35, f"tempo {tempo}: no separation ({m} vs {r})"
+
+
+def test_final_onset_at_stem_end_is_not_misread_as_muted():
+    """A ringing chord whose decay windows run off the end of the stem is
+    unmeasurable, not 'muted': a truncated/empty tail used to read as ~0 and
+    drag the bar's median toward dead-mute."""
+    bar = _bar([0.0, 0.9], freq=100, tau=0.5)   # last ring ~200ms before EOF
+    row = profile_bars(bar, SR, TEMPO, 1)[0]
+    # the first hit measures high; the cut-off last hit is excluded, not zeroed
+    assert row["decay_ratio"] is not None and row["decay_ratio"] > 0.4
+
+
+def test_max_seconds_composes_with_start_bar():
+    """--max-seconds caps ANALYZED material, measured from --start-bar. The
+    old read-from-zero cap starved a later start window entirely."""
+    audio = [chug_bar()] * 2 + [open_bar()] * 2
+    samples = [v for bar in audio for v in bar]
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "di.wav")
+        _write_float_wav(wav, samples)
+        rpp = (
+            '<REAPER_PROJECT 0.1\n  TEMPO 120 4 4 0\n'
+            '  <TRACK {AAA}\n    NAME GTR_DI\n'
+            '    <ITEM\n      POSITION 0\n      LENGTH 8\n'
+            f'      <SOURCE WAVE\n        FILE "di.wav"\n      >\n    >\n  >\n>\n'
+        )
+        p = os.path.join(d, "song.RPP")
+        open(p, "w").write(rpp)
+        prof = profile_track(p, "GTR_DI", start_bar=2, max_seconds=2 * BAR_S)
+        assert [r["bar"] for r in prof["bars"]] == [3, 4]  # the two open bars
+        assert all(r["n_onsets"] == 2 for r in prof["bars"])

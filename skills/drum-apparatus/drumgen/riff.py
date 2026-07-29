@@ -12,6 +12,7 @@ in numpy/librosa for a one-shot read. Upgrade to a spectral detector only if the
 energy one misses notes on real material.
 """
 import array
+import math
 import os
 import re
 import struct
@@ -114,18 +115,44 @@ def read_wav_mono(path, max_seconds=None):
 
 # ---- onset detection -------------------------------------------------------
 
-def detect_onsets(samples, sr, hop=512, sensitivity=1.6, min_gap_s=0.05):
-    """Energy-flux onset detection. Returns a list of onset times (seconds).
-    Picks local peaks of positive energy rise that beat an adaptive local mean."""
-    n = len(samples)
-    nh = n // hop
-    energy = [0.0] * nh
-    for k in range(nh):
-        base = k * hop
-        s = 0.0
-        for i in range(base, base + hop):
-            v = samples[i]; s += v * v
-        energy[k] = s
+def _sum_squares_py(chunk):
+    """Pure-Python sum of squares — the README promises Python 3.8+, and
+    math.sumprod only exists on 3.12+. Same numbers, just slower."""
+    s = 0.0
+    for v in chunk:
+        s += v * v
+    return s
+
+
+if hasattr(math, "sumprod"):        # 3.12+: C-speed inner product
+    def _sum_squares(chunk):
+        return math.sumprod(chunk, chunk)
+else:
+    _sum_squares = _sum_squares_py
+
+
+def hop_energy(samples, hop=512):
+    """Sum-of-squares energy per hop window, at C speed where the runtime
+    allows. The spine everything downstream rides on — onsets here, decay/
+    silence/RMS in profile.py, which imports this so the pass runs once."""
+    try:
+        buf = memoryview(samples)   # zero-copy slices for array('f') input
+    except TypeError:
+        buf = samples               # plain lists (tests) still work
+    sq = _sum_squares
+    return [sq(buf[k * hop:(k + 1) * hop])
+            for k in range(len(samples) // hop)]
+
+
+def detect_onsets(samples, sr, hop=512, sensitivity=1.6, min_gap_s=0.05,
+                  energy=None):
+    """Energy-flux onset detection. Returns a list of (time_s, strength).
+    Picks local peaks of positive energy rise that beat an adaptive local mean.
+    Pass a precomputed hop_energy(samples, hop) as `energy` to skip the one
+    expensive pass (profile.py already has it in hand)."""
+    if energy is None:
+        energy = hop_energy(samples, hop)
+    nh = len(energy)
     flux = [0.0] * nh
     # k=0's predecessor is the silence before the file: a stem trimmed tight
     # to its downbeat starts hot, and that first hit is as real as any other
@@ -136,12 +163,18 @@ def detect_onsets(samples, sr, hop=512, sensitivity=1.6, min_gap_s=0.05):
         d = energy[k] - energy[k - 1]
         flux[k] = d if d > 0 else 0.0
 
+    # Prefix sums make the ±win local mean O(1) per hop instead of a fresh
+    # 33-hop slice + sum every iteration.
+    pref = [0.0] * (nh + 1)
+    for k in range(nh):
+        pref[k + 1] = pref[k] + flux[k]
+
     onsets = []  # (time_seconds, strength)
     last = -1e9
     win = 16  # ~170ms either side at hop 512 / 48k
     for k in range(0, nh - 1):
         lo, hi = max(0, k - win), min(nh, k + win + 1)
-        local = sum(flux[lo:hi]) / (hi - lo)
+        local = (pref[hi] - pref[lo]) / (hi - lo)
         t = k * hop / sr
         if (flux[k] > local * sensitivity + 1e-12
                 and (k == 0 or flux[k] >= flux[k - 1]) and flux[k] >= flux[k + 1]

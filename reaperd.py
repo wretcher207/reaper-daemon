@@ -1044,10 +1044,12 @@ def cmd_profile(args):
         print(f"[profile] ERROR: drum skill not found at {skill_dir}", file=sys.stderr)
         return 1
     cmd = [sys.executable, "-m", "drumgen.profile", args.project, args.track]
-    if args.bars is not None or args.start_bar:
+    if args.bars is not None or args.start_bar or args.max_seconds:
         cmd.append(str(args.bars if args.bars is not None else 0))  # 0 = whole item
-        if args.start_bar:
+        if args.start_bar or args.max_seconds:
             cmd.append(str(args.start_bar))
+        if args.max_seconds:
+            cmd.append(str(args.max_seconds))
     if args.json:
         cmd.append("--json")
     try:
@@ -1360,6 +1362,9 @@ def build_parser():
                    help="bars to profile (default: the whole first item)")
     s.add_argument("--start-bar", type=int, default=0,
                    help="first bar to profile, 0-indexed (default 0)")
+    s.add_argument("--max-seconds", type=float, default=None,
+                   help="analyze only N seconds of material (measured from "
+                        "--start-bar, so the flags compose)")
     s.add_argument("--json", action="store_true",
                    help="emit the raw profile JSON instead of the table")
     s.set_defaults(func=cmd_profile)

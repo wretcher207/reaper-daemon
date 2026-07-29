@@ -144,3 +144,16 @@ def test_read_wav_16bit_still_works():
     _, mono = _roundtrip(_wav(1, 16, frames))
     for got, want in zip(mono, frames):
         assert abs(got - want) < 1e-3
+
+
+def test_hop_energy_fallback_matches_fast_path(monkeypatch):
+    """math.sumprod is 3.12+; the README promises 3.8+. The pure-Python
+    fallback must produce the same energies the fast path does."""
+    import math as _math
+    from drumgen import riff
+    samples = [0.5 * _math.sin(i * 0.13) for i in range(10 * 512 + 100)]
+    fast = riff.hop_energy(samples)
+    monkeypatch.setattr(riff, "_sum_squares", riff._sum_squares_py)
+    slow = riff.hop_energy(samples)
+    assert len(fast) == len(slow) == 10
+    assert all(abs(a - b) < 1e-9 for a, b in zip(fast, slow))

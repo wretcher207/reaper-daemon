@@ -23,85 +23,88 @@ ponytail: stdlib only, same as riff.py. Band split is two one-pole IIR passes
 import json
 import math
 
-from .riff import parse_project, read_wav_mono, detect_onsets
+from .riff import parse_project, read_wav_mono, detect_onsets, hop_energy
 
 HOP = 512  # keep in lockstep with detect_onsets' default
 
 
 # ---- signal helpers --------------------------------------------------------
 
-def hop_energy(samples, hop=HOP):
-    """Sum-of-squares energy per hop window. The spine everything rides on."""
-    nh = len(samples) // hop
-    out = [0.0] * nh
-    for k in range(nh):
-        base = k * hop
-        s = 0.0
-        for i in range(base, base + hop):
-            v = samples[i]; s += v * v
-        out[k] = s
-    return out
-
-
-def band_energies(samples, sr, hop=HOP, low_hz=200.0, high_hz=2000.0):
+def band_energies_zc(samples, sr, hop=HOP, low_hz=200.0, high_hz=2000.0):
     """Per-hop energy of a ~<low_hz band and a ~>high_hz band via one-pole
-    IIR filters. Crude 6 dB/oct skirts are fine: we only compare a bar
-    against the rest of the SAME stem, never against an absolute scale."""
+    IIR filters, plus zero-crossing counts, in ONE pass. Crude 6 dB/oct
+    skirts are fine: we only compare a bar against the rest of the SAME
+    stem, never against an absolute scale. The IIRs carry state sample to
+    sample, so this is the analyzer's only per-sample Python loop — every
+    other pass runs at C speed via math.sumprod."""
     a_lo = math.exp(-2.0 * math.pi * low_hz / sr)
     a_hi = math.exp(-2.0 * math.pi * high_hz / sr)
+    b_lo = 1.0 - a_lo
+    b_hi = 1.0 - a_hi
     nh = len(samples) // hop
     lo_e = [0.0] * nh
     hi_e = [0.0] * nh
+    zc = [0] * nh
     ylo = 0.0
     yhi = 0.0
-    for k in range(nh):
-        base = k * hop
-        slo = 0.0
-        shi = 0.0
-        for i in range(base, base + hop):
-            v = samples[i]
-            ylo = (1.0 - a_lo) * v + a_lo * ylo   # low-pass @ low_hz
-            yhi = (1.0 - a_hi) * v + a_hi * yhi   # low-pass @ high_hz ...
-            h = v - yhi                            # ... subtracted = high-pass
-            slo += ylo * ylo
-            shi += h * h
-        lo_e[k] = slo
-        hi_e[k] = shi
-    return lo_e, hi_e
-
-
-def zero_crossings(samples, hop=HOP):
-    """Zero-crossing count per hop. Brightness proxy that costs nothing."""
-    nh = len(samples) // hop
-    out = [0] * nh
     prev = 0.0
     for k in range(nh):
-        base = k * hop
+        slo = 0.0
+        shi = 0.0
         c = 0
-        for i in range(base, base + hop):
-            v = samples[i]
+        for v in samples[k * hop:(k + 1) * hop]:
+            ylo = b_lo * v + a_lo * ylo   # low-pass @ low_hz
+            yhi = b_hi * v + a_hi * yhi   # low-pass @ high_hz ...
+            h = v - yhi                    # ... subtracted = high-pass
+            slo += ylo * ylo
+            shi += h * h
             if (v > 0.0 and prev <= 0.0) or (v < 0.0 and prev >= 0.0):
                 c += 1
             prev = v
-        out[k] = c
-    return out
+        lo_e[k] = slo
+        hi_e[k] = shi
+        zc[k] = c
+    return lo_e, hi_e, zc
 
 
 # ---- per-onset decay -------------------------------------------------------
 
 def onset_decay_ratio(energy, onset_hop, sr, hop=HOP,
-                      attack_s=(0.010, 0.060), tail_s=(0.150, 0.220)):
+                      attack_s=(0.010, 0.060), tail_s=(0.150, 0.220),
+                      next_gap_s=None):
     """Energy in the tail window over energy in the attack window, for one
     onset. Palm mutes die before the tail window opens (ratio near 0); open
-    strings/chords still ring there (ratio climbs toward and past 0.5)."""
-    def win_mean(t0, t1):
-        k0 = onset_hop + int(t0 * sr / hop)
-        k1 = max(k0 + 1, onset_hop + int(t1 * sr / hop))
+    strings/chords still ring there (ratio climbs toward and past 0.5).
+
+    next_gap_s is the time until the NEXT onset. Without it the fixed
+    150-220ms tail window swallows the next hit's attack on dense playing:
+    a 16th-note dead-mute chug at 100 BPM (IOI 150ms) measured MORE ringing
+    (0.85) than actual open chords. Windows shrink to fit inside the gap —
+    attack ends by 40% of it, tail lives in 60-90% — same question ('has
+    the note died yet?'), asked before the next note answers for it.
+
+    Returns None when the windows can't be measured honestly: hits too
+    close together, or a window running off the stem end (a truncated tail
+    would misread the final ringing chord as a dead mute)."""
+    a0, a1 = attack_s
+    t0, t1 = tail_s
+    if next_gap_s is not None:
+        a1 = min(a1, 0.40 * next_gap_s)
+        t0 = min(t0, 0.60 * next_gap_s)
+        t1 = min(t1, 0.90 * next_gap_s)
+        if a1 <= a0 or t1 <= t0:
+            return None
+
+    def win_mean(w0, w1):
+        k0 = onset_hop + int(w0 * sr / hop)
+        k1 = max(k0 + 1, onset_hop + int(w1 * sr / hop))
+        if k1 > len(energy):
+            return None                   # window runs off the stem end
         seg = energy[k0:k1]
-        return (sum(seg) / len(seg)) if seg else 0.0
-    att = win_mean(*attack_s)
-    tail = win_mean(*tail_s)
-    if att <= 0.0:
+        return (sum(seg) / len(seg)) if seg else None
+    att = win_mean(a0, a1)
+    tail = win_mean(t0, t1)
+    if att is None or tail is None or att <= 0.0:
         return None
     return tail / att
 
@@ -149,9 +152,12 @@ def profile_bars(samples, sr, tempo, bars, start_bar=0, hop=HOP, grid=16):
     bar_s = 60.0 / tempo * 4.0
     step_s = bar_s / grid
     energy = hop_energy(samples, hop)
-    lo_e, hi_e = band_energies(samples, sr, hop)
-    zc = zero_crossings(samples, hop)
-    onsets = detect_onsets(samples, sr, hop=hop)
+    lo_e, hi_e, zc = band_energies_zc(samples, sr, hop)
+    onsets = detect_onsets(samples, sr, hop=hop, energy=energy)
+    # Time to the next onset ANYWHERE in the stem (not just this bar), so
+    # decay windows never swallow the following hit's attack.
+    next_gap = {t: (onsets[i + 1][0] - t if i + 1 < len(onsets) else None)
+                for i, (t, _) in enumerate(onsets)}
 
     # Silence threshold: 30 dB under the stem's loud reference (95th pct of
     # non-zero hop energy). Adaptive, so DI level vs amped level doesn't matter.
@@ -190,7 +196,8 @@ def profile_bars(samples, sr, tempo, bars, start_bar=0, hop=HOP, grid=16):
         # decay: median over the bar's onsets (robust to one weird hit)
         decays = []
         for t, _ in b_on:
-            r = onset_decay_ratio(energy, int(t * sr / hop), sr, hop)
+            r = onset_decay_ratio(energy, int(t * sr / hop), sr, hop,
+                                  next_gap_s=next_gap.get(t))
             if r is not None:
                 decays.append(min(r, 4.0))  # cap: tail>attack blowups are noise
         decay_ratio = _median(decays)
@@ -328,13 +335,19 @@ def group_segments(rows, segs, sim_threshold=0.90):
 def profile_track(rpp_path, track_name, bars=None, start_bar=0,
                   max_seconds=None):
     """Project + track name -> full profile dict. bars=None profiles the
-    whole first item (comped tracks get riff.py's same first-item-only rule)."""
+    whole first item (comped tracks get riff.py's same first-item-only rule).
+
+    max_seconds caps how much MUSIC gets analyzed, not how much file gets
+    read: with a nonzero start_bar the read runs through start_bar +
+    max_seconds, so the two flags compose instead of the cap starving the
+    requested window (a start past a time-0 cap profiled zero bars)."""
     proj = parse_project(rpp_path, track_name)
     if not proj["items"]:
         raise ValueError(f"no audio items on track {track_name!r} in {rpp_path}")
     it = proj["items"][0]
-    sr, mono = read_wav_mono(it["source"], max_seconds=max_seconds)
     bar_s = 60.0 / proj["tempo"] * 4.0
+    read_cap = None if max_seconds is None else start_bar * bar_s + max_seconds
+    sr, mono = read_wav_mono(it["source"], max_seconds=read_cap)
     if bars is None:
         avail = len(mono) / sr
         # Glued/trimmed stems routinely land a few samples SHORT of the exact
@@ -387,5 +400,8 @@ if __name__ == "__main__":
     if bars is not None and bars <= 0:
         bars = None                       # reaperd forwards 0 for "whole item"
     start = int(argv[3]) if len(argv) > 3 else 0
-    p = profile_track(rpp, track, bars=bars, start_bar=start)
+    max_s = float(argv[4]) if len(argv) > 4 else None
+    if max_s is not None and max_s <= 0:
+        max_s = None                      # reaperd forwards 0 for "no cap"
+    p = profile_track(rpp, track, bars=bars, start_bar=start, max_seconds=max_s)
     print(json.dumps(p, indent=2) if as_json else format_profile(p))
