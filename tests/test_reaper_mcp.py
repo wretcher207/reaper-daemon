@@ -866,6 +866,343 @@ def test_verify_sender_default_timeout_is_the_shared_constant(root, monkeypatch)
             == reaper_mcp.verifyloop.DEFAULT_SENDER_TIMEOUT_MS == 10000)
 
 
+# --- drum workflow (profile_track / riff_grid / insert_groove) ---------------
+
+
+class FakeProc:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def fake_child(monkeypatch, returncode=0, stdout="", stderr="", record=None,
+               raises=None):
+    """Stand in for the drum engine / drumgen module the tool shells out to.
+    Records the argv it was handed so tests can pin the CLI contract."""
+    def run(cmd, **kw):
+        if record is not None:
+            record.append(list(cmd))
+        if raises is not None:
+            raise raises
+        return FakeProc(returncode, stdout, stderr)
+
+    monkeypatch.setattr(reaper_mcp.subprocess, "run", run)
+    return record
+
+
+def drum_skill(root):
+    """The skill layout the three tools require under the bridge root."""
+    skill = os.path.join(root, "skills", "drum-apparatus")
+    os.makedirs(skill, exist_ok=True)
+    with open(os.path.join(skill, "groovegen.py"), "w", encoding="utf-8") as f:
+        f.write("# fake engine; subprocess is monkeypatched in these tests\n")
+    return skill
+
+
+def saved_project(root, name="song.rpp"):
+    path = os.path.join(root, name)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("<REAPER_PROJECT 0.1\n>\n")
+    return path
+
+
+def live_heartbeat(root):
+    with open(os.path.join(root, "bridge", "heartbeat.json"), "w",
+              encoding="utf-8") as f:
+        json.dump({"alive_at": "now", "bridge_version": 3,
+                   "project_name": "Song"}, f)
+
+
+def midi_arg(argv):
+    return argv[argv.index("--out") + 1]
+
+
+def test_drum_tools_listed_with_schemas():
+    resp = reaper_mcp.handle_message(rpc("tools/list"))
+    tools = {t["name"]: t for t in resp["result"]["tools"]}
+    for name in ("profile_track", "riff_grid", "insert_groove"):
+        assert tools[name]["inputSchema"]["type"] == "object"
+        assert tools[name]["description"]
+    assert tools["profile_track"]["inputSchema"]["required"] == ["project", "track"]
+    assert tools["riff_grid"]["inputSchema"]["required"] == ["project", "track"]
+    # insert_groove's DSL source is one-of, so it cannot be a required field;
+    # the handler enforces the choice instead.
+    assert "required" not in tools["insert_groove"]["inputSchema"]
+    for name in ("dsl_text", "dsl_path", "dry_run"):
+        assert name in tools["insert_groove"]["inputSchema"]["properties"]
+    # The stale-project caveat has to be visible BEFORE the call, not only in
+    # the payload: a model choosing the tool must know it reads the disk.
+    for name in ("profile_track", "riff_grid"):
+        assert "SAVED" in tools[name]["description"]
+
+
+@pytest.mark.parametrize("tool", ["profile_track", "riff_grid"])
+def test_saved_project_tools_require_project_and_track(root, tool):
+    assert call(tool, {"track": "GTR"})["result"]["isError"] is True
+    assert call(tool, {"project": "x.rpp"})["result"]["isError"] is True
+
+
+@pytest.mark.parametrize("tool", ["profile_track", "riff_grid"])
+def test_saved_project_tools_refuse_missing_rpp(root, tool):
+    resp = call(tool, {"project": os.path.join(root, "nope.rpp"), "track": "GTR"})
+    assert resp["result"]["isError"] is True
+    body = json.loads(result_text(resp))
+    assert body["error"]["code"] == "PROJECT_NOT_FOUND"
+    assert "save the project" in body["error"]["details"].lower()
+
+
+def test_profile_track_payload_carries_the_stale_saved_project_caveat(
+        root, monkeypatch):
+    drum_skill(root)
+    project = saved_project(root)
+    fake_child(monkeypatch, stdout="tempo 146  sr 44100  track GTR  bars 4",
+               stderr="WARNING: 2 items on track; first item only")
+    resp = call("profile_track", {"project": project, "track": "GTR"})
+    body = json.loads(result_text(resp))
+    assert body["ok"] is True
+    assert body["source"] == "saved_project_file"
+    assert body["reads_live_reaper_state"] is False
+    assert "SAVED .rpp" in body["caveat"] and "stale" in body["caveat"]
+    assert body["project"] == project and body["project_saved_at"]
+    assert "tempo 146" in body["report"]
+    # The CLI drops the child's stderr on success; the tool must not — that is
+    # where drumgen says it analyzed only the first of several items.
+    assert "2 items" in body["warnings"]
+
+
+def test_riff_grid_payload_carries_the_caveat_and_defaults(root, monkeypatch):
+    drum_skill(root)
+    project = saved_project(root)
+    seen = fake_child(monkeypatch, stdout="bar 1: x... x... x... x...",
+                      record=[])
+    resp = call("riff_grid", {"project": project, "track": "GTR"})
+    body = json.loads(result_text(resp))
+    assert body["ok"] is True and body["analysis"] == "riff"
+    assert body["reads_live_reaper_state"] is False
+    assert "SAVED .rpp" in body["caveat"]
+    # reaperd.py riff's defaults: 4 bars from bar 0, positional.
+    assert seen[0][1:] == ["-m", "drumgen.riff", project, "GTR", "4", "0"]
+
+
+def test_profile_window_args_are_positional_in_drumgen_order(root, monkeypatch):
+    drum_skill(root)
+    project = saved_project(root)
+    seen = fake_child(monkeypatch, stdout="ok", record=[])
+    call("profile_track", {"project": project, "track": "GTR",
+                           "start_bar": 32, "bars": 8, "max_seconds": 10.0})
+    assert seen[0][1:] == ["-m", "drumgen.profile", project, "GTR",
+                           "8", "32", "10.0"]
+
+
+def test_profile_zero_max_seconds_reaches_drumgen_to_be_rejected(
+        root, monkeypatch):
+    # is-not-None, not truthiness: max_seconds 0 must be refused by drumgen,
+    # never silently reinterpreted as "profile the whole item".
+    drum_skill(root)
+    project = saved_project(root)
+    seen = fake_child(monkeypatch, stdout="ok", record=[])
+    call("profile_track", {"project": project, "track": "GTR", "max_seconds": 0})
+    assert seen[0][-3:] == ["0", "0", "0"]  # bars=whole item, start=0, cap=0
+
+
+def test_profile_subprocess_failure_is_a_structured_error(root, monkeypatch):
+    drum_skill(root)
+    project = saved_project(root)
+    fake_child(monkeypatch, returncode=1,
+               stderr="error: max_seconds 0.5 is shorter than one bar")
+    resp = call("profile_track", {"project": project, "track": "GTR",
+                                  "max_seconds": 0.5})
+    assert resp["result"]["isError"] is True
+    body = json.loads(result_text(resp))
+    assert body["ok"] is False
+    assert body["error"]["code"] == "PROFILE_FAILED"
+    assert "shorter than one bar" in body["error"]["details"]
+
+
+def test_child_traceback_is_reduced_to_the_exception_line(root, monkeypatch):
+    # drumgen.riff has no top-level error guard, so a bad track name crashes
+    # it. The model gets the exception, not a page of Python frames.
+    drum_skill(root)
+    project = saved_project(root)
+    fake_child(monkeypatch, returncode=1, stderr=(
+        "Traceback (most recent call last):\n"
+        '  File "<string>", line 1, in <module>\n'
+        "    proj = parse_project(rpp, track)\n"
+        "ValueError: track 'Nope' not found in song.rpp\n"))
+    resp = call("riff_grid", {"project": project, "track": "Nope"})
+    body = json.loads(result_text(resp))
+    assert body["error"]["code"] == "RIFF_FAILED"
+    assert body["error"]["details"] == "ValueError: track 'Nope' not found in song.rpp"
+    assert "Traceback" not in result_text(resp)
+
+
+def test_drum_tools_report_a_missing_skill_folder(root, monkeypatch):
+    project = saved_project(root)  # no skills/drum-apparatus under this root
+    resp = call("profile_track", {"project": project, "track": "GTR"})
+    body = json.loads(result_text(resp))
+    assert body["error"]["code"] == "DRUM_SKILL_MISSING"
+
+
+def test_profile_timeout_is_structured_not_a_crash(root, monkeypatch):
+    drum_skill(root)
+    project = saved_project(root)
+    fake_child(monkeypatch,
+               raises=subprocess.TimeoutExpired(cmd="profile", timeout=600))
+    resp = call("profile_track", {"project": project, "track": "GTR"})
+    body = json.loads(result_text(resp))
+    assert body["error"]["code"] == "PROFILE_TIMEOUT"
+
+
+@pytest.mark.parametrize("args, needle", [
+    ({"dsl_text": "kick x...", "dsl_path": "beat.dsl"}, "not both"),
+    ({}, "dsl_text"),
+    ({"dsl_text": "   "}, "empty"),
+])
+def test_insert_groove_refuses_ambiguous_or_missing_dsl(root, args, needle):
+    resp = call("insert_groove", dict(args, track="Drums"))
+    assert resp["result"]["isError"] is True
+    assert needle in result_text(resp)
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_insert_groove_refuses_a_missing_dsl_file(root):
+    resp = call("insert_groove", {"dsl_path": os.path.join(root, "no.dsl"),
+                                  "track": "Drums"})
+    body = json.loads(result_text(resp))
+    assert body["error"]["code"] == "DSL_NOT_FOUND"
+
+
+def test_insert_groove_gates_on_the_heartbeat_before_generating(
+        root, monkeypatch):
+    drum_skill(root)
+    seen = fake_child(monkeypatch, stdout="unused", record=[])
+    monkeypatch.setattr(reaper_mcp.reaperd, "reaper_running", lambda: False)
+    resp = call("insert_groove", {"dsl_text": "kick x...", "track": "Drums"})
+    assert resp["result"]["isError"] is True
+    body = json.loads(result_text(resp))
+    assert body["error"]["code"] == "REAPER_DOWN"
+    assert seen == []  # no MIDI generated for a project nothing can receive
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_insert_groove_renders_and_inserts(root, monkeypatch):
+    drum_skill(root)
+    live_heartbeat(root)
+    seen = fake_child(monkeypatch, stdout="groovekit: 32 notes | 2 bars | "
+                                          "map=GM Standard", record=[])
+    cmds = []
+    fake_bridge(root, {"ok": True, "type": "insert_midi_file",
+                       "data": {"track": {"name": "Drums"}}}, record=cmds)
+    resp = call("insert_groove", {"dsl_text": "kick x...x...x...x...",
+                                  "track": "Drums", "seed": 7, "map": "MyKit"})
+    body = json.loads(result_text(resp))
+    assert body["ok"] is True
+    assert "32 notes" in body["generated"]
+    assert body["data"]["track"]["name"] == "Drums"
+    payload = cmds[0]["payload"]
+    assert payload["target_track_name"] == "Drums"
+    assert payload["position"] == {"type": "cursor"}
+    assert payload["midi_path"].endswith(".mid")
+    argv = seen[0]
+    # --spec=<text>, one argv entry: a DSL line starting with '-' must not be
+    # read as an option by the engine's argparse.
+    assert any(a.startswith("--spec=kick x") for a in argv)
+    assert argv[argv.index("--seed") + 1] == "7"
+    assert argv[argv.index("--map") + 1] == "MyKit"
+    assert not os.path.exists(midi_arg(argv))  # temp MIDI cleaned on success
+
+
+def test_insert_groove_honors_dry_run(root, monkeypatch):
+    drum_skill(root)
+    live_heartbeat(root)
+    fake_child(monkeypatch, stdout="groovekit: 8 notes | 1 bars")
+    cmds = []
+    fake_bridge(root, {"ok": True, "type": "insert_midi_file", "dry_run": True,
+                       "message": "would insert"}, record=cmds)
+    resp = call("insert_groove", {"dsl_text": "kick x...", "track": "Drums",
+                                  "dry_run": True})
+    body = json.loads(result_text(resp))
+    assert body["ok"] is True and body["dry_run"] is True
+    assert cmds[0]["dry_run"] is True
+    assert cmds[0]["created_by"] == "mcp"
+
+
+def test_insert_groove_position_seconds_and_selected_track_fallback(
+        root, monkeypatch):
+    drum_skill(root)
+    live_heartbeat(root)
+    fake_child(monkeypatch, stdout="groovekit: 8 notes")
+    cmds = []
+    fake_bridge(root, {"ok": True, "type": "insert_midi_file"}, record=cmds)
+    call("insert_groove", {"dsl_text": "kick x...", "position": 12.5})
+    payload = cmds[0]["payload"]
+    assert payload["position"] == {"type": "time", "seconds": 12.5}
+    assert payload["use_selected_track"] is True
+
+
+def test_insert_groove_surfaces_the_engine_message_and_unlinks_the_midi(
+        root, monkeypatch):
+    drum_skill(root)
+    live_heartbeat(root)
+    seen = fake_child(monkeypatch, returncode=2, record=[],
+                      stderr="error: unknown role 'kik' on line 3")
+    resp = call("insert_groove", {"dsl_text": "kik x...", "track": "Drums"})
+    assert resp["result"]["isError"] is True
+    body = json.loads(result_text(resp))
+    assert body["error"]["code"] == "DSL_ERROR"
+    # Verbatim: this message is what the model needs to repair its DSL.
+    assert body["error"]["details"] == "error: unknown role 'kik' on line 3"
+    assert not os.path.exists(midi_arg(seen[0]))
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_insert_groove_unlinks_the_midi_when_the_bridge_rejects(
+        root, monkeypatch):
+    drum_skill(root)
+    live_heartbeat(root)
+    seen = fake_child(monkeypatch, stdout="groovekit: 8 notes", record=[])
+    fake_bridge(root, {"ok": False, "type": "insert_midi_file",
+                       "error": {"code": "NO_TARGET_TRACK", "details": "gone"}})
+    resp = call("insert_groove", {"dsl_text": "kick x...", "track": "Ghost"})
+    assert resp["result"]["isError"] is True
+    body = json.loads(result_text(resp))
+    assert body["error"]["code"] == "NO_TARGET_TRACK"
+    assert "8 notes" in body["generated"]  # what was generated, honestly
+    assert not os.path.exists(midi_arg(seen[0]))
+
+
+def test_insert_groove_unlinks_the_midi_when_the_engine_times_out(
+        root, monkeypatch):
+    drum_skill(root)
+    live_heartbeat(root)
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append(list(cmd))
+        raise subprocess.TimeoutExpired(cmd="groovegen", timeout=120)
+
+    monkeypatch.setattr(reaper_mcp.subprocess, "run", run)
+    resp = call("insert_groove", {"dsl_text": "kick x...", "track": "Drums"})
+    body = json.loads(result_text(resp))
+    assert body["error"]["code"] == "GROOVE_TIMEOUT"
+    assert not os.path.exists(midi_arg(seen[0]))
+
+
+def test_insert_groove_falls_back_to_drum_config_track_and_map(
+        root, monkeypatch):
+    drum_skill(root)
+    live_heartbeat(root)
+    with open(os.path.join(root, "drum-config.json"), "w", encoding="utf-8") as f:
+        json.dump({"track": "Kit", "map": "RS Monarch"}, f)
+    seen = fake_child(monkeypatch, stdout="groovekit: 8 notes", record=[])
+    cmds = []
+    fake_bridge(root, {"ok": True, "type": "insert_midi_file"}, record=cmds)
+    call("insert_groove", {"dsl_text": "kick x..."})
+    assert cmds[0]["payload"]["target_track_name"] == "Kit"
+    assert seen[0][seen[0].index("--map") + 1] == "RS Monarch"
+
+
 # --- stdio subprocess smoke test ---------------------------------------------
 
 def test_stdio_framing_end_to_end(root):

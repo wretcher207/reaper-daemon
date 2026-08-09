@@ -7,9 +7,10 @@ CLI is a single Python 3 file (`reaperd.py`) with no third-party deps.
 
 If your environment supports MCP, prefer the MCP server over the raw CLI:
 `reaper_mcp.py` (stdio, zero deps, same repo root) exposes these same commands
-as typed tools, plus the closed-loop `verify_change` / `tune_param` tools and
-`analyze_track` / `compare_tracks` mix diagnosis when Post Mortem is
-installed. Wiring instructions are in the README. Everything below still
+as typed tools, plus the closed-loop `verify_change` / `tune_param` tools, the
+drum-workflow trio `profile_track` / `riff_grid` / `insert_groove` (no shell
+needed), and `analyze_track` / `compare_tracks` mix diagnosis when Post Mortem
+is installed. Wiring instructions are in the README. Everything below still
 applies when you use the CLI directly.
 
 This bridge is plugin-agnostic. It knows nothing about any specific synth, amp
@@ -207,6 +208,12 @@ with its absolute `midi_path`, a `target_track_name`, and a `position`
 python3 reaperd.py groove beat.dsl --track Drums        # render + insert + verify
 python3 reaperd.py jam                                  # DSL from stdin -> selected track
 ```
+
+On MCP, the same three steps are tools instead of shell commands:
+`profile_track` (per-bar stem features), `riff_grid` (transients -> proposed
+kick grid), `insert_groove` (DSL -> MIDI -> inserted, `dry_run` supported).
+`profile_track` and `riff_grid` read the SAVED `.rpp` from disk, never REAPER's
+live state. Their payloads say so, and you must repeat that caveat.
 
 The engine (`skills/drum-apparatus/`) humanizes velocity, fatigue, and timing.
 For a drum library it doesn't know, auto-discover its map first:

@@ -391,6 +391,270 @@ def tool_raw_command(args):
         dry_run=bool(args.get("dry_run"))))
 
 
+# --- Drum workflow (profile / riff / groove) ---------------------------------
+#
+# These three shell out to `sys.executable`, the same way reaperd.py runs the
+# drum engine: the analysis code lives in skills/drum-apparatus/ and the bridge
+# itself never runs external processes (docs/safety.md). Promoting them to MCP
+# tools removes the shell from the loop; it does not move the work.
+
+DRUM_SKILL_SUBDIR = os.path.join("skills", "drum-apparatus")
+PROFILE_TIMEOUT_S = 600     # reaperd.cmd_profile's timeout
+RIFF_TIMEOUT_S = 300        # reaperd.cmd_riff's timeout
+GROOVE_GEN_TIMEOUT_S = 120  # reaperd.cmd_groove's generation timeout
+GROOVE_INSERT_TIMEOUT_MS = 20000
+
+# profile and riff parse the .rpp FILE ON DISK. REAPER's live, unsaved state is
+# invisible to them, so every payload carries this verbatim — a model that drops
+# it would report on material the user may already have replaced.
+SAVED_PROJECT_CAVEAT = (
+    "Read from the SAVED .rpp file on disk, NOT from REAPER's live in-memory "
+    "project. Unsaved edits are invisible here: if the project changed since "
+    "the last save, this analysis describes stale material. Repeat this caveat "
+    "when you report the numbers, or ask the user to save and rerun."
+)
+
+
+def _drum_skill_dir():
+    return os.path.join(BRIDGE_ROOT, DRUM_SKILL_SUBDIR)
+
+
+def _error_result(code, details):
+    """The structured failure shape bridge errors already use."""
+    return _text(json.dumps({"ok": False,
+                             "error": {"code": code, "details": details}},
+                            indent=1), is_error=True)
+
+
+def _child_error_details(proc):
+    """The child's own message, never a raw traceback dump.
+
+    groovegen.py and drumgen.profile exit non-zero with a clean `error: ...`
+    line, which is exactly what a model needs to fix its input, so it is passed
+    through verbatim. A crashing child (drumgen.riff has no top-level guard)
+    would otherwise dump a Python traceback into the tool result; keep the
+    exception line, drop the frames."""
+    text = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+    if not text:
+        return None
+    if "Traceback (most recent call last)" in text:
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        return lines[-1].strip()
+    return text[-2000:]
+
+
+def _saved_project_arg(tool, args):
+    """Validate the shared (project, track) selector. Returns (project, track,
+    error_result)."""
+    project = args.get("project")
+    track = args.get("track")
+    if not project or not isinstance(project, str):
+        return None, None, _text(f"{tool} needs a 'project' path to a saved "
+                                 ".rpp file", is_error=True)
+    if not track or not isinstance(track, str):
+        return None, None, _text(f"{tool} needs a 'track' name", is_error=True)
+    project = os.path.abspath(os.path.expanduser(project))
+    if not os.path.isfile(project):
+        return None, None, _error_result(
+            "PROJECT_NOT_FOUND",
+            f"no saved project file at {project}. This tool reads the .rpp on "
+            "disk; save the project in REAPER first.")
+    return project, track, None
+
+
+def _run_drum_module(kind, argv, timeout_s):
+    """Run a drumgen module from the skill dir. Returns (proc, error_result)."""
+    skill_dir = _drum_skill_dir()
+    if not os.path.isdir(skill_dir):
+        return None, _error_result(
+            "DRUM_SKILL_MISSING", f"drum skill not found at {skill_dir}")
+    try:
+        proc = subprocess.run([sys.executable] + argv, cwd=skill_dir,
+                              capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return None, _error_result(
+            f"{kind.upper()}_TIMEOUT",
+            f"{kind} analysis did not finish in {timeout_s}s (very long stem? "
+            "analyze a window with bars/start_bar"
+            + ("/max_seconds)" if kind == "profile" else ")"))
+    except OSError as e:
+        return None, _error_result(f"{kind.upper()}_FAILED", str(e))
+    if proc.returncode != 0:
+        return None, _error_result(
+            f"{kind.upper()}_FAILED",
+            _child_error_details(proc) or f"{kind} exited {proc.returncode}")
+    return proc, None
+
+
+def _saved_project_result(kind, project, track, proc):
+    """One payload shape for both disk readers, caveat attached."""
+    body = {
+        "ok": True,
+        "analysis": kind,
+        "source": "saved_project_file",
+        "reads_live_reaper_state": False,
+        "project": project,
+        "track": track,
+        "caveat": SAVED_PROJECT_CAVEAT,
+    }
+    try:
+        body["project_saved_at"] = datetime.fromtimestamp(
+            os.path.getmtime(project), timezone.utc).isoformat()
+    except OSError:
+        body["project_saved_at"] = None
+    body["report"] = (proc.stdout or "").rstrip()
+    # The CLI throws the child's stderr away on success, which silently eats
+    # drumgen's multi-item / windowing warnings. Keep them.
+    warnings = (proc.stderr or "").strip()
+    if warnings:
+        body["warnings"] = warnings[-2000:]
+    return _text(json.dumps(body, indent=1))
+
+
+def tool_profile_track(args):
+    project, track, err = _saved_project_arg("profile_track", args)
+    if err:
+        return err
+    argv = ["-m", "drumgen.profile", project, track]
+    bars = args.get("bars")
+    start_bar = args.get("start_bar")
+    max_seconds = args.get("max_seconds")
+    # drumgen.profile takes these positionally, in this order. is-not-None, not
+    # truthiness (same rule as reaperd.cmd_profile): max_seconds=0 must reach
+    # drumgen and be REJECTED there, not silently become "the whole item".
+    if bars is not None or start_bar or max_seconds is not None:
+        argv.append(str(bars if bars is not None else 0))  # 0 = whole item
+        if start_bar or max_seconds is not None:
+            argv.append(str(start_bar or 0))
+        if max_seconds is not None:
+            argv.append(str(max_seconds))
+    proc, err = _run_drum_module("profile", argv, PROFILE_TIMEOUT_S)
+    if err:
+        return err
+    return _saved_project_result("profile", project, track, proc)
+
+
+def tool_riff_grid(args):
+    project, track, err = _saved_project_arg("riff_grid", args)
+    if err:
+        return err
+    bars = args.get("bars")
+    start_bar = args.get("start_bar")
+    argv = ["-m", "drumgen.riff", project, track,
+            str(4 if bars is None else bars), str(start_bar or 0)]
+    proc, err = _run_drum_module("riff", argv, RIFF_TIMEOUT_S)
+    if err:
+        return err
+    return _saved_project_result("riff", project, track, proc)
+
+
+def tool_insert_groove(args):
+    dsl_text = args.get("dsl_text")
+    dsl_path = args.get("dsl_path")
+    # Two DSL sources, one project: an ambiguous request fails closed before
+    # anything is generated or sent, the way conflicting selectors do elsewhere.
+    if dsl_text is not None and dsl_path is not None:
+        return _text("insert_groove needs ONE DSL source: dsl_text or "
+                     "dsl_path, not both", is_error=True)
+    if dsl_text is None and dsl_path is None:
+        return _text("insert_groove needs dsl_text (inline DSL) or dsl_path "
+                     "(a .dsl file)", is_error=True)
+    if dsl_text is not None and (not isinstance(dsl_text, str)
+                                 or not dsl_text.strip()):
+        return _text("insert_groove: dsl_text is empty", is_error=True)
+    if dsl_path is not None:
+        if not isinstance(dsl_path, str) or not dsl_path.strip():
+            return _text("insert_groove: dsl_path is empty", is_error=True)
+        dsl_path = os.path.abspath(os.path.expanduser(dsl_path))
+        if not os.path.isfile(dsl_path):
+            return _error_result("DSL_NOT_FOUND", f"no DSL file at {dsl_path}")
+    # Heartbeat gate first (same as reaperd.cmd_groove): a dead REAPER fails
+    # here in ~0 s instead of after MIDI generation plus the 20 s insert wait.
+    if not reaperd.status_ok(bridge_root=BRIDGE_ROOT, quiet=True):
+        return _error_result(
+            "REAPER_DOWN",
+            "no fresh bridge heartbeat — REAPER is not running or the bridge "
+            "never loaded. Nothing was generated and nothing was inserted.")
+    groovegen = os.path.join(_drum_skill_dir(), "groovegen.py")
+    if not os.path.isfile(groovegen):
+        return _error_result("DRUM_ENGINE_MISSING",
+                             f"drum engine not found at {groovegen}")
+
+    cfg = reaperd.load_drum_config(BRIDGE_ROOT) or {}
+    kit_map = args.get("map") or cfg.get("map")
+    selector = _track_payload(args)
+    if not any(v is not None for v in selector.values()):
+        # cmd_groove's fallback chain: named track, else drum-config's default
+        # track, else whatever is selected in REAPER.
+        if cfg.get("track"):
+            selector = {"target_track_name": cfg["track"]}
+        else:
+            selector = {"use_selected_track": True}
+    position = args.get("position")
+    if position is None:
+        position = {"type": "cursor"}
+    elif isinstance(position, (int, float)) and not isinstance(position, bool):
+        position = {"type": "time", "seconds": float(position)}
+
+    midi = tempfile.NamedTemporaryFile(suffix=".mid", delete=False).name
+    try:
+        gen = [sys.executable, groovegen, "--out", midi]
+        if dsl_path is not None:
+            gen += ["--dsl", dsl_path]
+        else:
+            # --spec=<text>, not two argv entries: a DSL line starting with '-'
+            # would otherwise be parsed as an option by the engine's argparse.
+            gen.append("--spec=" + dsl_text)
+        if kit_map:
+            gen += ["--map", kit_map]
+        if args.get("seed") is not None:
+            gen += ["--seed", str(args["seed"])]
+        try:
+            gen_proc = subprocess.run(gen, capture_output=True, text=True,
+                                      timeout=GROOVE_GEN_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            return _error_result(
+                "GROOVE_TIMEOUT",
+                f"the drum engine did not finish in {GROOVE_GEN_TIMEOUT_S}s; "
+                "nothing was inserted")
+        except OSError as e:
+            return _error_result("GROOVE_FAILED", str(e))
+        if gen_proc.returncode != 0:
+            # groovegen exits 2 with a clean `error: <what is wrong>` line.
+            # That message IS the fix instruction — pass it through verbatim.
+            return _error_result(
+                "DSL_ERROR",
+                _child_error_details(gen_proc)
+                or f"the drum engine exited {gen_proc.returncode}")
+
+        payload = dict(selector)
+        payload.update({"midi_path": midi, "position": position})
+        reply = _send("insert_midi_file", payload,
+                      timeout_ms=GROOVE_INSERT_TIMEOUT_MS,
+                      dry_run=bool(args.get("dry_run")))
+        summary = (gen_proc.stdout or "").strip()
+        if not reply.get("ok"):
+            return _text(json.dumps({"ok": False, "error": reply.get("error"),
+                                     "generated": summary}, indent=1),
+                         is_error=True)
+        body = {"ok": True, "generated": summary,
+                "midi_temp_file_deleted": True}
+        if reply.get("message"):
+            body["message"] = reply["message"]
+        if reply.get("data") is not None:
+            body["data"] = reply["data"]
+        if reply.get("dry_run"):
+            body["dry_run"] = True
+        return _text(json.dumps(body, indent=1))
+    finally:
+        # Success, DSL error, bridge rejection, crash: the temp MIDI never
+        # survives the call (cmd_groove's contract).
+        try:
+            os.unlink(midi)
+        except OSError:
+            pass
+
+
 # --- Closed-loop verify / tune ----------------------------------------------
 
 def _verify_sender(cmd_type, payload, timeout_ms=verifyloop.DEFAULT_SENDER_TIMEOUT_MS):
@@ -1019,6 +1283,100 @@ TOOLS = [
             "output_file": {"type": "string", "description": "Optional; defaults to a unique temp path."},
         }),
         "handler": tool_capture_track_audio,
+    },
+    {
+        "name": "profile_track",
+        "description": ("Daemon Beater: profile a guitar stem bar by bar to plan "
+                        "drums — onset density, IOI regularity, decay ratio "
+                        "(palm-mute vs ringing), silence, low/bright balance, "
+                        "RMS/crest, a 16th accent grid, plus suggested section "
+                        "boundaries and repeated-section groups (A/B/A). "
+                        "READS THE SAVED .rpp FILE ON DISK, NOT REAPER's live "
+                        "project: unsaved edits are invisible, so on a dirty "
+                        "project this analyzes stale material. The result "
+                        "repeats that caveat — relay it, never present these "
+                        "numbers as the current session. Numbers, not verdicts: "
+                        "YOU propose the section labels and the user corrects "
+                        "them. Point it at the DI track, not the amped stem "
+                        "(distortion flattens the decay contrast) and say which "
+                        "you used. Slow (up to 600 s on a long stem) — window it "
+                        "with bars / start_bar / max_seconds."),
+        "inputSchema": _schema({
+            "project": {"type": "string",
+                        "description": "Absolute path to the SAVED .rpp project file."},
+            "track": {"type": "string",
+                      "description": "Name of the guitar track to profile (prefer the DI)."},
+            "start_bar": {"type": "integer",
+                          "description": "First bar to profile, 0-indexed (default 0)."},
+            "bars": {"type": "integer",
+                     "description": "Bars to profile (omit for the whole first item)."},
+            "max_seconds": {"type": "number",
+                            "description": ("Analyze only N seconds from start_bar. Counts whole "
+                                            "bars that fit; a cap shorter than one bar is refused, "
+                                            "not padded.")},
+        }, required=["project", "track"]),
+        "handler": tool_profile_track,
+    },
+    {
+        "name": "riff_grid",
+        "description": ("Step 1 of the drum workflow: read a guitar stem's "
+                        "transients into a proposed KICK GRID, printed at "
+                        "100/50/30% attack strength. READS THE SAVED .rpp FILE "
+                        "ON DISK, NOT REAPER's live project — same stale-material "
+                        "caveat as profile_track, and the result carries it. "
+                        "This is a PROPOSAL the user corrects, not an auto-beat: "
+                        "transients say WHEN a note is picked, never whether it "
+                        "rings open or is palm-muted, so the percentile is an "
+                        "attack-strength heuristic. The 30% row is the sparse "
+                        "slam/breakdown feel (the default); the 100% row turns "
+                        "every pick attack into a kick (gallops/triplets). The "
+                        "grid is anchored to item time 0, so a stem whose "
+                        "downbeat sits a step off reads a 16th early — check the "
+                        "first render. Transcribe the row the user picks into a "
+                        "DSL, then insert_groove."),
+        "inputSchema": _schema({
+            "project": {"type": "string",
+                        "description": "Absolute path to the SAVED .rpp project file."},
+            "track": {"type": "string",
+                      "description": "Name of the guitar track to read."},
+            "bars": {"type": "integer", "description": "Bars to read (default 4)."},
+            "start_bar": {"type": "integer",
+                          "description": "First bar to read, 0-indexed (default 0)."},
+        }, required=["project", "track"]),
+        "handler": tool_riff_grid,
+    },
+    {
+        "name": "insert_groove",
+        "description": ("Render a drum DSL to MIDI and insert it on a track in "
+                        "ONE call — the engine (skills/drum-apparatus/) humanizes "
+                        "velocity, fatigue and timing at placement. Give the DSL "
+                        "EITHER inline as dsl_text OR as a file with dsl_path, "
+                        "never both. MUTATES the project (undo-block wrapped, one "
+                        "Ctrl/Cmd+Z reverts); supports dry_run. Refuses in ~0 s "
+                        "when the bridge heartbeat is dead, before generating "
+                        "anything. The MIDI goes to a temp file that is deleted "
+                        "after the insert, so the payload reports what was "
+                        "generated rather than a reusable path. Kit map: the "
+                        "DSL's own @map wins, then this map argument, then "
+                        "drum-config.json, then GM Standard. Track: named track, "
+                        "else drum-config.json's default, else REAPER's selected "
+                        "track. A bad DSL comes back as DSL_ERROR with the "
+                        "engine's own message — fix the DSL from it."),
+        "inputSchema": _schema({
+            **TRACK_PROPS, **DRY_RUN_PROP,
+            "dsl_text": {"type": "string",
+                         "description": "The groove DSL inline. Mutually exclusive with dsl_path."},
+            "dsl_path": {"type": "string",
+                         "description": "Absolute path to a .dsl file. Mutually exclusive with dsl_text."},
+            "position": {"description": ("Where to insert: a position object like "
+                                         "{\"type\":\"bar\",\"bar\":33} (see insert_midi_file) or a "
+                                         "plain number of seconds. Default: the edit cursor.")},
+            "map": {"type": "string",
+                    "description": "Drum-kit map name (see reaperd.py list-maps). The DSL's @map wins over this."},
+            "seed": {"type": "integer",
+                     "description": "RNG seed for the humanizer; same seed + same DSL = same MIDI."},
+        }),
+        "handler": tool_insert_groove,
     },
     {
         "name": "verify_change",

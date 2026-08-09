@@ -233,11 +233,15 @@ Claude Desktop (`claude_desktop_config.json`):
 Then just ask: *"add a ReaEQ to the bass and carve 2 dB at 300 Hz"*, *"what
 plugins are on the master?"*, *"program a d-beat groove at bar 33"*.
 
-21 tools: project/FX discovery (`get_context`, `scan_fx`,
+24 tools: project/FX discovery (`get_context`, `scan_fx`,
 `get_fx_parameters`, `get_track_routing`), transport, tracks, FX chains,
 `set_fx_param` (formatted values like `"-16.00 dB"` work), automation
 envelopes, markers/regions, MIDI insertion, `batch` (one undo block),
-post-FX stem capture, the closed-loop pair — `verify_change` (run one
+post-FX stem capture, the drum-workflow trio (`profile_track` and
+`riff_grid`, which analyze a guitar stem out of the SAVED `.rpp` on disk
+rather than REAPER's live project, a caveat every payload carries, plus
+`insert_groove`, which renders a drum DSL to MIDI and inserts it in one
+call), the closed-loop pair — `verify_change` (run one
 mutation with measured pre/post proof, see
 [Closed-loop verify](#closed-loop-verify--mix-moves-with-measured-proof))
 and `tune_param` (iteratively search a parameter until a measured target
@@ -316,6 +320,11 @@ inside the cap, and refuses caps shorter than one bar instead of padding.
 Prefer the DI track when there is one; distortion flattens the decay
 contrast that separates open notes from palm mutes. Ships in the cloned
 repo (`skills/drum-apparatus/`), not via ReaPack.
+
+MCP clients get the same three steps without a shell: `profile_track`,
+`riff_grid`, and `insert_groove`. The two analysis tools parse the `.rpp`
+file on disk, so save the project before calling them. On an unsaved
+project they describe stale material, which their payloads state outright.
 
 ## For agents
 
