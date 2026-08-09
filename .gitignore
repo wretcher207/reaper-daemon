@@ -13,6 +13,12 @@ logs/*
 # Bridge runtime state
 bridge/heartbeat.json
 
+# Console runtime: full transcripts, raw stream, mic audio, panel/sidecar state.
+# Ignore everything by default so a new runtime subfolder can't leak; source opts in.
+console/*
+!console/*.py
+!console/*.md
+
 # Machine-specific config (the bridge regenerates this on first run)
 bridge/bridge_config.json
 

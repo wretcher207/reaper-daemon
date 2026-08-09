@@ -1,0 +1,50 @@
+{
+  "_comment": "Copy to console_config.json in the repo root and edit. Every key is optional; the sidecar falls back to the defaults baked into console_sidecar.py. console_config.json is NOT read from argv, so no secret ever lands in a process listing.",
+
+  "_claude_path": "Absolute path to claude.exe. null = shutil.which('claude'). A .cmd/.bat shim is refused: killing a shim leaves node alive holding a paid session.",
+  "claude_path": null,
+
+  "_python_path": "Interpreter used to launch reaper_mcp.py as the MCP server. null = the interpreter running the sidecar.",
+  "python_path": null,
+
+  "model": "opus",
+  "effort": "medium",
+
+  "_daily_budget_usd": "Hard stop enforced by the sidecar, persisted across restarts in console/cost.json. --max-budget-usd is advisory and latching, so this is the real cap.",
+  "daily_budget_usd": 10.0,
+
+  "_session_budget_usd": "Per-process cap. null disables it.",
+  "session_budget_usd": null,
+
+  "_turn_warn_usd": "A turn costing more than this blocks the NEXT Send until the panel sends an ack_warn control file. There is no cheap mid-turn ceiling, so the gate is pre-flight on the following turn.",
+  "turn_warn_usd": 0.25,
+
+  "_cli_max_budget_usd": "Backstop passed to --max-budget-usd. Keep it ABOVE daily_budget_usd: the CLI flag overshoots by one turn and then latches into an unusable session.",
+  "cli_max_budget_usd": 25.0,
+
+  "poll_interval": 0.25,
+
+  "_deadman_seconds": "Kill the child when panel.json has been stale this long AND the bridge is not mid-render AND no turn is in flight. Must stay above verifyloop.CAPTURE_TIMEOUT_MS (180 s).",
+  "deadman_seconds": 300.0,
+
+  "_stdin_timeout": "How long to wait for a control_response (e.g. the interrupt receipt).",
+  "stdin_timeout": 20.0,
+
+  "_turn_timeout_seconds": "A turn with no result event this long is interrupted, then the child is killed and resumed. Without it a hung turn pins turn_in_flight true and the dead-man switch can never fire.",
+  "turn_timeout_seconds": 900.0,
+
+  "max_queue_depth": 5,
+
+  "_event_line_cap": "Bytes of text kept per normalized event line. The panel parses these on REAPER's UI thread and one scan_fx result is hundreds of KB. Full text always lands in console/raw/.",
+  "event_line_cap": 2048,
+
+  "retention_days": 7,
+  "retention_bytes": 209715200,
+
+  "_quick_actions": "Rendered as buttons by the panel; the sidecar only passes them through in state.json.",
+  "quick_actions": [
+    {"label": "Profile selected", "prompt": "Profile the selected drum track and tell me what kit and feel it is."},
+    {"label": "Measure this track", "prompt": "Measure the selected track and report LUFS-I, peak and whether the capture was isolated."},
+    {"label": "What is wrong with this mix?", "prompt": "Measure the master bus and name the single biggest problem you can prove from the numbers."}
+  ]
+}

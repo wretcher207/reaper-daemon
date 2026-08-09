@@ -55,6 +55,7 @@ jobs:
           python -m py_compile
           reaperd.py
           reaper_mcp.py
+          console_sidecar.py
           setup/install.py
           skills/drum-apparatus/groovegen.py
           skills/drum-apparatus/examples/breakdown_world_ending.py
@@ -63,6 +64,7 @@ jobs:
           python -m compileall -q
           reaperd.py
           reaper_mcp.py
+          console_sidecar.py
           setup
           skills/drum-apparatus
           tests
