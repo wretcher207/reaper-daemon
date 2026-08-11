@@ -273,12 +273,22 @@ end
 -- (console_sidecar.py:1885), so a changing `updated_at` means alive. Parsing
 -- the ISO stamp and comparing to os.time() would drag in a timezone
 -- conversion for no gain; watching the string change does not.
+-- Returns age and the number of changes SEEN BY THIS PANEL. The change count
+-- matters at open: a state.json left behind by a sidecar that died days ago is
+-- perfectly readable, and trusting it on sight would show stale cost and bridge
+-- numbers as though they were live. The first sight is only a baseline.
 function M.freshness(tracker, updated_at, now)
-  if updated_at ~= tracker.last_seen then
+  if not tracker.seeded then
+    tracker.seeded = true
     tracker.last_seen = updated_at
     tracker.changed_at = now
+    tracker.changes = 0
+  elseif updated_at ~= tracker.last_seen then
+    tracker.last_seen = updated_at
+    tracker.changed_at = now
+    tracker.changes = tracker.changes + 1
   end
-  return now - (tracker.changed_at or now)
+  return now - tracker.changed_at, tracker.changes
 end
 
 if _G.REAPER_CONSOLE_SELFTEST then return M end
@@ -343,6 +353,7 @@ local S = {
   state = nil,
   fresh = {},
   sidecar_age = 0,
+  sidecar_changes = 0,
   input = "",
   focus_env = nil,
   focus_line = "",
@@ -445,7 +456,7 @@ local function poll()
   local state = M.read_json_file(P.state)
   if state then
     S.state = state
-    S.sidecar_age = M.freshness(S.fresh, state.updated_at, now)
+    S.sidecar_age, S.sidecar_changes = M.freshness(S.fresh, state.updated_at, now)
     local events_file = state.events_file
     if events_file and events_file ~= "" then
       local absolute = join(BRIDGE_ROOT, (events_file:gsub("/", sep)))
@@ -502,7 +513,7 @@ local function send(text)
   if text == "" then return false end
 
   local state = S.state
-  if not state or S.sidecar_age > 10 then
+  if not state or S.sidecar_changes == 0 or S.sidecar_age > 10 then
     note("The sidecar is not running. Press Start.")
     return false
   end
@@ -552,7 +563,9 @@ local function draw_status()
 
   -- No state file, or a stamp that stopped moving: nothing is publishing, so
   -- the sidecar is down whatever the file still says.
-  if state == nil or S.sidecar_age > 10 then
+  -- Alive means "publishing", proven by a stamp that moved since this panel
+  -- opened, not merely by a readable file.
+  if state == nil or S.sidecar_changes == 0 or S.sidecar_age > 10 then
     text_colored(COLOR.bad, "Sidecar: not running")
     ImGui.SameLine(S.ctx)
     if ImGui.Button(S.ctx, "Start") then spawn_sidecar() end
@@ -814,12 +827,11 @@ do
   local state = M.read_json_file(P.state)
   if not state then
     spawn_sidecar()
-  else
-    -- A state file exists, but it may be from a sidecar that died. Give it one
-    -- poll interval to prove it is moving before deciding.
-    S.fresh.last_seen = state.updated_at
-    S.fresh.changed_at = reaper.time_precise()
   end
+  -- A state file that exists is NOT proof of life; freshness() waits for the
+  -- stamp to move before the panel believes any of it. Autostart is deliberately
+  -- not attempted in that case: the sidecar's own lock refuses a second
+  -- instance, and a panel that retried would spawn paid sessions in a loop.
 end
 
 reaper.atexit(shutdown)

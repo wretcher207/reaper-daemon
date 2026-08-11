@@ -198,9 +198,23 @@ do
   -- is republished every poll (console_sidecar.py:1885), so a frozen stamp is
   -- a dead sidecar even though the file is still perfectly readable.
   local tracker = {}
-  eq("first sight is fresh", M.freshness(tracker, "A", 100), 0)
-  eq("same stamp ages", M.freshness(tracker, "A", 104), 4)
-  eq("a new stamp resets", M.freshness(tracker, "B", 106), 0)
+  local age, changes = M.freshness(tracker, "A", 100)
+  eq("first sight is fresh", age, 0)
+  -- The first sight is a BASELINE, not proof of life. A state.json left by a
+  -- sidecar that died days ago reads perfectly; believing it on sight would
+  -- show stale cost and bridge numbers as though they were live.
+  eq("first sight counts as no change", changes, 0)
+
+  age, changes = M.freshness(tracker, "A", 104)
+  eq("same stamp ages", age, 4)
+  eq("still unproven", changes, 0)
+
+  age, changes = M.freshness(tracker, "B", 106)
+  eq("a new stamp resets the age", age, 0)
+  eq("and proves life", changes, 1)
+
+  age, changes = M.freshness(tracker, "C", 107)
+  eq("changes accumulate", changes, 2)
   eq("nil stamp still ages rather than erroring", M.freshness(tracker, nil, 110), 0)
 end
 
