@@ -141,6 +141,16 @@ MIN_PANEL_MISSES = 3
 # broken bridge, and every loop is a full-context turn at Opus prices.
 TOOL_ERROR_CIRCUIT_BREAK = 3
 
+# A file written just AFTER a time.time() reading can carry an mtime just
+# BEFORE it. Python 3.13 moved time.time() on Windows to the precise clock
+# while NTFS still stamps from the coarse system tick, so the two disagree by
+# up to the tick interval (measured ~1 ms on bare metal, and the classic
+# Windows tick is 15.6 ms; a virtualized CI runner is worse). Without slack the
+# inbox sweep skips exactly the command it exists to withdraw: the one the MCP
+# child wrote microseconds into the turn. One second buries every plausible
+# tick while staying far short of a command from another terminal.
+MTIME_GRANULARITY_SLACK = 1.0
+
 # Verbatim measurement fields. These are never folded into a summary string:
 # a silent capture or an un-isolated scope changes what the numbers MEAN, and
 # AGENTS.md:189-198 requires the caveat travel with them.
@@ -1744,6 +1754,12 @@ class ConsoleSidecar:
         reaperd.send_type is synchronous, so anything the MCP server has
         outstanding was necessarily written inside this turn. Anything older
         belongs to somebody else (David's own terminal) and is left alone.
+
+        "Older" carries MTIME_GRANULARITY_SLACK of tolerance, because a file
+        written just after the turn's timestamp can carry an mtime just before
+        it. The cost is that a command fired from another terminal inside that
+        one-second window is swept too; the alternative is stranding a live
+        `batch` in the inbox, which is the worse of the two.
         """
         removed = []
         if since is None:
@@ -1756,7 +1772,7 @@ class ConsoleSidecar:
         for filename in files:
             path = os.path.join(inbox, filename)
             try:
-                if os.path.getmtime(path) < since:
+                if os.path.getmtime(path) < since - MTIME_GRANULARITY_SLACK:
                     continue
             except OSError:
                 continue

@@ -967,6 +967,39 @@ def test_stranded_inbox_commands_are_withdrawn_on_a_kill(console_root, sidecars)
     assert os.path.exists(old), "a command predating the turn is not ours to delete"
 
 
+def test_sweep_survives_a_coarse_filesystem_clock(console_root, sidecars):
+    # A file written just AFTER the turn's timestamp can carry an mtime just
+    # BEFORE it: time.time() is the precise clock on Windows since 3.13, NTFS
+    # stamps from the coarse tick. Backdated explicitly so the assertion does
+    # not depend on the runner's clock the way the live race does.
+    sidecar = make_sidecar(sidecars, console_root, {})
+    sidecar._open_session_files("skew-test")
+    inbox = os.path.join(console_root, "inbox")
+    turn_started = time.time()
+    mine = os.path.join(inbox, "cli-skewed.json")
+    cs.atomic_write_json(mine, {"id": "cli-skewed", "created_by": "mcp"})
+    stamp = turn_started - (cs.MTIME_GRANULARITY_SLACK / 2)
+    os.utime(mine, (stamp, stamp))
+
+    assert sidecar.sweep_inbox_for_console_commands(turn_started) == ["cli-skewed.json"]
+
+
+def test_sweep_slack_does_not_reach_an_unrelated_command(console_root, sidecars):
+    # The slack is clock tolerance, not a wider net: a command from David's own
+    # terminal, older than the slack, still survives.
+    sidecar = make_sidecar(sidecars, console_root, {})
+    sidecar._open_session_files("slack-bound-test")
+    inbox = os.path.join(console_root, "inbox")
+    turn_started = time.time()
+    theirs = os.path.join(inbox, "cli-theirs.json")
+    cs.atomic_write_json(theirs, {"id": "cli-theirs", "created_by": "cli"})
+    stamp = turn_started - (cs.MTIME_GRANULARITY_SLACK * 2)
+    os.utime(theirs, (stamp, stamp))
+
+    assert sidecar.sweep_inbox_for_console_commands(turn_started) == []
+    assert os.path.exists(theirs)
+
+
 def test_no_sweep_happens_when_no_turn_was_in_flight(console_root, sidecars):
     sidecar = make_sidecar(sidecars, console_root, {})
     inbox = os.path.join(console_root, "inbox")
