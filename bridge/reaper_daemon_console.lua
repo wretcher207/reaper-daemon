@@ -321,7 +321,6 @@ end
 local FLAGS = {
   window_none      = need("WindowFlags_None"),
   child_borders    = need("ChildFlags_Borders"),
-  enter_submits    = need("InputTextFlags_EnterReturnsTrue"),
   cond_first       = need("Cond_FirstUseEver"),
   col_text         = need("Col_Text"),
   -- Optional: present in 0.10 here, but neither is load-bearing. Escape has a
@@ -510,7 +509,12 @@ end
 
 local function send(text)
   text = (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
-  if text == "" then return false end
+  if text == "" then
+    -- Never fail silently again. An empty send used to return with no note and
+    -- no log line, which is indistinguishable from a dead button.
+    note("Nothing to send.")
+    return false
+  end
 
   local state = S.state
   if not state or S.sidecar_changes == 0 or S.sidecar_age > 10 then
@@ -699,16 +703,33 @@ local function draw_input()
     text_colored(COLOR.dim, "Ctrl+Enter sends, Esc releases keys to REAPER")
   end
 
-  -- 0.10's multiline default is already Enter = newline, Ctrl+Enter = submit.
-  -- Do not add CtrlEnterForNewLine (it inverts that) and do not add
-  -- EscapeClearsAll (Escape would nuke a long prompt he is halfway through).
+  -- NO EnterReturnsTrue here, deliberately. With that flag the call returns
+  -- true only on Enter, and whether the binding still hands back the edited
+  -- buffer on the false frames is not documented either way. It does not, so
+  -- every keystroke was thrown away and Send saw an empty string. Without the
+  -- flag the return is the ordinary "value changed", the buffer always comes
+  -- back, and submission is detected from the keyboard directly.
   local height = ImGui.GetTextLineHeight(S.ctx) * 3
-  local submitted, value = ImGui.InputTextMultiline(S.ctx, "##input", S.input,
-    -1, height, FLAGS.enter_submits)
-  S.input = value or S.input
-  if submitted and send(S.input) then S.input = "" end
+  local _, value = ImGui.InputTextMultiline(S.ctx, "##input", S.input, -1, height)
+  if value ~= nil then S.input = value end
 
-  if ImGui.Button(S.ctx, "Send") and send(S.input) then S.input = "" end
+  -- Ctrl+Enter while the box has focus. Checked against the widget's own
+  -- focus rather than globally, so the chord does not fire while he is
+  -- somewhere else in the panel.
+  local editing = ImGui.IsItemActive(S.ctx) or ImGui.IsItemFocused(S.ctx)
+  if editing then
+    local mods = ImGui.GetKeyMods(S.ctx)
+    local ctrl = (mods & ImGui.Mod_Ctrl) ~= 0
+    if ctrl and (ImGui.IsKeyPressed(S.ctx, ImGui.Key_Enter)
+                 or ImGui.IsKeyPressed(S.ctx, ImGui.Key_KeypadEnter)) then
+      if send(S.input) then S.input = "" end
+    end
+  end
+
+  if ImGui.Button(S.ctx, "Send") then
+    log(string.format("send clicked: %d chars", #S.input))
+    if send(S.input) then S.input = "" end
+  end
 
   local state = S.state
   local actions = state and state.quick_actions or {}
