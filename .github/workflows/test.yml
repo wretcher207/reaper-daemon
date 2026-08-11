@@ -35,6 +35,9 @@ jobs:
       - name: json codec self-test (CWD-sensitive; run from repo root)
         run: lua bridge/test_json.lua
         shell: bash
+      - name: console panel self-test (tailer, reducer, focus envelope)
+        run: lua bridge/test_console.lua
+        shell: bash
 
   python-surfaces:
     name: Python surfaces (${{ matrix.os }}, Python ${{ matrix.python-version }})
