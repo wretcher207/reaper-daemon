@@ -1,236 +1,50 @@
-# Reaper Daemon: Agent Instructions (cross-platform)
+# Reaper Daemon
 
-You can control REAPER through this local file bridge. No network, no socket:
-you read and write JSON files in shared folders, and a Lua script running
-inside REAPER executes them. Works on macOS, Windows, and Linux — the agent
-CLI is a single Python 3 file (`reaperd.py`) with no third-party deps.
+Cross-platform local bridge for controlling a running REAPER instance through MCP or
+the zero-dependency `reaperd.py` CLI.
 
-If your environment supports MCP, prefer the MCP server over the raw CLI:
-`reaper_mcp.py` (stdio, zero deps, same repo root) exposes these same commands
-as typed tools, plus the closed-loop `verify_change` / `tune_param` tools, the
-drum-workflow trio `profile_track` / `riff_grid` / `insert_groove` (no shell
-needed), and `analyze_track` / `compare_tracks` mix diagnosis when Post Mortem
-is installed. Wiring instructions are in the README. Everything below still
-applies when you use the CLI directly.
+## Read only what the task needs
 
-This bridge is plugin-agnostic. It knows nothing about any specific synth, amp
-sim, or drum tool. You discover what a project contains, then act on it. If a
-human asks you to set up controls for plugins you have never seen, use
-`scan_fx` to learn the project, then act on what you find.
+- `HANDOFF.md`: current repo state, verified live behavior, and next work. Read the
+  current section before material development or release work.
+- `README.md`: installation, CLI, MCP, measurement, and agent usage.
+- `bridge/command_schema.md`: authoritative command payloads and result shapes. Open
+  the relevant command section instead of loading the entire catalog by default.
+- `skills/drum-apparatus/`: drum DSL and kit-map behavior when that workflow is used.
 
-## Bridge paths
+Prefer the MCP server when its tools are available. Use `reaperd.py` when MCP is not
+connected or when testing the CLI itself. Do not write ad hoc bridge JSON unless the
+task is specifically testing the file protocol.
 
-The bridge root is this repository folder. All paths below are relative to it.
+## Action boundary
 
-```text
-inbox/                  write command JSON here
-outbox/                 read result JSON here (same id)
-bridge/heartbeat.json   liveness check
-```
+- For a request to inspect, explain, diagnose, or review, use read-only discovery and
+  report the result. Do not mutate the REAPER project.
+- For a request to change the live project, check bridge status, inspect context, make
+  the narrow requested change, and verify it without asking for routine local steps.
+- Deleting tracks, items, FX, or markers; overwriting media; and rendering require
+  clear intent in the current request. Do not broaden a track-scoped request to every
+  track.
 
-## Required workflow
+## Safe mutation loop
 
-1. Check the bridge is alive: `python3 reaperd.py status`. If it reports
-   `DEAD` or `STALE`, tell the user to (re)start REAPER, or run the bridge
-   action manually (see README). On a fresh install the bridge auto-starts via
-   `Scripts/__startup.lua`.
-2. Send a command. Easiest is the CLI: `python3 reaperd.py send <file> --wait`
-   or `python3 reaperd.py cmd <type> '<payload-json>'`. Under the hood this
-   writes `inbox/<id>.json.tmp` then atomically renames to `inbox/<id>.json`.
-   (Never write `.json` directly — the rename must be atomic.)
-3. The `--wait` flag polls `outbox/<id>.json` and prints the result.
-4. Report what happened. On `ok: false`, `error.code` is an `UPPER_SNAKE` code
-   (e.g. `NO_TARGET_TRACK`, `AMBIGUOUS_FX`).
+1. Check liveness once before the first live command. If the bridge is dead or stale,
+   report that REAPER or the startup bridge must be started.
+2. Run `get_context` before an ambiguous edit. Use `dry_run: true` when target or effect
+   is uncertain.
+3. Resolve tracks and FX by stable GUID or verified name. Scan parameters before
+   setting them; never guess plugin indices or normalized values.
+4. Batch related parameter changes into one undo block with `stop_on_error: true`.
+5. Re-read the changed state or use `verify_change`, `tune_param`, or CLI `verify` to
+   prove the result.
 
-Run `get_context` before any ambiguous edit. Use `dry_run: true` on a mutating
-command to preview without changing the project.
+An `ok: true` response proves command handling, not audio improvement. For an audio
+claim, measure the same frozen time range before and after. Repeat the tool's caveat if
+the capture was not an isolated track or was based on a saved `.rpp` rather than live
+state. Never build a verdict on a silent capture.
 
-## Sending a command
+CLI verify exit code 2 means the mutation may already have happened but verification
+failed. Do not retry blindly. Report it as unverified and explain that one REAPER undo
+reverts the attempted change.
 
-```bash
-# from a command JSON file (polls for the reply):
-python3 reaperd.py send commands/examples/get_context.json --wait
-
-# by type + payload (resolves add_fx names, repairs set_fx_param aliases):
-python3 reaperd.py cmd add_fx '{"target_track_name":"master","fx_name":"pro q 4"}'
-
-# direct, lowest-level (what the CLI does for you):
-python3 - <<'PY'
-import json, secrets, datetime, os
-root = os.getcwd()
-cid = f"agent-{secrets.token_hex(4)}"
-cmd = {"id": cid, "version": 3, "type": "get_context",
-       "created_by": "agent",
-       "created_at": datetime.datetime.now().astimezone().isoformat(),
-       "dry_run": False, "payload": {"include_fx": True}}
-tmp = os.path.join(root, "inbox", cid + ".json.tmp")
-out = os.path.join(root, "outbox", cid + ".json")
-os.makedirs(os.path.dirname(tmp), exist_ok=True)
-with open(tmp, "w") as f: json.dump(cmd, f)
-os.replace(tmp, tmp[:-4])  # atomic rename to inbox/<id>.json
-import time
-for _ in range(120):
-    if os.path.isfile(out):
-        print(open(out).read()); break
-    time.sleep(0.25)
-PY
-```
-
-## Commands
-
-Full payloads and examples: `bridge/command_schema.md` and `commands/examples/`.
-
-**Read / discover**
-- `get_context` — project, tracks, FX names, transport, markers, regions.
-- `get_fx_parameters` — full parameter list for one FX (paged).
-- `scan_fx` — every FX and its parameters across the project. Use this first
-  when you do not know what plugins a project uses.
-- `discover_drum_map` — dump a drum track's MIDI note names (the library's
-  `.midnam`) so a kit map can be auto-built (see `reaperd.py discover-map`).
-
-**Transport / project**
-- `play`, `stop`, `pause`, `record`
-- `set_cursor`, `set_time_selection`, `set_tempo`
-- `render` (gated — needs `allow_risk_level_3`)
-
-**Tracks**
-- `add_track`, `delete_track`, `rename_track`, `select_track`
-- `set_track_volume`, `set_track_pan`, `mute_track`, `solo_track`, `arm_track`
-- `set_track_color`
-
-**FX**
-- `add_fx`, `remove_fx`, `bypass_fx`, `move_fx`
-- `set_fx_param`, `write_fx_param_automation`
-
-**Markers / regions / items**
-- `add_marker`, `add_region`, `delete_marker`, `delete_items_in_range`
-
-**MIDI**
-- `insert_midi_file`
-
-**Composition**
-- `batch` — run several commands as one undo block.
-
-For the friendly wrappers around these (fxload, setparam, eq, groove, jam, riff,
-discover-map, add-map), see `reaperd.py --help`. There are no shell `.sh`
-helpers anymore — `reaperd.py` is the single cross-platform entry point.
-
-## Targeting tracks, FX, and parameters
-
-Every command that acts on a track resolves it the same way, in order:
-`target_track_guid`, then `target_track_name` (exact, case-insensitive), then
-the selected track. FX resolve by `fx_index` or `fx_name_contains`; parameters
-by `param_index` or `param_name_contains`. Ambiguous matches throw
-`AMBIGUOUS_*` — narrow the selector. Never hardcode FX or parameter indices;
-they shift between plugin versions. Query with `scan_fx` or
-`get_fx_parameters` first, then act.
-
-## FX parameter workflow (read this before setting params)
-
-1. **Scan first.** Send `get_fx_parameters` with `fx_name_contains` and a
-   `page_size` (default 50, bump to 100+ for FabFilter or other deep plugins).
-   Read the full param list: `index`, `name`, `normalized_value`,
-   `formatted_value`. The `formatted_value` tells you what the knob actually
-   reads (e.g. "-16.00 dB", "Punch", "4.00:1") — more useful than the
-   normalized float.
-2. **Prefer `param_index` over `param_name_contains`.** Many plugins have
-   params whose names share a word: FabFilter Pro-C 3 has "Threshold", "Auto
-   Threshold", and "Lock Auto Threshold". `param_name_contains: "Threshold"`
-   throws `AMBIGUOUS_PARAM`. Use the `index` from step 1 instead — it's
-   unambiguous. Reserve `param_name_contains` for names you confirmed are
-   unique in the scan (e.g. "Auto Gain", "Oversampling").
-3. **Batch the sets.** Wrap multiple `set_fx_param` calls in a `batch`
-   command with `stop_on_error: true`. One undo block, one round-trip, and a
-   failure stops cleanly instead of half-applying.
-4. **Verify.** Re-scan with `get_fx_parameters` after the batch to confirm
-   the `formatted_value` on each param matches what you intended.
-5. **Normalized values are 0.0-1.0, not the displayed value.** A threshold
-   of -24 dB on Pro-C 3 is `normalized_value: 0.6`, not `-24`. The scan tells
-   you the current normalized value; interpolate from there. When unsure, set
-   a value, re-scan, read the `formatted_value`, and adjust.
-
-## Measuring
-
-`measure` closes the feedback loop: instead of trusting `ok: true`, capture a
-track and read what the audio actually measures.
-
-```bash
-python3 reaperd.py measure Bass                    # 10 s from cursor/time selection
-python3 reaperd.py measure Bass --seconds 5 --start 12.5 --json
-```
-
-What it does, in order: (1) `get_capture_preflight` — refuses with the
-blocker list if capture is gated (`allow_risk_level_3` needs a REAPER restart
-after changing it); (2) resolves capture bounds ONCE (active time selection's
-start, else edit cursor; `--start` overrides) and passes them explicitly;
-(3) `capture_track_audio` to a unique temp WAV, verifying file freshness and
-that the bridge rendered the exact requested window; (4) reports metrics:
-LUFS-I when REAPER reports it (digital silence reads as `null` and is flagged
-silent; `metrics_source: "render_stats"`), plus spectrum/peak/RMS/stereo when
-Post Mortem is installed (`metrics_source: "postmortem"`).
-
-To compare two separate `measure` runs of the same spot, pass the SAME
-`--start` and `--seconds` to both — a bare re-run re-resolves the cursor/time
-selection, which may have moved.
-
-To make ONE change with measured proof, use `verify` instead of `cmd`:
-
-```bash
-python3 reaperd.py verify Bass -- set_fx_param '{"target_track_name":"Bass","fx_name_contains":"ReaEQ","param_name_contains":"Gain","formatted_value":"-2.5 dB"}'
-```
-
-It measures, mutates (same resolution/repair path as `cmd`), re-measures with
-byte-identical frozen bounds on the GUID-pinned track, and reports deltas.
-Exit codes: 0 VERIFIED; 1 REFUSED, meaning the mutation was never sent (the
-pre-capture failed or was silent), so nothing was mutated; 2 UNVERIFIED,
-meaning the mutation WAS sent and the project MAY have changed (applied but
-unmeasured, partially applied on a failed `batch`, rejected by the bridge
-where a handler that failed mid-edit can leave a partial change inside one
-closed undo block, or unknown after a transport timeout). The JSON carries
-the rejection code when the bridge gave one. NOT rolled back; one Ctrl/Cmd+Z
-reverts it. Never retry blindly on exit 2: the change may already be live.
-Report these outcomes to the user exactly; never claim an unverified change
-improved anything.
-
-Honesty rules baked in: a silent capture (RMS <= -60 dBFS or >= 85% silence)
-is flagged `silent: true` — never build a verdict on it. If `capture_scope`
-is not `isolated_track` with `isolation_verified: true`, the numbers describe
-the capture scope (possibly the full mix), not the track alone — the output
-says so and you must repeat that caveat, not drop it.
-
-## Generating MIDI (cross-platform)
-
-Write the `.mid` file yourself (anywhere on disk), then send `insert_midi_file`
-with its absolute `midi_path`, a `target_track_name`, and a `position`
-(`{"type":"cursor"}` or a bar/beat). Or use the DSL drum engine directly:
-
-```bash
-python3 reaperd.py groove beat.dsl --track Drums        # render + insert + verify
-python3 reaperd.py jam                                  # DSL from stdin -> selected track
-```
-
-On MCP, the same three steps are tools instead of shell commands:
-`profile_track` (per-bar stem features), `riff_grid` (transients -> proposed
-kick grid), `insert_groove` (DSL -> MIDI -> inserted, `dry_run` supported).
-`profile_track` and `riff_grid` read the SAVED `.rpp` from disk, never REAPER's
-live state. Their payloads say so, and you must repeat that caveat.
-
-The engine (`skills/drum-apparatus/`) humanizes velocity, fatigue, and timing.
-For a drum library it doesn't know, auto-discover its map first:
-
-```bash
-python3 reaperd.py discover-map Drums --save MyKit
-python3 reaperd.py groove beat.dsl --track Drums --map MyKit
-```
-
-## Safety
-
-- Check the heartbeat before sending commands.
-- Run `get_context` before ambiguous edits.
-- Prefer the selected track only when the user clearly means it or exactly one
-  track is selected. Do not act on all tracks unless explicitly asked.
-- Do not overwrite existing media items unless `replace_existing_in_range` is
-  true. Do not delete items, tracks, or FX without clear intent.
-- `render` is gated behind a config flag; do not assume it is enabled.
-- Every mutating command is wrapped in a REAPER undo block, so a mistake is
-  recoverable with Cmd+Z.
+Current status and release facts belong in `HANDOFF.md`, not here.

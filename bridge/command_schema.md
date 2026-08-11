@@ -57,7 +57,12 @@ defaults `fx_scope` to `all`; **`fx_index` requires an explicit `fx_scope`**
 (`track` or `input`) — a bare index silently meant track-FX-N and could hit the
 wrong plugin (→ `AMBIGUOUS_SCOPE`).
 
-**Parameter** — `param_index` (0-based) or `param_name_contains`.
+**Parameter** — `param_index` (0-based) or `param_name_contains`. **Prefer
+`param_index`**, taken from a `get_fx_parameters` scan. Plugin parameter names
+collide constantly (FabFilter Pro-C 3 has "Threshold", "Auto Threshold" and
+"Lock Auto Threshold"), and a substring matching more than one throws
+`AMBIGUOUS_PARAM`. Reserve `param_name_contains` for names the scan confirmed
+are unique.
 
 ### Stable discovery identities
 
