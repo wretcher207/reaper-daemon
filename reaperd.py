@@ -144,7 +144,18 @@ def resolve_fx_name(query, resource_dir=None):
                 with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
                     for line in fh:
                         if pattern.search(line):
-                            m = _FX_NAME_RE.search(line)
+                            # REAPER marks instruments with a trailing !!!VSTi,
+                            # and _FX_NAME_RE anchors on "(Vendor)" at end of
+                            # line, so without stripping the flag first NO
+                            # INSTRUMENT EVER RESOLVES. "serum 2" fell through
+                            # to "Serum 2 FX (Xfer Records)", the effect build,
+                            # which loads and plays nothing; Kontakt, ReaSynth,
+                            # ReaSynDr and ReaSamplOmatic5000 all returned
+                            # NO_MATCH. Found while wiring the scoring studio.
+                            probe = line.rstrip()
+                            if probe.endswith("!!!VSTi"):
+                                probe = probe[:-len("!!!VSTi")].rstrip()
+                            m = _FX_NAME_RE.search(probe)
                             if m:
                                 cand = m.group().strip()
                                 if cand:
