@@ -648,6 +648,10 @@ def test_a_child_crash_is_reported_with_its_stderr(console_root, sidecars):
     assert wait_for(lambda: sidecar.status == "child_exited")
     assert wait_for(lambda: any("already in use" in line
                                 for line in sidecar.stderr_tail))
+    # status flips (console_sidecar.py:1440) seven lines before session_end is
+    # written (:1447), so reading events straight off the status wait races.
+    assert wait_for(lambda: any(e["t"] == "session_end"
+                                for e in read_events(sidecar)))
     ends = [e for e in read_events(sidecar) if e["t"] == "session_end"]
     assert ends and ends[0]["reason"] == "child_exited"
 
