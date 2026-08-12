@@ -2289,12 +2289,44 @@ local function render_preferences_error(token)
     .. tostring(token and token.reason or "render preferences were not checked")
 end
 
+-- Which tracks live INSIDE the folder opened at `index` (1-based, in project
+-- order), given every track's I_FOLDERDEPTH. Returns an empty list when the
+-- track is not a folder parent.
+--
+-- This exists because a folder parent has zero media items and therefore takes
+-- the item-less isolation path below, where an exclusive solo would mute the
+-- very children that feed it and the parent would render digital silence. The
+-- subtree has to stay audible for a folder capture to mean anything.
+--
+-- Depth encoding is REAPER's: 1 opens a folder, 0 is an ordinary track, and a
+-- negative value closes that many levels (so a single track can close several
+-- nested folders at once).
+local function folder_descendants(depths, index)
+  local out = {}
+  if (depths[index] or 0) < 1 then return out end
+  local level = 1
+  for i = index + 1, #depths do
+    out[#out + 1] = i
+    level = level + (depths[i] or 0)
+    if level <= 0 then break end
+  end
+  return out
+end
+
 -- Capture provenance is part of the public result contract. A caller must never
 -- need to infer whether a WAV is a real isolated stem by parsing a prose note.
 -- `full_mix` is deliberately explicit: it is useful for debugging, but unsafe
 -- as evidence for a per-track diagnosis or cross-track masking claim.
-local function capture_provenance(isolate, is_master)
+local function capture_provenance(isolate, is_master, folder_children)
   if isolate then
+    if folder_children and folder_children > 0 then
+      return {
+        capture_scope = "isolated_track",
+        isolation_verified = true,
+        folder_children = folder_children,
+        note = string.format("Isolated FOLDER bus: the target and its %d child track(s) were soloed together, because a folder parent's audio comes from its children and soloing it alone renders silence. The FX on every bus DOWNSTREAM of the folder (its own parent folders + master) were bypassed, so this is the folder's own summed signal including the children's FX and the folder's own FX. All solo and FX states restored after.", folder_children),
+      }
+    end
     return {
       capture_scope = "isolated_track",
       isolation_verified = true,
@@ -2567,8 +2599,28 @@ local function command_capture_track_audio(command)
   -- (verified on track "L", 2026-07-03); soloing THEM makes the stems render
   -- output silence, so leave them on the plain stems path.
   local isolate = track ~= master_track and reaper.CountTrackMediaItems(track) == 0
-  local provenance = capture_provenance(isolate, track == master_track)
   local track_count = reaper.CountTracks(0)
+
+  -- A folder parent also has zero media items, so it lands on the isolation
+  -- path above. Its audio comes from its children, and the exclusive solo below
+  -- would mute exactly those: soloed alone, a folder bus renders digital
+  -- silence at every cursor position. Solo the subtree with it.
+  local subtree = {}
+  if isolate then
+    local depths, target_index = {}, nil
+    for i = 0, track_count - 1 do
+      local t = reaper.GetTrack(0, i)
+      depths[i + 1] = reaper.GetMediaTrackInfo_Value(t, "I_FOLDERDEPTH")
+      if t == track then target_index = i + 1 end
+    end
+    if target_index then
+      for _, one_based in ipairs(folder_descendants(depths, target_index)) do
+        subtree[#subtree + 1] = reaper.GetTrack(0, one_based - 1)
+      end
+    end
+  end
+
+  local provenance = capture_provenance(isolate, track == master_track, #subtree)
   local saved_solo = {}
   -- Downstream FX would color an isolated capture: the master bus plus every
   -- ancestor folder bus the target feeds up through. Bypass their FX for the
@@ -2606,6 +2658,11 @@ local function command_capture_track_audio(command)
         reaper.SetMediaTrackInfo_Value(reaper.GetTrack(0, i), "I_SOLO", 0)
       end
       reaper.SetMediaTrackInfo_Value(track, "I_SOLO", 1)
+      -- The children feed the folder; muting them is what made a folder
+      -- capture silent regardless of where the cursor was.
+      for k = 1, #subtree do
+        reaper.SetMediaTrackInfo_Value(subtree[k], "I_SOLO", 1)
+      end
       for k = 1, #saved_fx do
         local sf = saved_fx[k]
         for i = 0, sf.count - 1 do reaper.TrackFX_SetEnabled(sf.track, i, false) end
@@ -3301,6 +3358,7 @@ if _G.REAPER_BRIDGE_SELFTEST then
     fx_summary = fx_summary,
     batch_result = batch_result,
     capture_provenance = capture_provenance,
+    folder_descendants = folder_descendants,
     snapshot_validate = snapshot_validate,
     restore_plan = restore_plan,
     preview_state_verdict = preview_state_verdict,

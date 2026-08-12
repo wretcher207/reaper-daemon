@@ -488,5 +488,57 @@ v = pv(false, false, nil)
 eq(v.capture_allowed, false, "gated + no SWS: blocked")
 ok(#v.blockers == 2 and #v.warnings == 0, "gated + no SWS: both blockers")
 
+-- Folder subtree resolution. A folder parent has zero media items, so it takes
+-- the item-less isolation path; soloing it ALONE mutes the children that feed
+-- it and the bus renders digital silence at every cursor position. Measured on
+-- god-knows.rpp 2026-08-11: "Geets" (a folder over two guitar takes) captured
+-- RMS -156 dB at bar 6 and byte-identically at bar 44.
+local fd = B.folder_descendants
+
+-- The real project that exposed this: Geets opens a folder over tracks 2 and 3,
+-- track 3 closes it; Drum Buss opens over 6..13, track 13 closes it.
+local god_knows = { 1, 0, -1, 0, 1, 0, 0, 0, 0, 0, 0, 0, -1 }
+local geets = fd(god_knows, 1)
+eq(#geets, 2, "Geets has two children")
+eq(geets[1], 2, "first guitar take")
+eq(geets[2], 3, "second guitar take, which also closes the folder")
+
+local drums = fd(god_knows, 5)
+eq(#drums, 8, "Drum Buss holds eight children")
+eq(drums[1], 6, "Drum Buss starts at Kick")
+eq(drums[8], 13, "Drum Buss ends at the track that closes it")
+
+-- Not a folder: an ordinary track and a closing track own nobody.
+eq(#fd(god_knows, 2), 0, "an ordinary track has no descendants")
+eq(#fd(god_knows, 3), 0, "a closing track has no descendants")
+eq(#fd(god_knows, 4), 0, "a standalone track has no descendants")
+
+-- Nesting: one closer can shut several levels at once, which is why the walk
+-- accumulates depth instead of counting a single matching close.
+local nested = { 1, 1, 0, -2, 0 }
+local outer = fd(nested, 1)
+eq(#outer, 3, "outer folder owns the inner folder and everything in it")
+eq(outer[3], 4, "the multi-level closer belongs to the outer folder")
+eq(#fd(nested, 2), 2, "inner folder owns only its own children")
+ok(fd(nested, 2)[2] == 4, "the shared closer also ends the inner folder")
+
+-- A folder left open at the end of the project must not run off the array.
+local unterminated = { 1, 0, 0 }
+eq(#fd(unterminated, 1), 2, "an unclosed folder stops at the last track")
+eq(#fd({}, 1), 0, "an empty project is not an error")
+eq(#fd(god_knows, 99), 0, "an out-of-range index is not an error")
+
+-- The provenance note must say WHICH kind of isolation happened. A folder
+-- capture includes the children's FX by definition; a Kontakt-style routing
+-- stem does not have children at all.
+local folder_capture = cp(true, false, 2)
+eq(folder_capture.capture_scope, "isolated_track", "folder capture is isolated")
+eq(folder_capture.isolation_verified, true, "folder capture is verified")
+eq(folder_capture.folder_children, 2, "folder capture reports its child count")
+ok(folder_capture.note:find("FOLDER", 1, true) ~= nil,
+   "folder capture note names the folder case")
+ok(cp(true, false, 0).note:find("Kontakt", 1, true) ~= nil,
+   "a childless routing stem keeps the original note")
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))
