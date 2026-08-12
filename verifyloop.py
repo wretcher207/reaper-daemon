@@ -348,6 +348,15 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
         "bounds_source": bounds["bounds_source"],
         "capture_scope": data.get("capture_scope"),
         "isolation_verified": data.get("isolation_verified") is True,
+        # The provenance NOTE, carried through deliberately. Without it a
+        # measure result cannot distinguish an isolated folder capture (whose
+        # children were soloed along with the target, so the children's FX are
+        # in the audio) from a plain isolated capture: both report
+        # capture_scope=isolated_track with isolation_verified=true. That
+        # ambiguity made a verified folder-capture fix look like it had never
+        # loaded, because measure's output was byte-identical before and after.
+        "capture_note": data.get("note"),
+        "folder_children": data.get("folder_children"),
         "lufs_i": data.get("render_loudness_lufs"),
         "metrics_source": "render_stats",
     }
@@ -1342,8 +1351,21 @@ def format_measure(m):
     track = (m.get("track") or {}).get("name", "?")
     scope = m.get("capture_scope", "?")
     iso = "verified" if m.get("isolation_verified") else "NOT verified"
-    lines.append(f"[measure] track={track}  scope={scope} ({iso})  "
+    kids = m.get("folder_children")
+    # A folder capture is a materially different measurement from a plain
+    # isolated one (the children were soloed too, so their FX are in the
+    # audio), and both report isolated_track. Say which happened on the
+    # headline line, where nobody can miss it.
+    scope_text = f"{scope}+{kids} children" if kids else scope
+    lines.append(f"[measure] track={track}  scope={scope_text} ({iso})  "
                  f"source={m.get('metrics_source')}")
+    # Print the bridge's OWN provenance sentence rather than a restatement of
+    # it here. Two reasons: this text cannot drift from what the bridge
+    # actually did, and it still reaches the reader on a bridge too old to
+    # send folder_children (the count is newer than the note).
+    note = m.get("capture_note")
+    if note:
+        lines.append(f"[measure] provenance: {note}")
     b = m.get("bounds") or {}
     lines.append(f"[measure] bounds: start={b.get('start_seconds', 0):.3f}s  "
                  f"duration={b.get('duration_seconds', 0):.3f}s  "

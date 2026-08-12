@@ -584,3 +584,108 @@ def test_profile_forwards_zero_max_seconds_for_rejection(monkeypatch, tmp_path):
     assert rc == 1
     # wire protocol: [bars sentinel, start_bar, max_seconds] all present
     assert seen["cmd"][-3:] == ["0", "0", "0.0"]
+
+
+# --- render-blocking commands need a render-sized timeout -------------------
+#
+# capture_track_audio and render block REAPER's main thread for the whole
+# render: no defer ticks, no heartbeat, no reply until it finishes. The 10s
+# default made the CLI print TIMEOUT for a command that had succeeded and
+# whose result landed in outbox/ seconds later. A wrong failure report is
+# worse than a slow one.
+
+def test_capture_timeout_scales_with_the_requested_capture_length():
+    assert reaperd.render_timeout_ms(
+        "capture_track_audio", {"seconds": 30}) == 90000
+
+
+def test_capture_timeout_uses_the_bridge_default_when_seconds_is_absent():
+    # The bridge captures 30s when the payload does not say; budget for that
+    # rather than for zero.
+    assert reaperd.render_timeout_ms("capture_track_audio", {}) == 90000
+
+
+def test_capture_timeout_survives_a_junk_seconds_value():
+    assert reaperd.render_timeout_ms(
+        "capture_track_audio", {"seconds": "soon"}) == 90000
+
+
+def test_ordinary_commands_keep_the_short_default():
+    assert reaperd.render_timeout_ms("get_context", {}) == 10000
+
+
+def test_an_explicit_timeout_always_wins():
+    # Including a shorter one: --timeout is the user overriding us on purpose.
+    assert reaperd.render_timeout_ms(
+        "capture_track_audio", {"seconds": 30}, explicit=5000) == 5000
+    assert reaperd.render_timeout_ms("get_context", {}, explicit=1) == 1
+
+
+# --- a fast REAPER restart leaves the bridge dead, briefly ------------------
+#
+# The dead bridge's lock is not stale for 60s, so a re-run of the action loses
+# the ownership race and stops. __startup.lua's watchdog reclaims it on its
+# next 10s tick. status must say "wait", because telling someone to re-run the
+# action here sends them to do something that cannot work.
+
+def _write_lock(root, age_seconds, busy="none"):
+    os.makedirs(os.path.join(root, "logs"), exist_ok=True)
+    with open(os.path.join(root, "logs", "bridge.lock"), "w",
+              encoding="utf-8") as f:
+        json.dump({"busy": busy, "started": time.time() - age_seconds,
+                   "owner": "table: 0xDEAD-1"}, f)
+
+
+def test_lock_eta_reports_worst_case_including_one_watchdog_tick(root):
+    _write_lock(root, age_seconds=20)
+    eta = reaperd.lock_reclaim_eta(root)
+    # 60 - 20 left on the lock, plus a full watchdog tick.
+    assert 49 <= eta <= 51
+
+
+def test_lock_eta_is_none_once_the_lock_is_already_stale(root):
+    _write_lock(root, age_seconds=120)
+    assert reaperd.lock_reclaim_eta(root) is None
+
+
+def test_lock_eta_is_none_for_a_render_busy_lock(root):
+    # A render-busy lock is never reclaimed on age, so waiting is not the
+    # answer and status must not promise a revival that will not come.
+    _write_lock(root, age_seconds=5, busy="render")
+    assert reaperd.lock_reclaim_eta(root) is None
+
+
+def test_lock_eta_is_none_when_there_is_no_lock(root):
+    assert reaperd.lock_reclaim_eta(root) is None
+
+
+def test_status_says_wait_not_rerun_during_the_lock_window(
+    root, monkeypatch, capsys
+):
+    monkeypatch.setattr(reaperd, "reaper_running", lambda: True)
+    hb = os.path.join(root, "bridge", "heartbeat.json")
+    with open(hb, "w", encoding="utf-8") as f:
+        json.dump({"project_name": "x", "alive_at": "t", "busy": "none"}, f)
+    old = time.time() - 30
+    os.utime(hb, (old, old))
+    _write_lock(root, age_seconds=30)
+    assert reaperd.status_ok(root) is False
+    out = capsys.readouterr().out
+    assert "WAIT, do not re-run" in out
+    assert "watchdog reclaims" in out
+
+
+def test_status_still_says_rerun_once_nothing_holds_the_lock(
+    root, monkeypatch, capsys
+):
+    monkeypatch.setattr(reaperd, "reaper_running", lambda: True)
+    hb = os.path.join(root, "bridge", "heartbeat.json")
+    with open(hb, "w", encoding="utf-8") as f:
+        json.dump({"project_name": "x", "alive_at": "t", "busy": "none"}, f)
+    old = time.time() - 300
+    os.utime(hb, (old, old))
+    _write_lock(root, age_seconds=300)
+    assert reaperd.status_ok(root) is False
+    out = capsys.readouterr().out
+    assert "Revive: re-run the bridge action" in out
+    assert "WAIT" not in out

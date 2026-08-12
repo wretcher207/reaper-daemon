@@ -301,6 +301,36 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
     raise TimeoutError(f"timed out after {timeout_ms}ms waiting for {outbox}")
 
 
+# Commands that block REAPER's main thread on a synchronous render. The defer
+# loop stops for the whole render, so no heartbeat, no reply, nothing until it
+# finishes. 10s is fine for every other command and far too short for these:
+# a 30s capture at 1x plus render setup routinely outruns it, and the CLI then
+# reports TIMEOUT for a command that succeeds and writes its result to outbox/
+# seconds later. That reads as a failure and it is not one.
+RENDER_BLOCKING_TYPES = frozenset({"capture_track_audio", "render"})
+
+
+def render_timeout_ms(cmd_type, payload, explicit=None):
+    """Reply timeout for one command, in ms. `explicit` (a --timeout the user
+    actually typed) always wins; otherwise render-blocking commands get a
+    budget scaled to the capture length they were asked for."""
+    if explicit is not None:
+        return explicit
+    if cmd_type not in RENDER_BLOCKING_TYPES:
+        return 10000
+    try:
+        seconds = float(payload.get("seconds") or payload.get("duration_seconds") or 0)
+    except (TypeError, ValueError):
+        seconds = 0.0
+    if not (seconds > 0):
+        # The bridge's own default capture length when the payload omits it.
+        seconds = 30.0
+    # Render setup, the file write and the stats read are roughly fixed cost;
+    # the render itself is about realtime. 60s of headroom over the material
+    # covers both without waiting minutes on a genuinely dead bridge.
+    return int((seconds + 60) * 1000)
+
+
 def send_type(cmd_type, payload, bridge_root=None, timeout_ms=10000,
               resolve=True, repair=True, verbose=False):
     """Send a command by type + payload, wait for the reply, return parsed dict.
@@ -460,7 +490,8 @@ def cmd_cmd(args):
         print(f"error: payload is not valid JSON: {e}", file=sys.stderr)
         return 1
     res = send_type(args.type, payload, bridge_root=args.bridge_root,
-                    timeout_ms=args.timeout, verbose=True)
+                    timeout_ms=render_timeout_ms(args.type, payload, args.timeout),
+                    verbose=True)
     print(json.dumps(res, separators=(",", ":")))
     return _exit_for(res)
 
@@ -468,6 +499,37 @@ def cmd_cmd(args):
 def cmd_status(args):
     ok = status_ok(args.bridge_root, quiet=args.quiet)
     return 0 if ok else 1
+
+
+# Mirrors the bridge's own singleton guard and __startup.lua's watchdog. Kept
+# as constants here so the status text cannot quietly drift from the Lua.
+LOCK_STALE_SECS = 60          # bridge.lua: reclaim a lock older than this
+WATCHDOG_TICK_SECS = 10       # __startup.lua: how often it checks
+
+
+def lock_reclaim_eta(bridge_root=None):
+    """Seconds until a dead bridge's lock can be reclaimed, or None.
+
+    None means "nothing is blocking a reload": no lock, unreadable, already
+    stale, or a render-busy lock (which the guard never reclaims on age, so
+    waiting is not the answer there).
+    """
+    bridge_root = bridge_root or BRIDGE_ROOT
+    try:
+        with open(os.path.join(bridge_root, "logs", "bridge.lock"),
+                  "r", encoding="utf-8") as f:
+            lock = json.load(f)
+        started = float(lock.get("started"))
+    except Exception:
+        return None
+    if (lock.get("busy") or "none") == "render":
+        return None
+    remaining = LOCK_STALE_SECS - (time.time() - started)
+    if remaining <= 0:
+        return None
+    # The watchdog only looks every WATCHDOG_TICK_SECS, so the worst case is a
+    # full tick after the lock goes stale. Quote the worst case, not the best.
+    return remaining + WATCHDOG_TICK_SECS
 
 
 def status_ok(bridge_root=None, quiet=False):
@@ -519,8 +581,21 @@ def status_ok(bridge_root=None, quiet=False):
         return False
     say(f"STALE: heartbeat {age:.0f}s old (>{fresh_secs}s). The bridge loop has stopped.")
     say(f"       Last alive_at: {alive} | project: {proj}")
-    say("       Revive: re-run the bridge action (Actions list), or relaunch REAPER so")
-    say("       __startup.lua reloads it. Then re-run this check.")
+    reviving_in = lock_reclaim_eta(bridge_root)
+    if reviving_in is not None:
+        # The dead bridge still holds a lock that is not stale yet, so nothing
+        # can replace it: a re-run reads that fresh lock, loses the ownership
+        # race and stops. Telling someone to re-run the action here sends them
+        # to do a thing that cannot work and then doubt the fix they just made.
+        # __startup.lua's watchdog polls every 10s and reloads once the lock
+        # goes stale, so the honest instruction is to wait.
+        say(f"       WAIT, do not re-run: the dead bridge's lock is still fresh, so a")
+        say(f"       re-run would lose the ownership race and stop. __startup.lua's")
+        say(f"       watchdog reclaims it and reloads in about {reviving_in:.0f}s.")
+        say("       (This is the normal shape of a fast REAPER restart.)")
+    else:
+        say("       Revive: re-run the bridge action (Actions list), or relaunch REAPER so")
+        say("       __startup.lua reloads it. Then re-run this check.")
     return False
 
 
@@ -1309,7 +1384,12 @@ def build_parser():
     s = sub.add_parser("cmd", help="send by <type> + <payload-json>")
     s.add_argument("type", help="command type (get_context, add_fx, ...)")
     s.add_argument("payload", help="payload as a JSON string")
-    s.add_argument("--timeout", type=int, default=10000, help="reply timeout in ms")
+    # default None, not 10000: that lets render_timeout_ms tell "the user asked
+    # for 10s" apart from "nobody said", so capture/render can widen their own
+    # budget without overriding an explicit --timeout.
+    s.add_argument("--timeout", type=int, default=None,
+                   help="reply timeout in ms (default 10000; capture_track_audio "
+                        "and render scale with the capture length)")
     s.set_defaults(func=cmd_cmd)
 
     s = sub.add_parser("status", help="bridge liveness check")

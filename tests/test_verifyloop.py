@@ -83,7 +83,8 @@ def _context(cursor=3.5, ts=None):
 def _capture_responder(lufs=-14.1, raw="LUFSI:-14.10;TRUEPEAK:-3.20;LRA:4.50",
                        scope="isolated_track", verified=True,
                        backdate_by=None, report_other_file=False,
-                       bounds_override=None, guid="{B}"):
+                       bounds_override=None, guid="{B}",
+                       folder_children=None, note=None):
     """A scripted reply that mimics the real bridge: writes the WAV the
     payload asked for, echoes the rendered bounds, reports the path back.
     backdate_by backdates the reported WAV's mtime by that many seconds;
@@ -110,6 +111,8 @@ def _capture_responder(lufs=-14.1, raw="LUFSI:-14.10;TRUEPEAK:-3.20;LRA:4.50",
             "render_stats_raw": raw,
             "capture_scope": scope,
             "isolation_verified": verified,
+            "folder_children": folder_children,
+            "note": note,
             **echoed,
         }}
     return responder
@@ -187,6 +190,73 @@ def test_happy_path_returns_bounds_lufs_and_render_stats(root, tmp_path):
     # WAV cleaned up on success by default
     assert res["wav_kept"] is False
     assert not os.path.exists(res["file_path"])
+
+
+# --- capture provenance carried through ------------------------------------
+#
+# A folder capture and a plain isolated capture both report
+# capture_scope=isolated_track with isolation_verified=true. If measure drops
+# the provenance note and the child count, its output is byte-identical for the
+# two, and a folder-capture change looks like it never loaded. It is the
+# difference between "this track" and "this track plus its children's FX".
+
+FOLDER_NOTE = ("Isolated FOLDER bus: the target and its 2 child track(s) were "
+               "soloed together, because a folder parent's audio comes from "
+               "its children and soloing it alone renders silence.")
+
+
+def test_measure_carries_folder_provenance_through(root):
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(),
+                              _capture_responder(folder_children=2,
+                                                 note=FOLDER_NOTE)])
+    res = verifyloop.measure(_sender(root), "Geets",
+                             _analyzer_loader=_no_analyzer)
+    assert res["ok"] is True
+    assert res["folder_children"] == 2
+    assert res["capture_note"] == FOLDER_NOTE
+
+
+def test_measure_of_a_plain_track_has_no_folder_children(root):
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(),
+                              _capture_responder()])
+    res = verifyloop.measure(_sender(root), "Bass",
+                             _analyzer_loader=_no_analyzer)
+    assert res["ok"] is True
+    # Absent/None, never 0: presence is what means "the subtree was soloed".
+    assert not res["folder_children"]
+
+
+def test_format_measure_names_a_folder_capture(root):
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(),
+                              _capture_responder(folder_children=2,
+                                                 note=FOLDER_NOTE)])
+    res = verifyloop.measure(_sender(root), "Geets",
+                             _analyzer_loader=_no_analyzer)
+    text = verifyloop.format_measure(res)
+    assert "isolated_track+2 children" in text
+    # The bridge's own sentence, verbatim, not a restatement that could drift.
+    assert FOLDER_NOTE in text
+
+
+def test_format_measure_shows_the_note_even_without_a_child_count(root):
+    # A bridge older than the folder_children field still sends the note. The
+    # reader must not lose the provenance just because the count is missing.
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(),
+                              _capture_responder(note=FOLDER_NOTE)])
+    res = verifyloop.measure(_sender(root), "Geets",
+                             _analyzer_loader=_no_analyzer)
+    text = verifyloop.format_measure(res)
+    assert FOLDER_NOTE in text
+    assert "+2 children" not in text
+
+
+def test_format_measure_of_a_plain_track_says_nothing_about_folders(root):
+    fake_bridge_script(root, [PREFLIGHT_OK, _context(), _capture_responder()])
+    res = verifyloop.measure(_sender(root), "Bass",
+                             _analyzer_loader=_no_analyzer)
+    text = verifyloop.format_measure(res)
+    assert "FOLDER" not in text
+    assert "children" not in text
 
 
 def test_time_selection_bounds_start_and_clamp(root, tmp_path):

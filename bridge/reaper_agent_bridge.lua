@@ -2716,6 +2716,11 @@ local function command_capture_track_audio(command)
       render_stats_raw = stats ~= "" and stats or nil,
       capture_scope = provenance.capture_scope,
       isolation_verified = provenance.isolation_verified,
+      -- Structured, not just prose in `note`: a caller must be able to tell a
+      -- folder capture from a plain one without parsing English. Absent (not
+      -- 0) on a non-folder capture, so `folder_children` present means "the
+      -- subtree was soloed with the target".
+      folder_children = provenance.folder_children,
       note = provenance.note,
       render_autoclose_warning = autoclose_token.guaranteed and nil or autoclose_token.reason,
     }
