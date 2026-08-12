@@ -2,7 +2,18 @@
   publish = "site"
   command = ""
 
-# The marketing page lives on deadpixeldesign.com. Redirect everything there.
+# The one-line installer. This rule must stay ABOVE the catch-all: Netlify takes
+# the first matching rule, so the `force = true` below does not override it.
+# status 200 proxies instead of redirecting, so `curl -fsSL .../install.sh` gets
+# the script itself even without -L, and there is no second copy of install.sh
+# in site/ to drift out of sync with the one at the repo root.
+[[redirects]]
+  from = "/install.sh"
+  to = "https://raw.githubusercontent.com/wretcher207/reaper-daemon/main/install.sh"
+  status = 200
+  force = true
+
+# The marketing page lives on deadpixeldesign.com. Redirect everything else there.
 [[redirects]]
   from = "/*"
   to = "https://deadpixeldesign.com/workflows/reaper-daemon/"
