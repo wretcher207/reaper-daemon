@@ -1203,6 +1203,69 @@ def test_insert_groove_falls_back_to_drum_config_track_and_map(
     assert seen[0][seen[0].index("--map") + 1] == "RS Monarch"
 
 
+# --- console freeze policy ----------------------------------------------------
+
+def clamp(seconds, default, console_mode=True, maximum=8):
+    return reaper_mcp.clamp_capture_seconds(seconds, default,
+                                            console_mode=console_mode,
+                                            maximum=maximum)
+
+
+def test_outside_the_console_nothing_is_clamped():
+    # From a terminal a 30 s render costs an alt-tab. The policy exists only
+    # because the panel lives inside the frozen window.
+    assert clamp(30, 30, console_mode=False) == (30, None)
+    assert clamp(None, 30, console_mode=False) == (None, None)
+
+
+def test_a_console_capture_is_clamped_and_says_so():
+    seconds, note = clamp(30, 30)
+    assert seconds == 8
+    # Not decoration. Without it the model reports on 8 seconds while claiming
+    # 30, which is the honesty failure AGENTS.md exists to prevent.
+    assert "8s" in note and "30s" in note
+    assert "not 30s" in note
+
+
+def test_an_unrequested_length_is_clamped_from_the_tool_default():
+    # capture_track_audio defaults to 30, so "just measure it" is a 30 second
+    # freeze unless the default is clamped too.
+    assert clamp(None, 30)[0] == 8
+    assert clamp(None, 30)[1] is not None
+
+
+def test_a_capture_already_short_enough_is_left_alone():
+    assert clamp(5, 30) == (5, None)
+    assert clamp(8, 30) == (8, None)
+
+
+def test_a_junk_length_is_left_for_the_bridge_to_refuse():
+    # Sanitizing it here would swallow the bridge's own error message.
+    assert clamp("soon", 30) == ("soon", None)
+
+
+def test_the_clamp_note_travels_inside_the_json_not_in_front_of_it(root):
+    # console_sidecar's tool_verdict decides a result is structured by its
+    # FIRST CHARACTER, so a prose preamble would turn every measurement back
+    # into an opaque string in the panel.
+    fake_bridge(root, {"ok": True, "data": {"rms_db": -12.0}})
+    resp = reaper_mcp._reply_result({"ok": True, "data": {"rms_db": -12.0}},
+                                    note="shortened")
+    text = resp["content"][0]["text"]
+    assert text.lstrip().startswith("{")
+    assert json.loads(text)["console_note"] == "shortened"
+
+
+def test_capture_track_audio_clamps_in_console_mode(root, monkeypatch):
+    cmds = []
+    fake_bridge(root, {"ok": True, "type": "capture_track_audio"}, record=cmds)
+    monkeypatch.setattr(reaper_mcp, "CONSOLE_MODE", True)
+    monkeypatch.setattr(reaper_mcp, "CONSOLE_MAX_CAPTURE_SECONDS", 8.0)
+    resp = call("capture_track_audio", {"track": "Geets", "duration_seconds": 30})
+    assert cmds[0]["payload"]["duration_seconds"] == 8
+    assert "Capture shortened" in json.loads(result_text(resp))["console_note"]
+
+
 # --- stdio subprocess smoke test ---------------------------------------------
 
 def test_stdio_framing_end_to_end(root):

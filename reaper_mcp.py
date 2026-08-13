@@ -111,8 +111,14 @@ def _text(text, is_error=False):
     return out
 
 
-def _reply_result(reply):
-    """Format a bridge reply as an MCP tool result."""
+def _reply_result(reply, note=None):
+    """Format a bridge reply as an MCP tool result.
+
+    `note` goes INSIDE the JSON body, never in front of it: the console's
+    normalizer decides a result is structured by its first character
+    (console_sidecar.py:tool_verdict), so a prose preamble would turn every
+    measurement back into an opaque string.
+    """
     if reply.get("ok"):
         body = {"ok": True}
         if reply.get("message"):
@@ -121,9 +127,52 @@ def _reply_result(reply):
             body["data"] = reply["data"]
         if reply.get("dry_run"):
             body["dry_run"] = True
+        if note:
+            body["console_note"] = note
         return _text(json.dumps(body, indent=1))
-    return _text(json.dumps({"ok": False, "error": reply.get("error")}, indent=1),
-                 is_error=True)
+    body = {"ok": False, "error": reply.get("error")}
+    if note:
+        body["console_note"] = note
+    return _text(json.dumps(body, indent=1), is_error=True)
+
+
+# --- console freeze policy --------------------------------------------------
+#
+# Every capture is an offline render and REAPER's UI is dead for its duration.
+# From a terminal that costs an alt-tab. From the panel it costs the instrument
+# he is working in, with the chat box he was typing into frozen mid-word, and
+# verify_change is TWO renders while tune_param is up to six. A 30 second
+# default would make the panel worse than the terminal it replaced, so console
+# captures are clamped and the clamp is always announced.
+
+CONSOLE_MODE = os.environ.get("REAPER_DAEMON_CONSOLE_MODE") == "1"
+try:
+    CONSOLE_MAX_CAPTURE_SECONDS = float(
+        os.environ.get("REAPER_DAEMON_CONSOLE_MAX_CAPTURE_SECONDS") or 8)
+except ValueError:
+    CONSOLE_MAX_CAPTURE_SECONDS = 8.0
+
+
+def clamp_capture_seconds(seconds, default, console_mode=None, maximum=None):
+    """(seconds, note_or_None) for a capture length under the console policy.
+
+    Pure, and the note is not decoration: a silently shortened capture has the
+    model reporting on 8 seconds of a section while saying it measured 30, which
+    is the honesty failure AGENTS.md exists to prevent.
+    """
+    console_mode = CONSOLE_MODE if console_mode is None else console_mode
+    maximum = CONSOLE_MAX_CAPTURE_SECONDS if maximum is None else maximum
+    try:
+        value = float(default if seconds is None else seconds)
+    except (TypeError, ValueError):
+        return seconds, None
+    if not console_mode or value <= maximum:
+        return seconds, None
+    return maximum, (
+        f"Capture shortened from {value:g}s to {maximum:g}s: the Daemon Console "
+        f"runs inside REAPER and a capture freezes its UI for the whole render. "
+        f"The numbers describe {maximum:g}s of audio, not {value:g}s. Say so when "
+        f"you report them; ask before requesting a longer one.")
 
 
 def _track_payload(args):
@@ -359,7 +408,9 @@ def tool_batch(args):
 
 def tool_capture_track_audio(args):
     payload = _track_payload(args)
-    seconds = args.get("duration_seconds", 30)
+    seconds, clamp_note = clamp_capture_seconds(args.get("duration_seconds"), 30)
+    if seconds is None:
+        seconds = 30
     output = args.get("output_file")
     if not output:
         temp_dir = os.path.join(tempfile.gettempdir(), "reaper-mcp")
@@ -369,7 +420,7 @@ def tool_capture_track_audio(args):
     payload.update({"duration_seconds": seconds, "output_file": output,
                     "start_seconds": args.get("start_seconds")})
     return _reply_result(_send("capture_track_audio", payload,
-                               timeout_ms=CAPTURE_TIMEOUT_MS))
+                               timeout_ms=CAPTURE_TIMEOUT_MS), note=clamp_note)
 
 
 def tool_raw_command(args):
@@ -674,7 +725,9 @@ def _verify_mutator(cmd_type, payload):
                              timeout_ms=30000, resolve=True, repair=True)
 
 
-def _verify_result_text(res, error_statuses):
+def _verify_result_text(res, error_statuses, note=None):
+    if note:
+        res = dict(res, console_note=note)
     try:
         body = json.dumps(res, indent=1, allow_nan=False)
     except ValueError:
@@ -700,14 +753,16 @@ def tool_verify_change(args):
         return _text("verify_change needs a 'command_type'", is_error=True)
     if not isinstance(payload, dict):
         return _text("verify_change needs 'payload' as an object", is_error=True)
+    # Two renders, so the clamp is worth double here.
+    seconds, clamp_note = clamp_capture_seconds(args.get("seconds"), 10)
     res = verifyloop.verify(_verify_sender, _verify_mutator, track, cmd_type,
-                            payload, seconds=args.get("seconds"))
+                            payload, seconds=seconds)
     # isError ONLY when provably nothing ran (REFUSED happens before the
     # mutation is sent). Every other outcome — including a bridge rejection,
     # whose handler can still have made a partial mid-edit change — is
     # UNVERIFIED: a real outcome the model must read and relay, never
     # auto-retry.
-    return _verify_result_text(res, ("REFUSED",))
+    return _verify_result_text(res, ("REFUSED",), note=clamp_note)
 
 
 def tool_tune_param(args):
@@ -757,16 +812,17 @@ def tool_tune_param(args):
         return reaperd.scan_fx_parameter_data(base, BRIDGE_ROOT,
                                               include_values=True)
 
+    # Baseline plus up to five iterations: the clamp is worth six times here.
+    seconds, clamp_note = clamp_capture_seconds(args.get("seconds"), 10)
     res = verifyloop.tune_param(_verify_sender, scanner, track, fx_selector,
-                                param_selector, target,
-                                seconds=args.get("seconds"))
+                                param_selector, target, seconds=seconds)
     if res.get("error") and not res.get("status"):
         return _text(json.dumps(res, indent=1, allow_nan=False), is_error=True)
     # isError ONLY for REFUSED (nothing was set). SET_FAILED/MEASURE_FAILED/
     # IDENTITY_CHANGED/SCOPE_CHANGED happen after sets may have applied —
     # marking them as tool errors would invite a retry on top of live
     # changes. The model must read `final` (the read-back state) instead.
-    return _verify_result_text(res, ("REFUSED",))
+    return _verify_result_text(res, ("REFUSED",), note=clamp_note)
 
 
 # --- Post Mortem integration -------------------------------------------------
@@ -932,7 +988,7 @@ def _capture_safety_error(payload):
     return None
 
 
-def _run_postmortem(tracks, seconds, preamble):
+def _run_postmortem(tracks, seconds, preamble, note=None):
     cmdline = _postmortem_cmdline()
     if not cmdline:
         return _text(
@@ -980,6 +1036,8 @@ def _run_postmortem(tracks, seconds, preamble):
                 f"(rms_db={rms}, silence_fraction={frac}). Tell the user to "
                 "park the edit cursor where the track is playing and rerun.")
     parts = [preamble]
+    if note:
+        parts.append(note)
     parts.extend(warnings)
     parts.append(payload_text)
     return _text("\n\n".join(parts))
@@ -989,14 +1047,18 @@ def tool_analyze_track(args):
     track = args.get("track")
     if not track or not isinstance(track, str):
         return _text("analyze_track needs a 'track' name", is_error=True)
-    return _run_postmortem([track], args.get("seconds", 10), ANALYZE_PREAMBLE)
+    seconds, clamp_note = clamp_capture_seconds(args.get("seconds"), 10)
+    return _run_postmortem([track], seconds if seconds is not None else 10,
+                           ANALYZE_PREAMBLE, note=clamp_note)
 
 
 def tool_compare_tracks(args):
     tracks = args.get("tracks") or []
     if len(tracks) < 2:
         return _text("compare_tracks needs at least two track names", is_error=True)
-    return _run_postmortem(tracks, args.get("seconds", 30), COMPARE_PREAMBLE)
+    seconds, clamp_note = clamp_capture_seconds(args.get("seconds"), 30)
+    return _run_postmortem(tracks, seconds if seconds is not None else 30,
+                           COMPARE_PREAMBLE, note=clamp_note)
 
 
 def tool_complete_postmortem_onboarding(args):

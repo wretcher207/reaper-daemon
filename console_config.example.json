@@ -41,6 +41,8 @@
   "retention_days": 7,
   "retention_bytes": 209715200,
 
+  "_console_capture_clamp": "NOT a config key. Console captures are clamped to 8 seconds because the panel lives inside the window a render freezes; verify_change is two renders and tune_param up to six. Override with the REAPER_DAEMON_CONSOLE_MAX_CAPTURE_SECONDS environment variable on the sidecar. The clamp is always announced to the model in a console_note on the result.",
+
   "_quick_actions": "Rendered as buttons by the panel; the sidecar only passes them through in state.json.",
   "quick_actions": [
     {"label": "Profile selected", "prompt": "Profile the selected drum track and tell me what kit and feel it is."},
