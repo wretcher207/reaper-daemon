@@ -4,7 +4,12 @@
 -- session answers, and the answer arrives without an alt-tab, without retyping
 -- what track is selected, and without leaving the transport.
 --
--- This panel owns NO logic about what Claude should do. It moves four things:
+-- One exception to "it only moves files": the audition strip. Locate, A/B and
+-- Undo run as ordinary REAPER API calls in this process, because the panel IS
+-- inside REAPER. No bridge round trip, no render, no paid turn.
+--
+-- Otherwise this panel owns NO logic about what Claude should do. It moves four
+-- things:
 --   prompt out    console/prompts/<stamp>.json   (with the focus envelope)
 --   control out   console/control/<stamp>.json   (interrupt, ack, restart)
 --   transcript in console/events/<session>.jsonl (tailed by byte offset)
@@ -291,6 +296,84 @@ function M.freshness(tracker, updated_at, now)
   return now - tracker.changed_at, tracker.changes
 end
 
+-- ---------------------------------------------------------------------------
+-- The audition loop
+-- ---------------------------------------------------------------------------
+--
+-- The sidecar publishes `last_change` in state.json (console_sidecar.py's
+-- describe_change): what the agent changed, on which track, in which bars, and
+-- whether an FX exists to toggle in and out. This half turns that into three
+-- buttons and five verdicts so a "too much" costs one click instead of a
+-- retyped sentence.
+
+-- The bar range's provenance is shown, never hidden. `time_selection` means the
+-- tool did not name bars and this is where HE was looking when he asked, which
+-- is a good guess and a different claim from the tool reporting what it wrote.
+function M.change_bars_label(bars)
+  if type(bars) ~= "table" or not bars.start then return nil end
+  local span
+  if bars["end"] and bars["end"] ~= bars.start then
+    span = string.format("bars %d-%d", bars.start, bars["end"])
+  else
+    span = string.format("bar %d", bars.start)
+  end
+  if bars.source == "time_selection" then span = span .. " (your selection)" end
+  return span
+end
+
+function M.change_line(change)
+  if type(change) ~= "table" then return nil end
+  local parts = { M.short(change.summary or change.tool or "?", 90) }
+  local bars = M.change_bars_label(change.bars)
+  if bars then parts[#parts + 1] = bars end
+  if change.verdict == "unverified" then
+    -- The mutation was sent and nothing measured it. Say so on the strip, not
+    -- only in the tool block he has to expand.
+    parts[#parts + 1] = "unverified"
+  end
+  return table.concat(parts, "  |  ")
+end
+
+-- The five verdicts. Each one restates the target so the model never has to ask
+-- which change was meant, and each one is a complete instruction on its own:
+-- the panel cannot assume the model still has the change in its context after a
+-- compaction. `keep` is deliberately absent — keeping costs nothing and must
+-- not spend a turn.
+M.VERDICTS = {
+  { key = "too_much",   label = "too much",
+    template = "Too much on the last change (%s). Same target, smaller move." },
+  { key = "not_enough", label = "not enough",
+    template = "Not enough on the last change (%s). Same target, push it further." },
+  { key = "wrong",      label = "wrong direction",
+    template = "Wrong direction on the last change (%s). Undo it, then try the " ..
+               "opposite move on the same target." },
+  { key = "another",    label = "try another",
+    template = "That did not work (%s). Undo it, then try a different approach " ..
+               "to the same goal on the same target." },
+}
+
+function M.verdict_prompt(change, key)
+  if type(change) ~= "table" then return nil end
+  for _, verdict in ipairs(M.VERDICTS) do
+    if verdict.key == key then
+      local target = change.summary or change.tool or "the last change"
+      local bars = M.change_bars_label(change.bars)
+      if bars then target = target .. ", " .. bars end
+      return string.format(verdict.template, target)
+    end
+  end
+  return nil
+end
+
+-- A change is auditionable by ear only when there is an FX to toggle. Returns
+-- nil plus the reason otherwise, and the reason is shown: a button that quietly
+-- does nothing is the Send bug all over again.
+function M.ab_reason(change)
+  if type(change) ~= "table" then return nil, "no change yet" end
+  if change.ab == "fx" then return true, nil end
+  return nil, change.ab_blocked or "nothing to toggle on this change"
+end
+
 if _G.REAPER_CONSOLE_SELFTEST then return M end
 
 -- ---------------------------------------------------------------------------
@@ -366,6 +449,9 @@ local S = {
   spawn_attempted = false,
   edits = 0,
   seen_tools = {},
+  ab_enabled = nil,
+  ab_change_id = nil,
+  change_dismissed = nil,
   dock_applied = false,
   start_time = 0,
 }
@@ -553,6 +639,121 @@ local function send(text)
 end
 
 -- ---------------------------------------------------------------------------
+-- Audition: resolving the change against live REAPER
+-- ---------------------------------------------------------------------------
+--
+-- Every one of these runs in-process. The panel IS inside REAPER, so Locate,
+-- A/B and Undo need no bridge round trip, no render and no paid turn: they are
+-- ordinary API calls on the UI thread and they land in the same frame.
+
+local function track_by_name(name, exact)
+  if not name or name == "" then return nil end
+  local wanted = name:lower()
+  local found
+  for i = 0, reaper.CountTracks(0) - 1 do
+    local track = reaper.GetTrack(0, i)
+    local _, current = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
+    current = (current or ""):lower()
+    if exact then
+      if current == wanted then return track end
+    elseif current:find(wanted, 1, true) then
+      -- Substring selectors can hit two tracks. The bridge refuses that case
+      -- (AMBIGUOUS), and so does this: acting on the wrong guitar is worse
+      -- than a button that explains itself.
+      if found then return nil, "more than one track matches " .. name end
+      found = track
+    end
+  end
+  return found, found and nil or ("no track named " .. name)
+end
+
+local function resolve_track(selector)
+  if type(selector) ~= "table" then return nil, "the change named no track" end
+  if selector.kind == "selected" then
+    local track = reaper.GetSelectedTrack(0, 0)
+    return track, track and nil or "no track is selected"
+  end
+  return track_by_name(selector.value, selector.kind == "track")
+end
+
+local function resolve_fx(track, change)
+  if not track then return nil end
+  if type(change.fx_index) == "number" then
+    local index = math.floor(change.fx_index)
+    if index >= 0 and index < reaper.TrackFX_GetCount(track) then return index end
+    return nil, "FX index " .. index .. " is gone"
+  end
+  local wanted = (change.fx_name_contains or ""):lower()
+  if wanted == "" then return nil, "the change named no FX" end
+  for i = 0, reaper.TrackFX_GetCount(track) - 1 do
+    local _, name = reaper.TrackFX_GetFXName(track, i, "")
+    if (name or ""):lower():find(wanted, 1, true) then return i end
+  end
+  return nil, "no FX matching " .. change.fx_name_contains
+end
+
+-- Bars to seconds through REAPER's own tempo map. Never 240/tempo: that is
+-- wrong for any project that is not 4/4, and the bridge says so emphatically
+-- at reaper_agent_bridge.lua:366.
+local function bar_start_time(bar)
+  return reaper.TimeMap2_beatsToTime(0, 0.0, math.max(0, (tonumber(bar) or 1) - 1))
+end
+
+local function locate(change)
+  local bars = change.bars
+  if type(bars) ~= "table" or not bars.start then
+    note("That change did not say which bars it touched.")
+    return
+  end
+  local first = bar_start_time(bars.start)
+  -- The end bar is the bar the change ENDS IN, so the range runs to the top of
+  -- the one after it. Stopping at the end bar's downbeat would loop a range
+  -- that cuts the last bar off entirely.
+  local last = bar_start_time((bars["end"] or bars.start) + 1)
+  reaper.GetSet_LoopTimeRange(true, true, first, last, false)
+  -- moveview scrolls to it; it does not zoom. Zooming to the selection would
+  -- throw away whatever view he had set up.
+  reaper.SetEditCurPos(first, true, false)
+  note(string.format("Located %s.", M.change_bars_label(bars)), 4)
+end
+
+-- A/B is an FX enable toggle, never undo/redo. Undo/redo A/B stops telling the
+-- truth the moment he makes an edit of his own between presses, and the undo
+-- stack is already shared with him.
+local function toggle_ab(change)
+  local track, why = resolve_track(change.track)
+  if not track then note("Cannot A/B: " .. (why or "track not found"), 8); return end
+  local index, fx_why = resolve_fx(track, change)
+  if not index then note("Cannot A/B: " .. (fx_why or "FX not found"), 8); return end
+
+  local enabled = reaper.TrackFX_GetEnabled(track, index)
+  reaper.TrackFX_SetEnabled(track, index, not enabled)
+  local _, name = reaper.TrackFX_GetFXName(track, index, "")
+  S.ab_enabled = not enabled
+  note(string.format("%s %s", M.short(name, 40),
+                     S.ab_enabled and "ON (after)" or "OFF (before)"), 4)
+end
+
+-- Loop-play whatever Locate set up, so before and after are heard in the same
+-- window without reaching for the transport.
+local function loop_play()
+  -- -1 queries. NOT `if not reaper.GetSetRepeat(-1)`: 0 is truthy in Lua, so
+  -- that test can never fire and repeat would never come on.
+  if reaper.GetSetRepeat(-1) == 0 then reaper.GetSetRepeat(1) end
+  local range_start = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+  reaper.SetEditCurPos(range_start, false, true)
+  reaper.Main_OnCommand(1007, 0)  -- Transport: Play
+end
+
+-- 40029 is Edit: Undo. One press per bridge command, not one per session: the
+-- undo stack is shared with his own edits, which is what the edit counter in
+-- the status strip is for.
+local function undo_last()
+  reaper.Main_OnCommand(40029, 0)
+  note("Ctrl+Z sent. The stack is shared with your own edits.", 6)
+end
+
+-- ---------------------------------------------------------------------------
 -- Drawing
 -- ---------------------------------------------------------------------------
 
@@ -694,6 +895,64 @@ local function draw_transcript(height)
   end
 end
 
+-- The audition strip. Drawn only when there is a change to audition, so the
+-- panel stays a chat box until the agent has actually done something.
+local function audition_change()
+  local change = S.state and S.state.last_change
+  if type(change) ~= "table" then return nil end
+  if change.id and change.id == S.change_dismissed then return nil end
+  -- A new change means the A/B label is about a different FX. Carrying the old
+  -- one over would say "hearing before" about a bypass he never toggled.
+  if change.id ~= S.ab_change_id then
+    S.ab_change_id = change.id
+    S.ab_enabled = nil
+  end
+  return change
+end
+
+local function draw_audition()
+  local change = audition_change()
+  if not change then return false end
+
+  ImGui.Separator(S.ctx)
+  text_colored(COLOR.tool, "Last change: " .. (M.change_line(change) or "?"))
+
+  if ImGui.Button(S.ctx, "\u{25C0} Locate") then locate(change) end
+  ImGui.SameLine(S.ctx)
+
+  local can_ab, why = M.ab_reason(change)
+  if can_ab then
+    local label = S.ab_enabled == false and "A/B (hearing before)" or "A/B"
+    if ImGui.Button(S.ctx, label) then toggle_ab(change) end
+    ImGui.SameLine(S.ctx)
+    if ImGui.Button(S.ctx, "\u{25B6} Loop") then loop_play() end
+  else
+    -- Shown, not hidden. A button that silently does nothing is the Send bug
+    -- again; a sentence saying why costs one line and lies about nothing.
+    text_colored(COLOR.dim, "no A/B: " .. why)
+    ImGui.SameLine(S.ctx)
+    if ImGui.Button(S.ctx, "\u{25B6} Loop") then loop_play() end
+  end
+  ImGui.SameLine(S.ctx)
+  if ImGui.Button(S.ctx, "\u{21BA} Undo") then undo_last() end
+
+  -- The verdicts. Each sends a complete instruction naming the target, so a
+  -- compacted session cannot turn "too much" into "too much of what".
+  for i, verdict in ipairs(M.VERDICTS) do
+    if i > 1 then ImGui.SameLine(S.ctx) end
+    if ImGui.SmallButton(S.ctx, verdict.label) then
+      send(M.verdict_prompt(change, verdict.key))
+    end
+  end
+  ImGui.SameLine(S.ctx)
+  -- Keep it costs nothing and must not spend a turn: it only clears the strip.
+  if ImGui.SmallButton(S.ctx, "keep it") then
+    S.change_dismissed = change.id
+    S.ab_enabled = nil
+  end
+  return true
+end
+
 local function draw_input()
   text_colored(COLOR.dim, S.focus_line)
 
@@ -806,9 +1065,12 @@ local function frame()
   if visible then
     draw_status()
     ImGui.Separator(S.ctx)
-    -- Reserve the input rows; the transcript takes whatever is left.
-    local reserved = ImGui.GetFrameHeightWithSpacing(S.ctx) * 4
+    -- Reserve the input rows; the transcript takes whatever is left. The
+    -- audition strip is three more rows, and only when there is a change.
+    local rows = audition_change() and 7 or 4
+    local reserved = ImGui.GetFrameHeightWithSpacing(S.ctx) * rows
     draw_transcript(-reserved)
+    draw_audition()
     draw_input()
     ImGui.End(S.ctx)
   end

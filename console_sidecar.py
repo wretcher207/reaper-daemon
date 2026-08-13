@@ -67,6 +67,7 @@ lunch costs pennies. The panel shows "cache cold" and we eat it.
 """
 
 import argparse
+import collections
 import ctypes
 import glob
 import json
@@ -140,6 +141,11 @@ MIN_PANEL_MISSES = 3
 # Three consecutive failing tool results means the model is looping against a
 # broken bridge, and every loop is a full-context turn at Opus prices.
 TOOL_ERROR_CIRCUIT_BREAK = 3
+
+# Mutating calls waiting on a result. An interrupted turn abandons its calls
+# mid-flight and no result ever arrives to retire them, so the parking lot is
+# bounded rather than trusted to drain.
+PENDING_CHANGE_CAP = 32
 
 # A file written just AFTER a time.time() reading can carry an mtime just
 # BEFORE it. Python 3.13 moved time.time() on Windows to the precise clock
@@ -458,6 +464,207 @@ def _measurement_fields(obj):
             if subset:
                 found[side] = subset
     return found or None
+
+
+# --- the last change, for the audition loop ---------------------------------
+#
+# The audition loop exists to kill "which one did you mean". That only works if
+# the change it offers to locate, A/B and undo is a change that really happened,
+# so mutating tools are named here rather than guessed at from the result. A
+# reader promoted by accident would point Locate at whatever the model last
+# measured, which is worse than no button at all.
+
+CHANGE_TOOLS = frozenset((
+    "track", "fx", "set_fx_param", "write_automation", "markers",
+    "insert_midi_file", "delete_items_in_range", "batch", "insert_groove",
+    "verify_change", "tune_param",
+))
+
+# Actions on an otherwise-mutating tool that change nothing worth auditioning.
+_NON_CHANGE_ACTIONS = {"track": frozenset(("select",))}
+
+# Tools whose change is an FX doing something, so toggling that FX in and out is
+# a true before/after. Everything else gets Locate and Undo but no A/B: an undo
+# /redo A/B would be a lie the moment he makes an edit of his own between
+# presses, and the undo stack is already shared with him.
+_AB_FX_TOOLS = frozenset(("fx", "set_fx_param", "write_automation", "tune_param"))
+
+# verify_change names the real mutation in `command_type` (bridge names, see
+# bridge/command_schema.md:373-401), so its A/B is decided by the command it
+# wrapped rather than by the wrapper.
+_AB_FX_COMMANDS = frozenset(("add_fx", "bypass_fx", "set_fx_param",
+                             "write_fx_param_automation"))
+
+
+def _tool_base_name(name):
+    """`mcp__reaper-daemon__set_fx_param` -> `set_fx_param`."""
+    return str(name or "").rsplit("__", 1)[-1]
+
+
+def _bar_of(position):
+    """A position object -> a bar number, or None.
+
+    Only `{"type": "bar"}` is a bar. A cursor or seconds position is real but
+    the sidecar cannot convert it without REAPER's tempo map, and inventing the
+    conversion here would put a second, divergent implementation of the bar math
+    next to `reaper_focus.lua`'s.
+    """
+    if isinstance(position, dict) and position.get("type") == "bar":
+        try:
+            return int(position.get("bar"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _track_selector(args):
+    """Pass the selector through verbatim; the panel resolves it against live
+    REAPER. Resolving it here would need a bridge round trip per tool call."""
+    for key in ("track", "track_contains"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return {"kind": key, "value": value.strip()}
+    if args.get("use_selected_track"):
+        return {"kind": "selected", "value": None}
+    return None
+
+
+def _change_bars(args, focus):
+    """Bars the change touched, with provenance. `source` is not decoration:
+    a range lifted from his time selection is where he was LOOKING, not where
+    the tool said it wrote, and Locate must not present the two as the same
+    claim."""
+    points = args.get("points")
+    if isinstance(points, list):
+        numbers = [p.get("bar") for p in points
+                   if isinstance(p, dict) and isinstance(p.get("bar"), (int, float))]
+        if numbers:
+            return {"start": int(min(numbers)), "end": int(max(numbers)),
+                    "source": "tool"}
+
+    start = None
+    for key in ("position", "start", "range"):
+        start = _bar_of(args.get(key))
+        if start is not None:
+            break
+    if start is not None:
+        end = _bar_of(args.get("end"))
+        if end is None:
+            length = args.get("length_bars")
+            if isinstance(length, (int, float)) and length > 0:
+                end = start + int(length) - 1
+        return {"start": start, "end": end if end is not None else start,
+                "source": "tool"}
+
+    selection = (focus or {}).get("time_selection")
+    if isinstance(selection, dict) and selection.get("start_bar"):
+        return {"start": selection.get("start_bar"),
+                "end": selection.get("end_bar") or selection.get("start_bar"),
+                "source": "time_selection"}
+    return None
+
+
+def _change_summary(base, args, track, fx):
+    """One producer-readable line. Track first: on a 40 track project that is
+    the word he scans for."""
+    parts = []
+    if track:
+        parts.append(track["value"] or "selected track")
+    if fx:
+        parts.append(fx)
+    action = args.get("action")
+    if isinstance(action, str) and action:
+        parts.append(action)
+    param = args.get("param_name_contains")
+    if isinstance(param, str) and param:
+        parts.append(param)
+    value = args.get("formatted_value") or args.get("relative")
+    if isinstance(value, str) and value:
+        parts.append(value)
+    elif isinstance(args.get("normalized_value"), (int, float)):
+        parts.append(f"{args['normalized_value']:g} normalized")
+    elif isinstance(args.get("volume_db"), (int, float)):
+        parts.append(f"{args['volume_db']:+g} dB")
+    if not parts:
+        parts.append(base)
+    return " · ".join(str(p) for p in parts)
+
+
+def describe_change(name, tool_input, focus=None):
+    """One mutating tool call -> the record the panel's audition strip renders.
+
+    Pure. `tool_input` arrives as the JSON string the normalizer already capped,
+    so an oversized batch parses as nothing and yields None. That is deliberate:
+    a truncated record would still draw a Locate button, pointing at bars nobody
+    asked for.
+    """
+    base = _tool_base_name(name)
+    if base not in CHANGE_TOOLS:
+        return None
+
+    args = tool_input
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return None
+    if not isinstance(args, dict):
+        return None
+    # A dry run changed nothing. Offering to undo it would undo his last real
+    # edit instead.
+    if args.get("dry_run"):
+        return None
+
+    action = args.get("action")
+    if isinstance(action, str) and action in _NON_CHANGE_ACTIONS.get(base, ()):
+        return None
+
+    # verify_change carries the real mutation one level down, and tune_param's
+    # selectors sit at the top. Merge so one extractor serves both, with the
+    # outer keys winning: `track` is the GUID-pinned measurement target.
+    merged = dict(args)
+    payload = args.get("payload")
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            merged.setdefault(key, value)
+
+    track = _track_selector(merged)
+    fx = None
+    for key in ("fx_name_contains", "fx_name"):
+        value = merged.get(key)
+        if isinstance(value, str) and value.strip():
+            fx = value.strip()
+            break
+    fx_index = merged.get("fx_index")
+    fx_index = fx_index if isinstance(fx_index, int) else None
+
+    record = {
+        "tool": base,
+        "summary": _change_summary(base, merged, track, fx),
+        "track": track,
+        "fx_name_contains": fx,
+        "fx_index": fx_index,
+        "bars": _change_bars(merged, focus),
+    }
+
+    command_type = args.get("command_type")
+    ab_shaped = base in _AB_FX_TOOLS or (
+        base == "verify_change" and command_type in _AB_FX_COMMANDS)
+
+    if ab_shaped and action not in ("remove", "move"):
+        if track and (fx or fx_index is not None):
+            record["ab"] = "fx"
+        else:
+            record["ab_blocked"] = "no track and FX to toggle"
+    elif base == "batch":
+        record["ab_blocked"] = "batch: several changes in one undo block"
+    elif base in ("insert_groove", "insert_midi_file"):
+        record["ab_blocked"] = "inserted MIDI: use Undo to compare"
+    elif action in ("remove", "move"):
+        record["ab_blocked"] = f"FX {action}: nothing left to toggle"
+    else:
+        record["ab_blocked"] = "no FX to toggle on this change"
+    return record
 
 
 def normalize_stream_object(obj, cap=2048, prev_total_cost=0.0, ts=None):
@@ -967,6 +1174,13 @@ class ConsoleSidecar:
         self.last_turn_cost = None
         self.warn_acknowledged = True
         self.consec_tool_errors = 0
+        # The audition loop's subject. `turn_focus` is the envelope that came
+        # WITH the running prompt, not the live one: by the time a tool result
+        # lands he may have clicked another track, and the change belongs to
+        # what he was looking at when he asked.
+        self.last_change = None
+        self.turn_focus = None
+        self._pending_changes = collections.OrderedDict()
         self.cache_cold = True
         self.turns = 0
         self.started_at = time.time()
@@ -1162,6 +1376,7 @@ class ConsoleSidecar:
                 "last_error": self.last_error,
                 "stderr_tail": self.stderr_tail[-5:],
                 "quick_actions": self.config.get("quick_actions") or [],
+                "last_change": self.last_change,
                 "started_at": utc_iso(self.started_at),
                 "updated_at": utc_iso(),
             }
@@ -1313,6 +1528,8 @@ class ConsoleSidecar:
             obj, cap=self.config.get("event_line_cap"),
             prev_total_cost=self.prev_total_cost)
         for event in events:
+            if event["t"] == "tool":
+                self._on_tool_call(event)
             if event["t"] == "tool_result":
                 self._on_tool_result(event)
             self.write_event(event)
@@ -1367,12 +1584,43 @@ class ConsoleSidecar:
         if waiter is not None:
             waiter.set()
 
+    def _on_tool_call(self, event):
+        """Park a mutating call until its result says whether it landed. A tool
+        call is a request, not a change: promoting it here would let a refused
+        edit arm the Undo button."""
+        record = describe_change(event.get("name"), event.get("input"),
+                                 self.turn_focus)
+        if record is None:
+            return
+        record["id"] = event.get("id")
+        record["ts"] = event.get("ts")
+        self._pending_changes[event.get("id")] = record
+        # Bounded. An interrupted turn leaves calls that no result will ever
+        # answer, and this dict would otherwise grow for the life of the daemon.
+        while len(self._pending_changes) > PENDING_CHANGE_CAP:
+            self._pending_changes.popitem(last=False)
+
+    def _promote_change(self, event):
+        record = self._pending_changes.pop(event.get("id"), None)
+        if record is None:
+            return
+        # ok is None for UNVERIFIED, and that is exactly a change he wants to
+        # hear: the mutation was sent, nothing measured it. Only an outright
+        # false — error or refused — means nothing happened.
+        if event.get("ok") is False:
+            return
+        record["verdict"] = event.get("verdict")
+        record["measured"] = event.get("ok") is True and bool(event.get("measurement"))
+        self.last_change = record
+        self.publish_state()
+
     def _on_tool_result(self, event):
         """Circuit breaker. Three consecutive failing tool results means the
         model is looping against something broken, and every loop is a full
         Opus turn charged in full. `unverified` deliberately does NOT count as
         an error: the mutation went through and the model must be free to
         measure it."""
+        self._promote_change(event)
         if event.get("verdict") in ("error", "refused"):
             self.consec_tool_errors += 1
             if self.consec_tool_errors >= TOOL_ERROR_CIRCUIT_BREAK and self.turn_in_flight:
@@ -1518,7 +1766,7 @@ class ConsoleSidecar:
             bridge_ok=self.check_bridge(),
             status=self.status)
 
-    def enqueue(self, text, source="panel"):
+    def enqueue(self, text, source="panel", focus=None):
         """A Send during a live turn is QUEUED, never forwarded. Two user
         messages on one stdin during a turn is undefined behaviour in the CLI
         and the second one silently vanished in the spike."""
@@ -1529,7 +1777,8 @@ class ConsoleSidecar:
                               "code": "QUEUE_FULL",
                               "details": failure["error"]["details"]})
             return failure
-        self.queue.append({"text": text, "source": source, "at": utc_iso()})
+        self.queue.append({"text": text, "source": source, "at": utc_iso(),
+                           "focus": focus})
         self.publish_state()
         return None
 
@@ -1556,9 +1805,10 @@ class ConsoleSidecar:
             self.publish_state()
             return
         prompt = self.queue.pop(0)
-        self.send_now(prompt["text"])
+        self.send_now(prompt["text"], focus=prompt.get("focus"))
 
-    def send_now(self, text):
+    def send_now(self, text, focus=None):
+        self.turn_focus = focus
         self.turn_seq += 1
         self.turn_in_flight = True
         self.turn_started = time.time()
@@ -1674,7 +1924,8 @@ class ConsoleSidecar:
                 # spend a tool call rediscovering what the panel already knows.
                 text = (str(text).rstrip() + "\n\n<focus>\n"
                         + json.dumps(focus, indent=1, default=str) + "\n</focus>")
-            self.enqueue(str(text), source=prompt.get("source") or "panel")
+            self.enqueue(str(text), source=prompt.get("source") or "panel",
+                         focus=focus if isinstance(focus, dict) else None)
 
     def poll_control(self):
         for control in self._consume_dir("control"):
@@ -1809,6 +2060,10 @@ class ConsoleSidecar:
         self.write_event({"t": "session_end", "ts": utc_iso(),
                           "reason": "resume" if resume else "new_session"})
         self.kill_child(reason="restart")
+        # Calls the dead child never got a result for. last_change survives on
+        # purpose: killing the session does not un-change the project, and the
+        # Undo button is most wanted right after something went wrong.
+        self._pending_changes.clear()
         self._stopping.clear()
         failure = self.spawn(resume_id=resume_id)
         if failure:

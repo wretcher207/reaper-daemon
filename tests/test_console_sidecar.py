@@ -258,6 +258,187 @@ def test_budget_exhaustion_is_flagged_distinctly():
 
 
 # ===========================================================================
+# Pure: the last change (the audition loop's subject)
+# ===========================================================================
+
+def change(name, args, focus=None):
+    """Describe a call the way the sidecar sees it: input as the JSON STRING
+    the normalizer produces, not as a dict."""
+    return cs.describe_change(name, json.dumps(args), focus)
+
+
+def test_a_read_only_tool_is_never_the_last_change():
+    # Locate and A/B on a measurement would point at whatever the model
+    # happened to look at, which is worse than showing no buttons.
+    assert change("mcp__reaper-daemon__capture_track_audio", {"track": "Geets"}) is None
+    assert change("mcp__reaper-daemon__get_fx_parameters", {"track": "Geets"}) is None
+    assert change("Read", {"file_path": "x"}) is None
+
+
+def test_a_dry_run_is_not_a_change():
+    # Arming Undo after a dry run would undo his last REAL edit instead.
+    assert change("set_fx_param", {"track": "Geets", "dry_run": True,
+                                   "fx_name_contains": "pro q"}) is None
+
+
+def test_selecting_a_track_is_not_a_change():
+    assert change("track", {"action": "select", "track": "Geets"}) is None
+    assert change("track", {"action": "set_volume", "track": "Geets",
+                            "volume_db": -3}) is not None
+
+
+def test_an_fx_param_change_offers_ab_and_reads_like_a_producer_wrote_it():
+    record = change("mcp__reaper-daemon__set_fx_param", {
+        "track": "Geets", "fx_name_contains": "pro q",
+        "param_name_contains": "High Pass", "formatted_value": "120 Hz"})
+    assert record["tool"] == "set_fx_param"
+    assert record["ab"] == "fx"
+    assert record["summary"] == "Geets · pro q · High Pass · 120 Hz"
+    assert record["track"] == {"kind": "track", "value": "Geets"}
+
+
+def test_ab_is_refused_with_a_reason_when_there_is_no_fx_to_toggle():
+    # Undo/redo A/B is a lie the moment he edits between presses, so the button
+    # goes away and says why rather than silently doing something else.
+    record = change("insert_groove", {"track": "drums", "dsl_text": "x"})
+    assert "ab" not in record
+    assert record["ab_blocked"] == "inserted MIDI: use Undo to compare"
+
+    removed = change("fx", {"action": "remove", "track": "Geets",
+                            "fx_name_contains": "pro q"})
+    assert "ab" not in removed
+    assert "nothing left to toggle" in removed["ab_blocked"]
+
+
+def test_adding_an_fx_can_be_auditioned_by_bypassing_it():
+    record = change("fx", {"action": "add", "track": "Geets", "fx_name": "pro q"})
+    assert record["ab"] == "fx"
+    assert record["fx_name_contains"] == "pro q"
+
+
+def test_bars_come_from_the_tool_when_the_tool_said_bars():
+    record = change("insert_groove", {"track": "drums",
+                                      "position": {"type": "bar", "bar": 17}})
+    assert record["bars"] == {"start": 17, "end": 17, "source": "tool"}
+
+    ranged = change("delete_items_in_range", {
+        "track": "drums", "range": {"type": "bar", "bar": 17}, "length_bars": 8})
+    assert ranged["bars"] == {"start": 17, "end": 24, "source": "tool"}
+
+
+def test_automation_bars_span_the_points():
+    record = change("write_automation", {
+        "track": "Geets", "fx_name_contains": "pro q",
+        "points": [{"bar": 33, "value": 0.1}, {"bar": 40, "value": 0.9}]})
+    assert record["bars"] == {"start": 33, "end": 40, "source": "tool"}
+
+
+def test_bars_fall_back_to_his_time_selection_and_say_so():
+    # Not the same claim as the tool naming bars, and Locate must not present
+    # it as one: it is where he was LOOKING when he asked.
+    focus = {"time_selection": {"start_bar": 9, "end_bar": 16}}
+    record = change("track", {"action": "set_volume", "track": "Geets",
+                              "volume_db": -2}, focus)
+    assert record["bars"] == {"start": 9, "end": 16, "source": "time_selection"}
+
+
+def test_no_bars_anywhere_is_no_bars_not_bar_one():
+    record = change("track", {"action": "set_volume", "track": "Geets",
+                              "volume_db": -2}, {})
+    assert record["bars"] is None
+
+
+def test_verify_change_reads_its_selectors_out_of_the_payload():
+    record = change("verify_change", {
+        "track": "Bass", "command_type": "set_fx_param",
+        "payload": {"fx_name_contains": "rbass", "param_name_contains": "amount",
+                    "formatted_value": "40 %"}})
+    assert record["ab"] == "fx"
+    assert record["fx_name_contains"] == "rbass"
+    assert "40 %" in record["summary"]
+
+
+def test_a_truncated_tool_input_yields_no_record_at_all():
+    # event_line_cap chops a big batch mid-JSON. A half-parsed record would
+    # still draw a Locate button pointing at bars nobody asked for.
+    assert cs.describe_change("batch", '{"commands": [{"type": "add_tr') is None
+
+
+def test_a_batch_is_a_change_but_not_an_ab():
+    record = change("batch", {"commands": [{"type": "set_fx_param",
+                                            "payload": {"track": "Geets"}}]})
+    assert record["tool"] == "batch"
+    assert "one undo block" in record["ab_blocked"]
+
+
+# ---------------------------------------------------------------------------
+# Promotion. A call is a request; only its result says a change happened.
+# ---------------------------------------------------------------------------
+
+def bare_sidecar(root):
+    sidecar = cs.ConsoleSidecar(root=root, take_lock=False, bridge_cache_seconds=0.0)
+    sidecar._open_session_files("test-session")
+    return sidecar
+
+
+FX_CALL = tool_use("t1", "mcp__reaper-daemon__set_fx_param",
+                   {"track": "Geets", "fx_name_contains": "pro q",
+                    "param_name_contains": "High Pass",
+                    "formatted_value": "120 Hz"})
+
+
+def test_a_change_reaches_state_json_only_after_its_result(console_root):
+    sidecar = bare_sidecar(console_root)
+    sidecar._handle_stdout_line(json.dumps(FX_CALL))
+    assert sidecar.last_change is None, "a call is a request, not a change"
+
+    sidecar._handle_stdout_line(json.dumps(tool_result("t1", {"ok": True})))
+    assert sidecar.last_change["summary"].startswith("Geets · pro q")
+    state = json.loads(open(sidecar.state_path, encoding="utf-8").read())
+    assert state["last_change"]["ab"] == "fx"
+
+
+def test_a_refused_mutation_never_arms_the_undo_button(console_root):
+    sidecar = bare_sidecar(console_root)
+    sidecar._handle_stdout_line(json.dumps(FX_CALL))
+    sidecar._handle_stdout_line(json.dumps(tool_result("t1", {"status": "REFUSED"})))
+    assert sidecar.last_change is None
+
+
+def test_an_unverified_mutation_is_still_the_last_change(console_root):
+    # UNVERIFIED means the mutation WAS sent and nothing measured it. That is
+    # precisely the change he most needs to hear with his own ears.
+    sidecar = bare_sidecar(console_root)
+    sidecar._handle_stdout_line(json.dumps(FX_CALL))
+    sidecar._handle_stdout_line(json.dumps(tool_result("t1", {"status": "UNVERIFIED"})))
+    assert sidecar.last_change["verdict"] == "unverified"
+    assert sidecar.last_change["measured"] is False
+
+
+def test_the_change_uses_the_focus_the_prompt_carried_not_the_live_one(console_root):
+    # He may have clicked another track while the turn ran. The change belongs
+    # to what he was looking at when he asked.
+    sidecar = bare_sidecar(console_root)
+    sidecar.turn_focus = {"time_selection": {"start_bar": 17, "end_bar": 24}}
+    sidecar._handle_stdout_line(json.dumps(tool_use(
+        "t2", "mcp__reaper-daemon__track",
+        {"action": "set_volume", "track": "Geets", "volume_db": -2})))
+    sidecar.turn_focus = {"time_selection": {"start_bar": 1, "end_bar": 2}}
+    sidecar._handle_stdout_line(json.dumps(tool_result("t2", {"ok": True})))
+    assert sidecar.last_change["bars"] == {"start": 17, "end": 24,
+                                           "source": "time_selection"}
+
+
+def test_abandoned_calls_cannot_grow_without_bound(console_root):
+    sidecar = bare_sidecar(console_root)
+    for i in range(cs.PENDING_CHANGE_CAP + 10):
+        sidecar._handle_stdout_line(json.dumps(tool_use(
+            f"t{i}", "set_fx_param",
+            {"track": "Geets", "fx_name_contains": "pro q"})))
+    assert len(sidecar._pending_changes) == cs.PENDING_CHANGE_CAP
+
+
+# ===========================================================================
 # Pure: lock verdict
 # ===========================================================================
 

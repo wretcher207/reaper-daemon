@@ -347,6 +347,58 @@ do
   eq("cursor survives", decoded.focus.cursor_seconds, 1.5)
 end
 
+-- ---------------------------------------------------------------------------
+print("audition strip")
+-- ---------------------------------------------------------------------------
+do
+  local fx_change = {
+    id = "t1", tool = "set_fx_param", ab = "fx",
+    summary = "Geets \u{00B7} pro q \u{00B7} High Pass \u{00B7} 120 Hz",
+    track = { kind = "track", value = "Geets" },
+    fx_name_contains = "pro q",
+    bars = { start = 17, ["end"] = 24, source = "tool" },
+  }
+
+  eq("a span reads as a range", M.change_bars_label(fx_change.bars), "bars 17-24")
+  eq("one bar does not read as a range",
+     M.change_bars_label({ start = 9, ["end"] = 9, source = "tool" }), "bar 9")
+  -- Provenance is shown, never folded away: a range lifted from his time
+  -- selection is where he was LOOKING, not what the tool reported writing.
+  eq("a guessed range says whose guess it is",
+     M.change_bars_label({ start = 9, ["end"] = 16, source = "time_selection" }),
+     "bars 9-16 (your selection)")
+  ok("no bars is no label", M.change_bars_label(nil) == nil)
+
+  ok("the strip line carries target and bars",
+     M.change_line(fx_change):find("Geets", 1, true) ~= nil
+     and M.change_line(fx_change):find("bars 17-24", 1, true) ~= nil)
+  -- UNVERIFIED means the mutation was sent and nothing measured it. That
+  -- belongs on the strip, not only inside a tool block he has to expand.
+  ok("an unverified change says so on the strip",
+     M.change_line({ summary = "x", verdict = "unverified" })
+       :find("unverified", 1, true) ~= nil)
+
+  local can, why = M.ab_reason(fx_change)
+  ok("an FX change can be A/B'd", can == true and why == nil)
+  local blocked, reason = M.ab_reason({ ab_blocked = "inserted MIDI: use Undo to compare" })
+  ok("a MIDI insert cannot, and says why",
+     blocked == nil and reason == "inserted MIDI: use Undo to compare")
+  ok("a change with no verdict field still explains itself",
+     select(2, M.ab_reason({})) ~= nil)
+
+  -- Every verdict must be a complete instruction. After a compaction the model
+  -- no longer has the change in context, so "too much" alone is unanswerable.
+  for _, verdict in ipairs(M.VERDICTS) do
+    local prompt = M.verdict_prompt(fx_change, verdict.key)
+    ok(verdict.key .. " names its target",
+       prompt ~= nil and prompt:find("pro q", 1, true) ~= nil
+       and prompt:find("bars 17-24", 1, true) ~= nil, prompt)
+  end
+  ok("an unknown verdict key sends nothing",
+     M.verdict_prompt(fx_change, "nope") == nil)
+  ok("no change means no prompt", M.verdict_prompt(nil, "too_much") == nil)
+end
+
 rmrf(sandbox)
 print(string.format("\n%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)
