@@ -979,6 +979,20 @@ local function fx_summary(track, api_index, display_fx_index, scope, name, extra
   return summary
 end
 
+local function set_fx_param_result(track, track_index, track_name, api_index,
+                                   display_fx_index, fx_scope, fx_name,
+                                   before, after)
+  return {
+    track = { index = track_index, name = track_name,
+              guid = reaper.GetTrackGUID(track) },
+    -- Mutations need the same stable identity as discovery. The Daemon
+    -- Console uses this GUID to prove it is restoring the exact FX that the
+    -- bridge changed, even if an audition bypass added a newer undo point.
+    fx = fx_summary(track, api_index, display_fx_index, fx_scope, fx_name),
+    parameter = { before = before, after = after },
+  }
+end
+
 local function command_get_fx_parameters(command)
   local payload = command.payload or {}
   local track, track_index, api_index, fx_name, fx_scope, display_fx_index = find_fx(payload)
@@ -1116,11 +1130,8 @@ local function command_set_fx_param(command)
   if not ok then error("SET_PARAM_FAILED: REAPER rejected the parameter value") end
   local after = get_fx_param_info(track, api_index, param_index)
   local _, track_name = reaper.GetTrackName(track, "")
-  return {
-    track = { index = track_index, name = track_name, guid = reaper.GetTrackGUID(track) },
-    fx = { index = display_fx_index or api_index, api_index = api_index, scope = fx_scope or "track", name = fx_name },
-    parameter = { before = before, after = after },
-  }
+  return set_fx_param_result(track, track_index, track_name, api_index,
+    display_fx_index, fx_scope, fx_name, before, after)
 end
 
 local function command_write_fx_param_automation(command)
@@ -3361,6 +3372,7 @@ if _G.REAPER_BRIDGE_SELFTEST then
     restore_render_autoclose = restore_render_autoclose,
     render_preferences_error = render_preferences_error,
     fx_summary = fx_summary,
+    set_fx_param_result = set_fx_param_result,
     batch_result = batch_result,
     capture_provenance = capture_provenance,
     folder_descendants = folder_descendants,

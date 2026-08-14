@@ -295,6 +295,69 @@ def test_an_fx_param_change_offers_ab_and_reads_like_a_producer_wrote_it():
     assert record["ab"] == "fx"
     assert record["summary"] == "Geets · pro q · High Pass · 120 Hz"
     assert record["track"] == {"kind": "track", "value": "Geets"}
+    assert record["param_index"] is None
+
+
+def test_set_fx_param_result_arms_an_exact_guarded_restore():
+    record = change("set_fx_param", {
+        "track": "Geets", "fx_index": 1, "fx_scope": "track",
+        "param_index": 2, "formatted_value": "60.0%"})
+    payload = {
+        "ok": True,
+        "data": {
+            "track": {"guid": "{TRACK}", "name": "Geets", "index": 2},
+            "fx": {"guid": "{FX}", "api_index": 1, "index": 1,
+                   "scope": "track"},
+            "parameter": {
+                "index": 2,
+                "before": {"normalized_value": 0.64,
+                           "formatted_value": "64.0%"},
+                "after": {"normalized_value": 0.5995,
+                          "formatted_value": "60.0%"},
+            },
+        },
+    }
+    cs.add_direct_restore(record, json.dumps(payload))
+    assert record["restore"] == {
+        "kind": "fx_param", "track_guid": "{TRACK}", "fx_guid": "{FX}",
+        "fx_api_index": 1, "param_index": 2,
+        "before_normalized": 0.64, "after_normalized": 0.5995,
+        "before_formatted": "64.0%", "after_formatted": "60.0%",
+    }
+
+
+def test_live_set_fx_param_shape_needs_the_fx_guid():
+    """Regression for the first live retest: every value survived, but the
+    bridge's mutation response omitted fx.guid, so arming Restore was unsafe."""
+    record = change("set_fx_param", {
+        "track": "Track 2", "fx_index": 1, "fx_scope": "track",
+        "param_index": 2, "normalized_value": 0.6})
+    live_shape_without_guid = {
+        "ok": True,
+        "data": {
+            "track": {"guid": "{TRACK}", "name": "Track 2", "index": 2},
+            "fx": {"api_index": 1, "index": 1, "scope": "track",
+                   "name": "VST3: DIFIX"},
+            "parameter": {
+                "before": {"normalized_value": 0.64},
+                "after": {"normalized_value": 0.60},
+            },
+        },
+    }
+    cs.add_direct_restore(record, json.dumps(live_shape_without_guid))
+    assert "restore" not in record
+
+    live_shape_without_guid["data"]["fx"]["guid"] = "{FX}"
+    cs.add_direct_restore(record, json.dumps(live_shape_without_guid))
+    assert record["restore"]["fx_guid"] == "{FX}"
+
+
+def test_restore_is_not_armed_without_complete_result_evidence():
+    record = change("set_fx_param", {
+        "track": "Geets", "fx_index": 1, "fx_scope": "track",
+        "param_index": 2, "formatted_value": "60.0%"})
+    cs.add_direct_restore(record, json.dumps({"ok": True, "data": {}}))
+    assert "restore" not in record
 
 
 def test_ab_is_refused_with_a_reason_when_there_is_no_fx_to_toggle():
@@ -396,6 +459,29 @@ def test_a_change_reaches_state_json_only_after_its_result(console_root):
     assert sidecar.last_change["summary"].startswith("Geets · pro q")
     state = json.loads(open(sidecar.state_path, encoding="utf-8").read())
     assert state["last_change"]["ab"] == "fx"
+
+
+def test_exact_restore_evidence_reaches_state_json(console_root):
+    sidecar = bare_sidecar(console_root)
+    sidecar._handle_stdout_line(json.dumps(tool_use(
+        "t-restore", "mcp__reaper-daemon__set_fx_param",
+        {"track": "Geets", "fx_index": 1, "fx_scope": "track",
+         "param_index": 2, "formatted_value": "60.0%"})))
+    payload = {
+        "ok": True,
+        "data": {
+            "track": {"guid": "{TRACK}"},
+            "fx": {"guid": "{FX}", "api_index": 1},
+            "parameter": {"index": 2,
+                          "before": {"normalized_value": 0.64,
+                                     "formatted_value": "64.0%"},
+                          "after": {"normalized_value": 0.5995,
+                                    "formatted_value": "60.0%"}},
+        },
+    }
+    sidecar._handle_stdout_line(json.dumps(tool_result("t-restore", payload)))
+    state = json.loads(open(sidecar.state_path, encoding="utf-8").read())
+    assert state["last_change"]["restore"]["before_normalized"] == 0.64
 
 
 def test_a_refused_mutation_never_arms_the_undo_button(console_root):
