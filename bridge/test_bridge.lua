@@ -556,5 +556,80 @@ ok(folder_capture.note:find("FOLDER", 1, true) ~= nil,
 ok(cp(true, false, 0).note:find("Kontakt", 1, true) ~= nil,
    "a childless routing stem keeps the original note")
 
+-- MIDI velocity editing. Notes are addressed by (ppq, pitch) precisely so a
+-- request built against a stale read fails loudly instead of writing a
+-- velocity onto whatever note happens to sit at that index now.
+local vp = B.velocity_plan
+local take = {
+  { index = 0, ppq = 0, pitch = 24, velocity = 127 },
+  { index = 1, ppq = 0, pitch = 54, velocity = 127 },
+  { index = 2, ppq = 480, pitch = 24, velocity = 127 },
+}
+
+local clean = vp(take, { { ppq = 0, pitch = 24, velocity = 112 },
+                         { ppq = 480, pitch = 24, velocity = 107 } })
+eq(#clean.plan, 2, "both requested notes resolve")
+eq(#clean.missing, 0, "nothing missing")
+eq(clean.plan[1].index, 0, "the plan carries the take index, not the row number")
+eq(clean.plan[1].from, 127, "the plan records what the note was")
+eq(clean.plan[2].index, 2, "the second row resolves to its own note")
+
+-- The whole point of position addressing: a note that moved is a miss, and a
+-- miss names the row so the caller can see WHICH note went.
+local moved = vp(take, { { ppq = 0, pitch = 24, velocity = 112 },
+                         { ppq = 481, pitch = 24, velocity = 107 } })
+eq(#moved.plan, 1, "the note that is still there still resolves")
+eq(#moved.missing, 1, "the moved note is a miss, not a silent skip")
+eq(moved.missing[1].row, 2, "the miss names its row")
+eq(moved.missing[1].ppq, 481, "the miss names the tick it looked at")
+
+-- Pitch is half the key: same tick, wrong drum, is a miss too.
+eq(#vp(take, { { ppq = 0, pitch = 26, velocity = 100 } }).missing, 1,
+   "the right tick on the wrong pitch is still a miss")
+
+-- Stacked notes are refused, not picked between. Writing to one of two notes
+-- the caller never distinguished is a silent wrong answer.
+local stacked = { { index = 0, ppq = 0, pitch = 24, velocity = 127 },
+                  { index = 1, ppq = 0, pitch = 24, velocity = 90 } }
+local amb = vp(stacked, { { ppq = 0, pitch = 24, velocity = 110 } })
+eq(#amb.plan, 0, "a stacked pair produces no plan")
+eq(#amb.ambiguous, 1, "a stacked pair is reported as ambiguous")
+
+-- Two rows aiming at one note is the same failure from the other direction.
+local twice = vp(take, { { ppq = 0, pitch = 24, velocity = 110 },
+                         { ppq = 0, pitch = 24, velocity = 96 } })
+eq(#twice.plan, 1, "the first row claims the note")
+eq(#twice.ambiguous, 1, "the second row is refused rather than overwriting it")
+
+-- MIDI velocity 0 is a note-off, not a quiet note.
+local bad = vp(take, { { ppq = 0, pitch = 24, velocity = 0 },
+                       { ppq = 0, pitch = 54, velocity = 128 },
+                       { ppq = 480, pitch = 24, velocity = "loud" } })
+eq(#bad.invalid, 3, "0, 128 and a non-number are all refused")
+eq(#bad.plan, 0, "an out-of-range velocity contributes nothing to the plan")
+
+eq(#vp(take, {}).plan, 0, "an empty request is not an error")
+eq(#vp({}, { { ppq = 0, pitch = 24, velocity = 100 } }).missing, 1,
+   "an empty take misses everything rather than erroring")
+
+-- The summary is what makes a 400-note edit readable, so it has to be right
+-- about the numbers it collapses.
+local vs = B.velocity_summary
+local summary = vs({
+  { pitch = 26, velocity = 100 },
+  { pitch = 24, velocity = 112 },
+  { pitch = 24, velocity = 108 },
+  { pitch = 24, velocity = 107 },
+})
+eq(#summary, 2, "one row per pitch")
+eq(summary[1].pitch, 24, "rows are sorted by pitch, not by first appearance")
+eq(summary[1].count, 3, "the count is the number of hits on that pitch")
+eq(summary[1].min, 107, "min")
+eq(summary[1].max, 112, "max")
+eq(summary[1].mean, 109, "mean")
+eq(summary[2].count, 1, "a single hit summarises as itself")
+eq(summary[2].min, summary[2].max, "and its min equals its max")
+eq(#vs({}), 0, "an empty take summarises to nothing")
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))

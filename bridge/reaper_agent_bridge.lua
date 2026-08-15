@@ -925,6 +925,292 @@ local function command_insert_midi_file(command)
   return insert_midi_payload(command.payload or {})
 end
 
+-- MIDI notes inside a take
+--
+-- The bridge could place a MIDI item but never touch a note inside one, so
+-- every velocity/articulation pass had to go through the REAPER UI. These two
+-- commands close that: read the notes, then set velocities on named notes.
+--
+-- Notes are addressed by (start PPQ, pitch), never by take index. An index
+-- moves the instant anything is inserted or deleted, so an index-addressed
+-- edit written against a read from a minute ago can land on the wrong note
+-- and look like it worked. A (ppq, pitch) pair either names the same note it
+-- named at read time or names nothing at all, which is a failure we can see.
+
+local function midi_take_for(payload)
+  local track, track_index = find_track(payload)
+  local count = reaper.CountTrackMediaItems(track)
+  if count == 0 then
+    error("NO_MEDIA_ITEM: target track has no media items")
+  end
+  local item
+  if payload.item_index ~= nil then
+    local idx = math.floor(tonumber(payload.item_index) or -1)
+    if idx < 0 or idx >= count then
+      error("NO_MEDIA_ITEM: item_index " .. idx .. " is out of range; the track has " .. count)
+    end
+    item = reaper.GetTrackMediaItem(track, idx)
+  elseif count > 1 then
+    error("AMBIGUOUS_ITEM: the track has " .. count .. " items; pass item_index")
+  else
+    item = reaper.GetTrackMediaItem(track, 0)
+  end
+  local take = reaper.GetActiveTake(item)
+  if not take then error("NO_TAKE: the item has no active take") end
+  if not reaper.TakeIsMIDI(take) then
+    error("NOT_MIDI: the active take is audio, not MIDI")
+  end
+  return take, track, track_index, item
+end
+
+local function read_midi_notes(take)
+  local _, note_count = reaper.MIDI_CountEvts(take)
+  local notes = {}
+  for i = 0, (note_count or 0) - 1 do
+    local ok, selected, muted, startppq, endppq, chan, pitch, vel = reaper.MIDI_GetNote(take, i)
+    if ok then
+      notes[#notes + 1] = {
+        index = i,
+        ppq = math.floor(startppq + 0.5),
+        end_ppq = math.floor(endppq + 0.5),
+        pitch = pitch,
+        velocity = vel,
+        channel = chan,
+        muted = muted and true or false,
+        selected = selected and true or false,
+      }
+    end
+  end
+  return notes
+end
+
+-- Pure: resolve requested (ppq, pitch, velocity) rows against the notes a take
+-- actually has. Every row lands in exactly one bucket, so the caller can refuse
+-- the whole edit on any bucket but `plan` being non-empty.
+--
+-- Two notes stacked on the same pitch AND the same tick are reported as
+-- ambiguous rather than picked between. Guessing there means writing a
+-- velocity onto a note the caller never looked at.
+local function velocity_plan(existing, requested)
+  local by_key, duplicated = {}, {}
+  for _, note in ipairs(existing) do
+    local key = note.ppq .. ":" .. note.pitch
+    if by_key[key] then duplicated[key] = true else by_key[key] = note end
+  end
+  local plan, missing, ambiguous, invalid = {}, {}, {}, {}
+  local claimed = {}
+  for row, req in ipairs(requested) do
+    local key = tostring(req.ppq) .. ":" .. tostring(req.pitch)
+    local velocity = tonumber(req.velocity)
+    velocity = velocity and math.floor(velocity) or nil
+    local where = { row = row, ppq = req.ppq, pitch = req.pitch }
+    if not velocity or velocity < 1 or velocity > 127 then
+      where.velocity = req.velocity
+      invalid[#invalid + 1] = where
+    elseif duplicated[key] then
+      where.reason = "two notes share this tick and pitch"
+      ambiguous[#ambiguous + 1] = where
+    elseif claimed[key] then
+      where.reason = "this note was already addressed by row " .. claimed[key]
+      ambiguous[#ambiguous + 1] = where
+    elseif not by_key[key] then
+      missing[#missing + 1] = where
+    else
+      claimed[key] = row
+      local note = by_key[key]
+      plan[#plan + 1] = {
+        index = note.index,
+        ppq = note.ppq,
+        pitch = note.pitch,
+        from = note.velocity,
+        to = velocity,
+      }
+    end
+  end
+  return { plan = plan, missing = missing, ambiguous = ambiguous, invalid = invalid }
+end
+
+-- Pure: fold a note list into a per-pitch velocity summary. This is what makes
+-- a 400-note edit readable in one line per drum instead of 400 rows.
+local function velocity_summary(notes)
+  local order, seen = {}, {}
+  for _, note in ipairs(notes) do
+    local bucket = seen[note.pitch]
+    if not bucket then
+      bucket = { pitch = note.pitch, count = 0, min = note.velocity, max = note.velocity, total = 0 }
+      seen[note.pitch] = bucket
+      order[#order + 1] = bucket
+    end
+    bucket.count = bucket.count + 1
+    bucket.total = bucket.total + note.velocity
+    if note.velocity < bucket.min then bucket.min = note.velocity end
+    if note.velocity > bucket.max then bucket.max = note.velocity end
+  end
+  table.sort(order, function(a, b) return a.pitch < b.pitch end)
+  for _, bucket in ipairs(order) do
+    bucket.mean = bucket.total / bucket.count
+    bucket.total = nil
+  end
+  return order
+end
+
+local function note_name_lookup(track, notes)
+  local names = {}
+  for _, note in ipairs(notes) do
+    if names[note.pitch] == nil then
+      local name = reaper.GetTrackMIDINoteNameEx(0, track, note.pitch, note.channel or 0)
+      names[note.pitch] = name or false
+    end
+  end
+  local out = {}
+  for pitch, name in pairs(names) do
+    if name then out[tostring(pitch)] = name end
+  end
+  return out
+end
+
+local function command_get_midi_notes(command)
+  local payload = command.payload or {}
+  local take, track, track_index, item = midi_take_for(payload)
+  local notes = read_midi_notes(take)
+
+  local wanted
+  if type(payload.pitches) == "table" and #payload.pitches > 0 then
+    wanted = {}
+    for _, p in ipairs(payload.pitches) do wanted[math.floor(tonumber(p) or -1)] = true end
+    local kept = {}
+    for _, note in ipairs(notes) do
+      if wanted[note.pitch] then kept[#kept + 1] = note end
+    end
+    notes = kept
+  end
+
+  local total = #notes
+  local cap = math.floor(tonumber(payload.max_notes) or 4000)
+  local truncated = false
+  if cap > 0 and total > cap then
+    local kept = {}
+    for i = 1, cap do kept[i] = notes[i] end
+    notes = kept
+    truncated = true
+  end
+
+  -- Bar numbers are the thing a producer actually reads back, and they cost one
+  -- API call per note, so they are opt-out rather than always-on.
+  if payload.include_bars ~= false then
+    for _, note in ipairs(notes) do
+      note.bar = bar_from_time(reaper.MIDI_GetProjTimeFromPPQPos(take, note.ppq))
+    end
+  end
+
+  local _, track_name = reaper.GetTrackName(track, "")
+  local data = {
+    track = { index = track_index, name = track_name },
+    item = {
+      start_seconds = reaper.GetMediaItemInfo_Value(item, "D_POSITION"),
+      length_seconds = reaper.GetMediaItemInfo_Value(item, "D_LENGTH"),
+    },
+    ppq_per_quarter = math.floor(
+      reaper.MIDI_GetPPQPosFromProjQN(take, 1) - reaper.MIDI_GetPPQPosFromProjQN(take, 0) + 0.5),
+    note_count = total,
+    returned = #notes,
+    truncated = truncated,
+    notes = notes,
+    velocity_summary = velocity_summary(notes),
+  }
+  if payload.include_note_names ~= false then
+    data.note_names = note_name_lookup(track, notes)
+  end
+  return data
+end
+
+local function command_set_note_velocities(command)
+  local payload = command.payload or {}
+  local rows = payload.notes
+  if type(rows) ~= "table" or #rows == 0 then
+    error("BAD_PAYLOAD: notes must be a non-empty array of [ppq, pitch, velocity]")
+  end
+
+  local requested = {}
+  for i, row in ipairs(rows) do
+    if type(row) ~= "table" then
+      error("BAD_PAYLOAD: notes[" .. i .. "] is neither an array nor an object")
+    end
+    if row.ppq ~= nil or row.pitch ~= nil then
+      requested[i] = { ppq = math.floor(tonumber(row.ppq) or -1),
+                       pitch = math.floor(tonumber(row.pitch) or -1),
+                       velocity = row.velocity }
+    else
+      requested[i] = { ppq = math.floor(tonumber(row[1]) or -1),
+                       pitch = math.floor(tonumber(row[2]) or -1),
+                       velocity = row[3] }
+    end
+  end
+
+  local take, track, track_index = midi_take_for(payload)
+  local before = read_midi_notes(take)
+  local resolved = velocity_plan(before, requested)
+  local unresolved = #resolved.missing + #resolved.ambiguous + #resolved.invalid
+
+  -- Default is all-or-nothing. A velocity pass is one musical gesture: half of
+  -- it applied is worse than none of it, because the half that landed is
+  -- indistinguishable by ear from the half that did not.
+  if unresolved > 0 and payload.allow_partial ~= true then
+    error("NOTE_MATCH_FAILED: " .. unresolved .. " of " .. #requested ..
+      " requested notes did not resolve (" .. #resolved.missing .. " missing, " ..
+      #resolved.ambiguous .. " ambiguous, " .. #resolved.invalid ..
+      " outside 1-127); nothing was changed. The take holds " .. #before ..
+      " notes. Re-read it with get_midi_notes and rebuild the request: the " ..
+      "MIDI moved after the read this request was built from.")
+  end
+  if #resolved.plan == 0 then
+    error("NOTE_MATCH_FAILED: no requested note resolved; nothing was changed")
+  end
+
+  for _, hit in ipairs(resolved.plan) do
+    reaper.MIDI_SetNote(take, hit.index, nil, nil, nil, nil, nil, nil, hit.to, true)
+  end
+  reaper.MIDI_Sort(take)
+  reaper.UpdateArrange()
+
+  -- Read the take back and confirm each note by (ppq, pitch), because
+  -- MIDI_SetNote returning true is a claim about the call, not about the note.
+  local after = read_midi_notes(take)
+  local by_key = {}
+  for _, note in ipairs(after) do by_key[note.ppq .. ":" .. note.pitch] = note end
+  local confirmed, wrong = 0, {}
+  for _, hit in ipairs(resolved.plan) do
+    local note = by_key[hit.ppq .. ":" .. hit.pitch]
+    if note and note.velocity == hit.to then
+      confirmed = confirmed + 1
+    else
+      wrong[#wrong + 1] = { ppq = hit.ppq, pitch = hit.pitch, wanted = hit.to,
+                            got = note and note.velocity or nil }
+    end
+  end
+  if #wrong > 0 then
+    error("VELOCITY_WRITE_UNCONFIRMED: " .. #wrong .. " of " .. #resolved.plan ..
+      " notes did not read back at the requested velocity. The edit is inside " ..
+      "one undo block; one REAPER undo reverts it.")
+  end
+
+  local _, track_name = reaper.GetTrackName(track, "")
+  return {
+    track = { index = track_index, name = track_name },
+    requested = #requested,
+    applied = #resolved.plan,
+    confirmed = confirmed,
+    unresolved = unresolved,
+    missing = resolved.missing,
+    ambiguous = resolved.ambiguous,
+    invalid = resolved.invalid,
+    velocity_before = velocity_summary(before),
+    velocity_after = velocity_summary(after),
+    verified_note = "Every applied note was re-read from the take and matched " ..
+      "the requested velocity.",
+  }
+end
+
 local function command_play()
   reaper.Main_OnCommand(1007, 0) -- 1007 = Transport: Play/stop
   return { transport = get_transport() }
@@ -2994,6 +3280,7 @@ local NO_UNDO_BLOCK = {
   -- Panel support (P3-002): both are pure reads.
   get_selected_track = true,
   get_capture_preflight = true,
+  get_midi_notes = true,
   -- The preview lifecycle deliberately creates NO undo points except the one
   -- commit_preview manages itself (restore baseline, then apply inside a
   -- single named Undo block). Temporary preview state must never appear in
@@ -3139,6 +3426,8 @@ handlers.delete_items_in_range = command_delete_items_in_range
 
 -- MIDI
 handlers.insert_midi_file = command_insert_midi_file
+handlers.get_midi_notes = command_get_midi_notes
+handlers.set_note_velocities = command_set_note_velocities
 
 -- Composition
 handlers.batch = command_batch
@@ -3383,6 +3672,8 @@ if _G.REAPER_BRIDGE_SELFTEST then
     baseline_target_value = baseline_target_value,
     expected_capture_scope = expected_capture_scope,
     preflight_verdict = preflight_verdict,
+    velocity_plan = velocity_plan,
+    velocity_summary = velocity_summary,
   }
 end
 

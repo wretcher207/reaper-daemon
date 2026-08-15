@@ -446,6 +446,62 @@ deletes across every track.
 > unattended use, set that preference to "in-project MIDI" once, or pre-set the
 > project's MIDI import mode.
 
+### get_midi_notes
+
+Read the notes in a take. Read-only.
+
+```json
+{ "target_track_name": "Monarch", "item_index": 0,
+  "pitches": [24, 26], "max_notes": 4000,
+  "include_bars": true, "include_note_names": true }
+```
+
+`item_index` is optional when the track holds exactly one item; a track with
+more than one and no `item_index` is `AMBIGUOUS_ITEM` rather than a guess.
+
+Returns `notes` (`index`, `ppq`, `end_ppq`, `pitch`, `velocity`, `channel`,
+`muted`, `selected`, and `bar` unless `include_bars` is false),
+`ppq_per_quarter`, `note_count`, `returned`, `truncated`, a per-pitch
+`velocity_summary`, and `note_names` from the kit's `.midnam` when it has one.
+
+`note_count` is the take's total and `returned` is how many came back, so a
+`max_notes` cut is visible rather than looking like a short take.
+
+### set_note_velocities
+
+Set velocity on specific existing notes. One undo block.
+
+```json
+{ "target_track_name": "Monarch",
+  "notes": [[0, 24, 112], [480, 24, 110], [960, 54, 123]],
+  "allow_partial": false }
+```
+
+Each row is `[start_ppq, pitch, velocity]`, or the object form
+`{"ppq": 0, "pitch": 24, "velocity": 112}`. Velocity is 1-127; 0 is a note-off,
+not a quiet note, and is refused.
+
+**Notes are addressed by position and pitch, never by take index.** An index
+shifts as soon as anything is inserted or deleted, so an index-addressed edit
+built from an older read can land on the wrong note and still report success.
+A `(ppq, pitch)` pair either names the same note it named at read time or names
+nothing, which fails visibly.
+
+The default is all-or-nothing: if any row is missing, ambiguous, or out of
+range, the command changes nothing and fails `NOTE_MATCH_FAILED` with the count
+in each bucket. A velocity pass is one musical gesture, and half of one applied
+is worse than none, because by ear the half that landed is indistinguishable
+from the half that did not. `allow_partial: true` applies what resolved and
+reports the rest in `missing` / `ambiguous` / `invalid`.
+
+Two notes on the same pitch at the same tick are reported as ambiguous rather
+than picked between, as are two rows aiming at one note.
+
+After writing, the handler re-reads the take and confirms every applied note by
+`(ppq, pitch)`; a mismatch fails `VELOCITY_WRITE_UNCONFIRMED` rather than
+reporting an unchecked success. Results carry `applied`, `confirmed`, and
+`velocity_before` / `velocity_after` per-pitch summaries.
+
 ---
 
 ## Composition
