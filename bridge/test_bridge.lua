@@ -791,5 +791,26 @@ for _, sample in ipairs({
   eq(np, op, "helper matches capture's old pattern for " .. sample)
 end
 
+-- reload_bridge: the refusal logic is pure and must fail toward keeping the
+-- running bridge. A compile failure refuses (handing over to a broken file
+-- kills the bridge for a typo); an active preview refuses (the fresh
+-- instance's startup recovery would silently cancel it).
+local rv = B.reload_verdict
+eq(rv(true, nil, false), nil, "clean compile, no preview: reload may proceed")
+local compile_refusal = rv(false, "bridge.lua:12: '=' expected near 'end'", false)
+ok(compile_refusal:find("^RELOAD_COMPILE_FAILED") ~= nil, "compile failure refuses")
+ok(compile_refusal:find("'=' expected", 1, true) ~= nil,
+   "refusal carries the compiler's own message")
+local preview_refusal = rv(true, nil, true)
+ok(preview_refusal:find("^RELOAD_BLOCKED") ~= nil, "active preview refuses")
+ok(preview_refusal:find("cancel_preview", 1, true) ~= nil,
+   "preview refusal names the way out")
+ok(rv(false, "err", true):find("^RELOAD_BLOCKED") ~= nil,
+   "preview refusal wins over compile: resolve the preview first")
+eq(B.error_code_from(compile_refusal, "COMMAND_FAILED"), "RELOAD_COMPILE_FAILED",
+   "compile refusal parses into a structured error code")
+eq(B.error_code_from(preview_refusal, "COMMAND_FAILED"), "RELOAD_BLOCKED",
+   "preview refusal parses into a structured error code")
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))

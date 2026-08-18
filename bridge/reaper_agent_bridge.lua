@@ -253,6 +253,10 @@ do
 end
 
 local in_flight_command = nil
+-- Set by command_reload_bridge, acted on by the defer loop AFTER the command's
+-- reply is written and its file archived — the old instance must finish its
+-- bookkeeping before a new instance can own the inbox.
+local reload_requested = false
 -- Active preview (P2-002): mirrors state/preview.json so the heartbeat and the
 -- expiry sweep don't re-read the file every tick. Startup recovery repopulates
 -- consistency after a crash.
@@ -267,6 +271,11 @@ local last_in_flight = nil
 local function now()
   return os.date("!%Y-%m-%dT%H:%M:%SZ")
 end
+
+-- Stamped once per load and carried in every heartbeat, so "did my new code
+-- actually load" after reload_bridge is answered by watching this change —
+-- alive_at alone cannot tell a reloaded bridge from the old one still ticking.
+local LOADED_AT = now()
 
 local function log_line(message)
   local file = io.open(join(paths.logs, "bridge.log"), "ab")
@@ -409,6 +418,7 @@ local function heartbeat_payload(extra)
   -- (A real value needs js_ReaScriptAPI's Js_Window_GetForeground, optional.)
   local hb = {
     alive_at = now(),
+    loaded_at = LOADED_AT,
     bridge_version = 3,
     project_name = get_project_name(),
     in_flight_command = in_flight_command,
@@ -3586,6 +3596,48 @@ local function command_discover_drum_map(command)
   }
 end
 
+-- Pure: decide whether a reload may proceed. Fails toward keeping the running
+-- bridge. An active preview refuses first (the fresh instance's startup
+-- recovery would restore its baseline — silently cancelling ephemeral state
+-- the agent still thinks is live); a compile failure refuses (handing over to
+-- a broken file would kill the bridge for a typo, when the whole point of
+-- reload is making bridge edits cheap).
+local function reload_verdict(compiles, compile_err, has_active_preview)
+  if has_active_preview then
+    return "RELOAD_BLOCKED: an active preview would be cancelled by the fresh "
+      .. "instance's startup recovery; commit_preview or cancel_preview first"
+  end
+  if not compiles then
+    return "RELOAD_COMPILE_FAILED: " .. tostring(compile_err)
+  end
+  return nil
+end
+
+-- Replace the running bridge with a fresh instance loaded from disk, without a
+-- REAPER restart. The handler only schedules: the reply must reach outbox/
+-- from the OLD instance before the handover, so the actual work happens at the
+-- bottom of the defer loop (see perform_reload). The reply carries the current
+-- LOADED_AT so the caller can confirm the handover by watching the heartbeat's
+-- loaded_at change.
+local function command_reload_bridge(command)
+  -- reload_bridge sits in NO_UNDO_BLOCK (it never touches the project), which
+  -- means run_command's dry_run short-circuit does not cover it — without this
+  -- branch a dry_run would really reload.
+  if command.dry_run then
+    return { dry_run = true, would_run = "reload_bridge", script_path = SCRIPT_PATH }
+  end
+  local chunk, err = loadfile(SCRIPT_PATH)
+  local verdict = reload_verdict(chunk ~= nil, err, active_preview ~= nil)
+  if verdict then error(verdict) end
+  reload_requested = true
+  return {
+    reload = "scheduled",
+    script_path = SCRIPT_PATH,
+    loaded_at = LOADED_AT,
+    note = "reload runs after this reply; confirm via heartbeat loaded_at changing",
+  }
+end
+
 local handlers = {}
 
 -- Commands that don't need an undo block: they read state, not project state.
@@ -3612,6 +3664,10 @@ local NO_UNDO_BLOCK = {
   preview_change = true,
   cancel_preview = true,
   commit_preview = true,
+  -- reload_bridge mutates the process, not the project — there is nothing an
+  -- undo point could hold. Its handler carries its own dry_run branch because
+  -- membership here bypasses run_command's dry_run short-circuit.
+  reload_bridge = true,
 }
 
 local function is_mutating(command_type)
@@ -3760,6 +3816,9 @@ handlers.insert_midi_file = command_insert_midi_file
 handlers.get_midi_notes = command_get_midi_notes
 handlers.set_note_velocities = command_set_note_velocities
 handlers.set_note_positions  = command_set_note_positions
+
+-- Bridge lifecycle
+handlers.reload_bridge = command_reload_bridge
 
 -- Composition
 handlers.batch = command_batch
@@ -3912,6 +3971,34 @@ local LOCK_CONFIRM_DELAY = 0.75
 -- thread; the remainder waits for the next tick. 50 stays as a hard backstop.
 local DRAIN_BUDGET = 0.03
 
+-- The reload handover. Runs only from the bottom of the defer loop, after the
+-- reload command's reply is in outbox/ and its file archived. The lock is
+-- DELETED, not left to go stale: the fresh instance's startup lock_verdict
+-- then proceeds immediately instead of refusing for 60s. Re-compiled here even
+-- though the handler already checked, because the file can change between the
+-- reply and this tick. If the fresh instance's top level throws, this instance
+-- re-claims the lock and keeps running — a broken edit costs a log line, not
+-- the bridge. (Should a partially-started fresh instance have written its own
+-- lock before dying, the re-claim overwrites it; nothing else is deferring.)
+local function perform_reload()
+  local chunk, err = loadfile(SCRIPT_PATH)
+  if not chunk then
+    log_line("reload aborted, compile failed: " .. tostring(err))
+    return false
+  end
+  log_line("bridge reloading; handing over to a fresh instance of " .. SCRIPT_PATH)
+  os.remove(lockfile)
+  -- Loading via a chunk means get_action_context reports the ORIGINAL
+  -- launcher, so point the fresh instance at its own dir the same way the
+  -- startup watchdog does.
+  REAPER_AGENT_BRIDGE_DIR = SCRIPT_DIR
+  local ok, run_err = pcall(chunk)
+  if ok then return true end
+  log_line("reload failed: " .. tostring(run_err) .. "; old bridge resuming")
+  write_lock("none")
+  return false
+end
+
 local function loop()
   local current = reaper.time_precise()
 
@@ -3933,6 +4020,9 @@ local function loop()
       for i = 1, math.min(#files, 50) do
         process_file(files[i])
         maybe_heartbeat(false)  -- keep heartbeat/lock fresh mid-drain (self-throttles)
+        -- Hand over before touching another command: anything still in inbox/
+        -- belongs to the fresh instance.
+        if reload_requested then break end
         if reaper.time_precise() - tick_start >= DRAIN_BUDGET then break end
       end
       maybe_sweep()
@@ -3942,6 +4032,12 @@ local function loop()
       log_line("loop error " .. tostring(err))
       in_flight_command = nil
     end
+  end
+  if reload_requested then
+    reload_requested = false
+    -- On success the fresh instance registered its own defer chain; this one
+    -- ends by not re-deferring. On failure, fall through and keep running.
+    if perform_reload() then return end
   end
   reaper.defer(loop)
 end
@@ -4011,6 +4107,7 @@ if _G.REAPER_BRIDGE_SELFTEST then
     send_mode_names = SEND_MODE_NAMES,
     save_target_error = save_target_error,
     split_render_target = split_render_target,
+    reload_verdict = reload_verdict,
   }
 end
 

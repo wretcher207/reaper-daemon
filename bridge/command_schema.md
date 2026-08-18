@@ -618,6 +618,34 @@ check the size of the move against the tempo without re-reading the take.
 
 ---
 
+## Bridge lifecycle
+
+### reload_bridge
+No payload.
+```json
+{}
+```
+Replaces the running bridge with a fresh instance loaded from
+`bridge/reaper_agent_bridge.lua` on disk — no REAPER restart. The reply is
+written by the OLD instance before the handover, so `reload: "scheduled"`
+means it has not happened yet. Confirm it by reading `bridge/heartbeat.json`:
+its `loaded_at` stamp changes when the fresh instance is up, and the reply
+carries the old `loaded_at` to compare against. Config
+(`bridge_config.json`) is re-read by the fresh instance, so this also applies
+config changes.
+
+Refusals: `RELOAD_COMPILE_FAILED` when the file on disk does not compile —
+the running bridge is left untouched, so a typo costs a reply, not the
+bridge — and `RELOAD_BLOCKED` while a preview is active, because the fresh
+instance's startup recovery would silently cancel it (`commit_preview` or
+`cancel_preview` first).
+
+If the file compiles but throws while starting, the old instance re-claims
+its lock and keeps running; the failure is logged in `logs/bridge.log`. The
+handover happens between commands, never mid-command, and anything still in
+`inbox/` (including later commands of the same drain) is picked up by the
+fresh instance.
+
 ## Composition
 
 ### batch
