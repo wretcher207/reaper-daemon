@@ -497,7 +497,12 @@ Instead of `normalized_value` (0.0–1.0): `relative` (`"+0.1"`) or
 `formatted_value` (`"65 %"`, `"80 Hz"`, `"-16.00 dB"`). The bridge binary-searches
 the normalized value whose formatted display matches the target number, so it
 works on plugins that hide their real range (FabFilter, most VST3) as well as
-those that expose it. Numeric display values only — enum/string params like
+those that expose it. Two things it handles that trip a naive search: a display
+that changes unit partway up its range (Pro-C 3's Release goes `944.9 ms` to
+`1.151 sec`; time is compared in ms, frequency in Hz), and a display that goes
+non-numeric at one end (Pro-Q 4's band Threshold reads `Auto` at 1.0; the search
+narrows to the widest numeric bracket instead of refusing the parameter). Every
+probe is a real write, and the original value is restored on any failure. Numeric display values only — enum/string params like
 "Bell", "Punch", or "Off" are rejected with `FORMATTED_VALUE_UNSUPPORTED` (use
 `normalized_value` for those: scan to find the value that formats right). When
 precision matters, scan with `get_fx_parameters` and send `normalized_value`

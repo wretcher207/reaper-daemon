@@ -150,8 +150,9 @@ route; these are the measured anchors:
 | 0.399 | 2.00:1 | 0.9 | 10.00:1 |
 | 0.5 | 2.75:1 | 1.0 | 100.00:1 |
 
-**Release (8)**, 10 ms to 2.5 sec. `formatted_value` does **not** work on this
-one (see Gotchas), so this table is the only way in:
+**Release (8)**, 10 ms to 2.5 sec. This is the parameter whose ms-to-sec display
+switch broke `formatted_value` until the 2026-08-18 fix (see Gotchas); the table
+is still the fastest way to pick a value, and the only way on an older bridge:
 
 | norm | Release | norm | Release |
 |---:|---|---:|---|
@@ -234,13 +235,13 @@ this is an enum, not a continuous control:
 
 ## Gotchas that cost time
 
-- **`formatted_value` fails on Release** with `FORMATTED_VALUE_UNSUPPORTED`,
-  because the display switches units from `944.9 ms` to `1.151 sec` partway up
-  and the bridge's binary search cannot compare across that. Attack, Threshold
-  and Ratio all work; Release does not. Use the table above.
-- **That failure left Release parked at 1.0 (2.5 sec).** The bridge probes
-  before it refuses, so a failed `formatted_value` can move the parameter and
-  then report `ok: false`. Always read back after a refusal.
+- **Release used to be unreachable by `formatted_value`.** Its display switches
+  units from `944.9 ms` to `1.151 sec` partway up, so the endpoints parsed as 10
+  and 2.5, the search concluded the parameter ran descending, and every real
+  target came back as `outside param range (10.0 .. 2.5)`. Fixed 2026-08-18: the
+  display parser scales time to milliseconds and frequency to Hz before
+  comparing, so `"400 ms"`, `"1.5 sec"` and `"2 sec"` all land exactly. On any
+  bridge older than that commit, use the table above.
 - **Lookahead is gated by Maximum Lookahead.** Writing index 10 while index 95
   is `Off` succeeds, reports success, and changes nothing.
 - **Dry Gain defaults to -INF.** Parallel compression needs index 17 raised;

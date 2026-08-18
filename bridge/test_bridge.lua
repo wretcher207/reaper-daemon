@@ -59,6 +59,50 @@ eq(pdn("inf"), 1e30, "inf endpoint")
 eq(pdn("-inf"), -1e30, "-inf endpoint")
 eq(pdn("Bell"), nil, "enum/string rejected")
 
+-- Pro-C 3's Release prints "944.9 ms" low and "1.151 sec" high. Parsing those
+-- as 944.9 and 1.151 made the search read the parameter as descending and
+-- refuse every real target as out of range. Time scales to ms, frequency to Hz.
+eq(pdn("944.9 ms"), 944.9, "ms stays ms")
+eq(pdn("1.151 sec"), 1151, "sec scales to ms")
+eq(pdn("2.500 sec"), 2500, "sec at the top of Pro-C Release")
+eq(pdn("1 s"), 1000, "bare s is seconds")
+eq(pdn("500 us"), 0.5, "microseconds scale down")
+eq(pdn("500 " .. string.char(194, 181) .. "s"), 0.5, "the real micro sign, not an ascii u")
+-- A unit only counts when it is attached to the number, or Pro-C's pan display
+-- ("Side") reads as seconds and a 0 dB pan becomes 0 ms of something.
+eq(pdn("Mid: 0 dB / Side: 0 dB"), 0, "a later word is not a unit")
+eq(pdn("100%, 50% S>M"), 100, "compound stereo-link display takes the first number")
+eq(pdn("1/4 Note"), 1, "no unit, no scaling")
+eq(pdn("3.50:1"), 3.5, "ratio")
+
+-- numeric_bracket: a parameter that goes non-numeric at one end is still
+-- searchable over the rest. Pro-Q 4's band Threshold reads "Auto" at 1.0.
+local nb = B.numeric_bracket
+local function proq_threshold(n) -- dB above 0.2, "Auto" at the very top
+  if n >= 0.999 then return nil end
+  return 60 * (n - 1)
+end
+local lo, hi, lo_num, hi_num = nb(proq_threshold)
+eq(lo, 0.0, "live bottom end is kept")
+ok(hi < 0.999 and hi > 0.995, "dead top end narrows to just under the boundary")
+eq(lo_num, -60, "bottom reads its real number")
+ok(hi_num < 0 and hi_num > -0.5, "narrowed top still reads a number")
+
+local function dead_bottom(n)
+  if n <= 0.05 then return nil end
+  return n * 100
+end
+local blo, bhi, blo_num, bhi_num = nb(dead_bottom)
+ok(blo > 0.05 and blo < 0.06, "dead bottom end narrows upward")
+eq(bhi, 1.0, "live top end is kept")
+ok(blo_num > 5 and blo_num < 6, "narrowed bottom reads a number")
+eq(bhi_num, 100, "top reads its real number")
+
+eq(nb(function() return nil end), nil, "a genuinely non-numeric param is still refused")
+eq(nb(function(n) return n end), 0.0, "both ends numeric: no probing, bracket is 0..1")
+local _, whole_hi = nb(function(n) return n end)
+eq(whole_hi, 1.0, "both ends numeric: top stays 1.0")
+
 -- P1-001: discovery responses use REAPER's real FX GUID and keep the display
 -- index separate from the encoded API index used for input FX.
 local fx_guid_calls = {}

@@ -98,8 +98,8 @@ Probed: 100 → 0.30293512, 5000 → 0.81761324.
 **Attack, Release, Spectral Density (offsets 13, 14, 21)**: plain percent,
 `norm = pct / 100`. 0 → 0.00%, 0.25 → 25.0%, 1.0 → 100%.
 
-**Threshold (offset 12)**, piecewise linear, and the one parameter here that
-`formatted_value` cannot set (see Gotchas):
+**Threshold (offset 12)**, piecewise linear, and the parameter that needed the
+2026-08-18 bracket fix before `formatted_value` could reach it (see Gotchas):
 
 ```
 norm >= 0.2:   norm = 1 + dB / 60       dB = 60 * (norm - 1)
@@ -179,19 +179,23 @@ Auto Gain Off, Analyzer Range 90 dB, Tilt 4.5 dB/oct, Display Range 12 dB.
 
 ## Gotchas that cost time
 
-- **`formatted_value` fails on Threshold** with `FORMATTED_VALUE_UNSUPPORTED:
-  parameter is not numeric`. The bridge's binary search samples the range, hits
-  the `Auto` display at the top, and rejects the whole parameter. Use
-  `normalized_value` with the formula above. The same trap will hit any
-  parameter whose display goes non-numeric at an endpoint.
-- **A failed `formatted_value` search leaves the parameter moved.** The refusal
-  is reported after the probe has already written, so the value can be parked
-  wherever the search last tried. Read the parameter back after any `ok:false`
-  from `set_fx_param` and restore it.
+- **Threshold used to be unreachable by `formatted_value`.** It reads `Auto` at
+  normalized 1.0, and the bridge's binary search sampled both ends, found a
+  non-numeric one, and refused the whole parameter with
+  `FORMATTED_VALUE_UNSUPPORTED: parameter is not numeric`. Fixed 2026-08-18:
+  the search now narrows to the widest bracket whose ends both print a number,
+  so `"-40 dB"` lands on 0.3325 and `"-6 dB"` on 0.899167. On any bridge older
+  than that commit, use `normalized_value` with the formula above.
 - Band and Spectral Tilt live in **different blocks**. `Band 3 Spectral Tilt` is
   index 578, not part of band 3's stride-23 block.
+- Bands are `Unused` on a fresh instance, so a frequency and gain write does
+  nothing audible until band offset 0 goes to `Used`.
 - 500 is the largest `limit` `get_fx_parameters` returns, so a full dump of this
   plugin takes two calls (`offset: 0` and `offset: 500`).
+- A `formatted_value` search writes the parameter about 26 times before it
+  settles, each write a real `SetParamNormalized`. It rolls back to the original
+  value on any failure, so a refusal costs a round trip and nothing else, but
+  never point it at a parameter that is being automated or previewed.
 
 ## How to re-probe
 

@@ -367,16 +367,72 @@ end
 -- parses as 1.2 while the target "1200 Hz" parses as 1200, so the range check
 -- rejects every high-frequency band whose plugin shows kHz (FabFilter, ReaEQ…).
 -- "inf"/"-inf" map to ±1e30 so unbounded endpoints don't read as nil.
+-- Displays that switch units partway up a range broke the formatted_value
+-- search: Pro-C 3's Release reads "944.9 ms" low and "1.151 sec" high, so the
+-- endpoints parsed as 10 and 2.5, the search decided the parameter ran
+-- DESCENDING, and every real target was refused as out of range. Scale each
+-- family to one base unit (Hz for frequency, ms for time) so the numbers are
+-- comparable no matter which unit the plugin chose to print.
+local UNIT_SCALE = {
+  hz = 1, khz = 1000,
+  ms = 1, msec = 1, msecs = 1,
+  s = 1000, sec = 1000, secs = 1000, second = 1000, seconds = 1000,
+  us = 0.001, usec = 0.001, ["\194\181s"] = 0.001,
+}
+
 local function parse_display_number(s)
   if type(s) ~= "string" then return nil end
   local low = s:lower()
   if low:find("inf", 1, true) then
     return low:find("-", 1, true) and -1e30 or 1e30
   end
-  local num = tonumber(low:match("[-+]?%d*%.?%d+"))
+  local first, last = low:find("[-+]?%d*%.?%d+")
+  if not first then return nil end
+  local num = tonumber(low:sub(first, last))
   if not num then return nil end
-  if low:find("khz", 1, true) then num = num * 1000 end
+  -- Only a unit ATTACHED to this number counts. Matching "s" anywhere in the
+  -- string would turn "Mid: 0 dB / Side: 0 dB" into seconds.
+  local unit = low:sub(last + 1):match("^%s*([%a\194\181]+)")
+  local scale = unit and UNIT_SCALE[unit]
+  if scale then num = num * scale end
   return num
+end
+
+-- A parameter whose display goes non-numeric at ONE end is still searchable
+-- over the rest of its range. Pro-Q 4's band Threshold reads "Auto" at
+-- normalized 1.0, which used to make the whole parameter unreachable by
+-- formatted_value even though 0.0 .. 0.998 is plain dB. Narrow the bracket to
+-- the widest span whose ends both print a number.
+--
+-- `probe` is norm -> number|nil. Pure apart from that call, so the selftest
+-- drives it with a table-backed fake instead of a live plugin. Returns
+-- lo, hi, lo_num, hi_num, or nil when nothing in the range is numeric.
+local function numeric_bracket(probe)
+  local lo, hi = 0.0, 1.0
+  local lo_num, hi_num = probe(lo), probe(hi)
+  if lo_num and hi_num then return lo, hi, lo_num, hi_num end
+
+  local anchor
+  for _, n in ipairs({ 0.5, 0.25, 0.75, 0.1, 0.9 }) do
+    if probe(n) then anchor = n; break end
+  end
+  if not anchor then return nil end
+
+  -- Bisect the boundary between the dead end and the anchor. 12 steps puts it
+  -- within 1/4096 of normalized, finer than any display resolves.
+  local function edge(dead)
+    local bad, good = dead, anchor
+    for _ = 1, 12 do
+      local mid = (bad + good) / 2
+      if probe(mid) then good = mid else bad = mid end
+    end
+    return good, probe(good)
+  end
+
+  if not lo_num then lo, lo_num = edge(0.0) end
+  if not hi_num then hi, hi_num = edge(1.0) end
+  if not lo_num or not hi_num then return nil end
+  return lo, hi, lo_num, hi_num
 end
 
 -- TimeMap2_timeToBeats / TimeMap2_beatsToTime are present in every REAPER
@@ -1581,10 +1637,8 @@ local function command_set_fx_param(command)
       return parse_display_number(s)
     end
     local search_ok, search_err = pcall(function()
-      local lo, hi = 0.0, 1.0
-      local lo_num = fmt_num(lo)
-      local hi_num = fmt_num(hi)
-      if lo_num == nil or hi_num == nil then
+      local lo, hi, lo_num, hi_num = numeric_bracket(fmt_num)
+      if lo == nil then
         error("FORMATTED_VALUE_UNSUPPORTED: parameter is not numeric (use normalized_value)")
       end
       local ascending = hi_num >= lo_num
@@ -4208,6 +4262,7 @@ end
 if _G.REAPER_BRIDGE_SELFTEST then
   return {
     parse_display_number = parse_display_number,
+    numeric_bracket = numeric_bracket,
     atomic_write_json = atomic_write_json,
     split_lines = split_lines,
     splice_fx_chain = splice_fx_chain,
