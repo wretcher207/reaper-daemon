@@ -720,5 +720,50 @@ eq(#r.plan, 2, "and both are planned")
 
 eq(#pp(base, {}).plan, 0, "an empty request plans nothing")
 
+-- Send modes go over the wire as names because REAPER's ints skip 2; anything
+-- unnamed must come back nil so create_send can refuse it rather than sending
+-- post-fader by accident.
+local smv = B.send_mode_value
+eq(smv("post_fader"), 0, "post_fader is REAPER's 0")
+eq(smv("pre_fx"), 1, "pre_fx is REAPER's 1")
+eq(smv("pre_fader"), 3, "pre_fader is REAPER's 3, not 2")
+eq(smv("prefader"), nil, "an unnamed mode is rejected, not guessed at")
+
+-- RENDER_FILE is the directory and RENDER_PATTERN the filename. render used to
+-- write the whole path into RENDER_FILE and never set the pattern, so it
+-- reported a path REAPER had not written. Both callers now split the same way.
+local srt = B.split_render_target
+local d1, p1 = srt("/tmp/renders/mix_take3.wav")
+eq(d1, "/tmp/renders", "a full path yields its directory")
+eq(p1, "mix_take3", "and its filename, stripped of .wav")
+local d2, p2 = srt("mix_take3.wav")
+eq(d2, "", "a bare filename has no directory")
+eq(p2, "mix_take3", "and still strips .wav")
+local d3, p3 = srt([[C:\media\working\smoke.wav]])
+eq(d3, [[C:\media\working]], "a Windows path splits on the backslash")
+eq(p3, "smoke", "and strips .wav there too")
+-- The extension comes from the sink format, so a pattern that kept .wav would
+-- render "name.wav.wav"; anything else is left alone.
+eq(select(2, srt("/tmp/stem.flac")), "stem.flac", "a non-wav extension is left intact")
+eq(select(2, srt("/tmp/no_extension")), "no_extension", "an extensionless name is unchanged")
+
+-- Parity with the split capture ran inline before the helper existed. Capture
+-- is the one path already proven against live renders, so the helper is only
+-- safe if it still agrees with it on every shape.
+local function old_capture_split(output_file)
+  local dir, name = output_file:match("^(.*)[/\\]([^/\\]+)$")
+  if not dir then dir, name = "", output_file end
+  return dir, (name:gsub("%.wav$", ""))
+end
+for _, sample in ipairs({
+  "/tmp/renders/mix_take3.wav", "mix_take3.wav", [[C:\media\working\smoke.wav]],
+  "/tmp/stem.flac", "/tmp/no_extension", "bare",
+}) do
+  local od, op = old_capture_split(sample)
+  local nd, np = srt(sample)
+  eq(nd, od, "helper matches capture's old directory for " .. sample)
+  eq(np, op, "helper matches capture's old pattern for " .. sample)
+end
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))

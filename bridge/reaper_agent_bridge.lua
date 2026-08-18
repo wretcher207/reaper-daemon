@@ -547,6 +547,10 @@ local function command_get_context(command)
     project_name = get_project_name(),
     tempo = reaper.Master_GetTempo(),
     has_tempo_changes = reaper.CountTempoTimeSigMarkers(0) > 0,
+    -- With the project override off, PROJECT_SRATE reads 0 and REAPER runs at
+    -- the audio device's rate; sample_rate_overridden says which number is real.
+    sample_rate = reaper.GetSetProjectInfo(0, "PROJECT_SRATE", 0, false),
+    sample_rate_overridden = reaper.GetSetProjectInfo(0, "PROJECT_SRATE_USE", 0, false) == 1,
     cursor = { seconds = cursor, bar = bar_from_time(cursor) },
     time_selection = get_time_selection(),
     transport = get_transport(),
@@ -1820,6 +1824,65 @@ local function command_set_track_pan(command)
   return { track = track_summary(track), pan = pan }
 end
 
+-- REAPER's send-mode ints are not contiguous (2 is unused), so the wire format
+-- is a name and this is the only place that knows the number.
+local function send_mode_value(mode)
+  if mode == "post_fader" then return 0 end
+  if mode == "pre_fx" then return 1 end
+  if mode == "pre_fader" then return 3 end
+  return nil
+end
+
+local function command_create_send(command)
+  local payload = command.payload or {}
+  local source = find_track(payload)
+  -- The destination carries the same selector keys as the source, one level
+  -- down, so both ends resolve through the same rules (guid, exact name,
+  -- substring, selection) instead of the destination getting a lesser one.
+  if type(payload.destination) ~= "table" then
+    error("BAD_PAYLOAD: Provide destination as an object with a track selector")
+  end
+  local target = find_track(payload.destination)
+  if target == source then
+    error("BAD_PAYLOAD: destination resolves to the source track")
+  end
+  local send_index = reaper.CreateTrackSend(source, target)
+  if not send_index or send_index < 0 then
+    error("CREATE_SEND_FAILED: REAPER did not create the send")
+  end
+  if payload.volume_db ~= nil then
+    local db = tonumber(payload.volume_db)
+    if not db then error("BAD_VALUE: volume_db must be a number") end
+    reaper.SetTrackSendInfo_Value(source, 0, send_index, "D_VOL", volume_from_db(db))
+  end
+  if payload.mode ~= nil then
+    local mode = send_mode_value(payload.mode)
+    if not mode then
+      error("BAD_PAYLOAD: mode must be post_fader, pre_fx, or pre_fader")
+    end
+    reaper.SetTrackSendInfo_Value(source, 0, send_index, "I_SENDMODE", mode)
+  end
+  reaper.UpdateArrange()
+  return {
+    source = track_summary(source),
+    destination = track_summary(target),
+    send_index = send_index,
+  }
+end
+
+-- A source feeding a bus usually stops feeding the master directly; this is
+-- that switch.
+local function command_set_master_send(command)
+  local payload = command.payload or {}
+  local track = find_track(payload)
+  if type(payload.enabled) ~= "boolean" then
+    error("BAD_PAYLOAD: Provide enabled as true or false")
+  end
+  reaper.SetMediaTrackInfo_Value(track, "B_MAINSEND", payload.enabled and 1 or 0)
+  reaper.UpdateArrange()
+  return { track = track_summary(track), master_send = payload.enabled }
+end
+
 -- Phase 2 (Post Mortem Verified Fix Preview), P2-001: track state snapshot and
 -- restore. The snapshot is written to disk BEFORE any mutation happens (same
 -- crash-safety pattern as the render-settings state file), and covers exactly
@@ -2966,18 +3029,38 @@ local function command_get_capture_preflight(command)
   }
 end
 
+-- Split one output_file into the pair REAPER actually wants: RENDER_FILE is the
+-- directory, RENDER_PATTERN the filename, and the extension comes from the sink
+-- format (so a trailing .wav in the pattern would render "name.wav.wav").
+-- Capture had this inline; render needs the identical split, so it lives here.
+local function split_render_target(output_file)
+  local path = tostring(output_file)
+  local dir, name = path:match("^(.*)[/\\]([^/\\]+)$")
+  if not dir then dir, name = "", path end
+  return dir, (name:gsub("%.wav$", ""))
+end
+
 local function command_render(command)
   if not config.allow_risk_level_3 then
     error("RENDER_BLOCKED: render is gated; set allow_risk_level_3 true in bridge_config.json")
   end
   local payload = command.payload or {}
   if payload.output_file and payload.output_file ~= "" then
-    reaper.GetSetProjectInfo_String(0, "RENDER_FILE", tostring(payload.output_file), true)
+    -- Writing the whole path into RENDER_FILE alone left RENDER_PATTERN at
+    -- whatever the user last rendered with, so REAPER wrote somewhere the
+    -- reply never named.
+    local dir, pattern = split_render_target(payload.output_file)
+    reaper.GetSetProjectInfo_String(0, "RENDER_FILE", dir, true)
+    reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", pattern, true)
   end
   local bounds = { entire = 1, project = 1, time_selection = 2, regions = 3, selected_items = 4 }
   if payload.bounds and bounds[payload.bounds] then
     reaper.GetSetProjectInfo(0, "RENDER_BOUNDSFLAG", bounds[payload.bounds], true)
   end
+  -- Everything is configured now, so REAPER can say what it will write; trust
+  -- that over the request, exactly as capture does.
+  local _, targets = reaper.GetSetProjectInfo_String(0, "RENDER_TARGETS", "", false)
+  local target = targets and targets:match("^[^;]+") or nil
   -- Render is synchronous — it blocks the defer loop for the whole duration,
   -- so no heartbeats tick during it. Write one first with `busy` set so an
   -- agent can distinguish "rendering" from "bridge died".
@@ -3002,10 +3085,21 @@ local function command_render(command)
   if not render_ok then error(render_error) end
   return {
     rendered = true,
+    target = target,
     output_file = select(2, reaper.GetSetProjectInfo_String(0, "RENDER_FILE", "", false)),
     note = "Render used REAPER's last-saved render settings.",
     render_autoclose_warning = autoclose.guaranteed and nil or autoclose.reason,
   }
+end
+
+-- Saving overwrites the user's .rpp on disk, which no undo block can take back,
+-- so it rides the same gate as render and capture rather than one of its own.
+local function command_save_project()
+  if not config.allow_risk_level_3 then
+    error("SAVE_BLOCKED: save_project is gated; set allow_risk_level_3 true in bridge_config.json")
+  end
+  reaper.Main_SaveProject(0, false)
+  return { saved = true, project_name = get_project_name() }
 end
 
 -- Post Mortem capture: render ONE track's post-FX output to a temp WAV using
@@ -3046,11 +3140,7 @@ local function command_capture_track_audio(command)
   end
   local end_time = start_time + duration
 
-  -- Split output into directory + name: RENDER_FILE is the directory,
-  -- RENDER_PATTERN the filename (extension comes from the sink format).
-  local dir, name = output_file:match("^(.*)[/\\]([^/\\]+)$")
-  if not dir then dir, name = "", output_file end
-  local pattern = name:gsub("%.wav$", "")
+  local dir, pattern = split_render_target(output_file)
 
   -- Capture everything we are about to mutate.
   local saved = {
@@ -3303,6 +3393,9 @@ local function command_get_track_routing(command)
     parent_track = parent_info,
     volume_db = db_from_volume(reaper.GetMediaTrackInfo_Value(track, "D_VOL")),
     pan = reaper.GetMediaTrackInfo_Value(track, "D_PAN"),
+    -- What set_master_send writes, so a caller can read back the switch it
+    -- threw without reopening the routing window.
+    master_send = reaper.GetMediaTrackInfo_Value(track, "B_MAINSEND") == 1,
     phase_inverted = reaper.GetMediaTrackInfo_Value(track, "B_PHASE") == 1,
     automation_mode = AUTOMATION_MODE_NAMES[automode] or tostring(automode),
   }
@@ -3566,6 +3659,7 @@ handlers.set_cursor = command_set_cursor
 handlers.set_time_selection = command_set_time_selection
 handlers.set_tempo = command_set_tempo
 handlers.render = command_render
+handlers.save_project = command_save_project
 handlers.capture_track_audio = command_capture_track_audio
 handlers.get_track_routing = command_get_track_routing
 
@@ -3586,6 +3680,12 @@ handlers.set_track_pan = command_set_track_pan
 handlers.mute_track = command_mute_track
 handlers.solo_track = command_solo_track
 handlers.arm_track = command_arm_track
+-- Routing writes stop at sends. Folder routing would need tracks reordered and
+-- folder depths rewritten, which the API makes fragile enough to lose a user's
+-- arrangement; a send is a safe, reversible edit, and get_track_routing already
+-- reads back exactly what these two write.
+handlers.create_send = command_create_send
+handlers.set_master_send = command_set_master_send
 
 -- Track state snapshot/restore (Post Mortem Verified Fix Preview, P2-001)
 handlers.snapshot_track_state = command_snapshot_track_state
@@ -3863,6 +3963,8 @@ if _G.REAPER_BRIDGE_SELFTEST then
     velocity_plan = velocity_plan,
     position_plan = position_plan,
     velocity_summary = velocity_summary,
+    send_mode_value = send_mode_value,
+    split_render_target = split_render_target,
   }
 end
 
