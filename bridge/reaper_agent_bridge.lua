@@ -74,6 +74,13 @@ local json = require("json")
 
 local CONFIG_PATH = join(SCRIPT_DIR, "bridge_config.json")
 
+-- The file reload_bridge compiles and re-runs. NEVER SCRIPT_PATH: under the
+-- startup watchdog's dofile, get_action_context reports the LAUNCHER
+-- (__startup.lua), and reloading that would re-run the whole managed block —
+-- caught live by a dry_run naming the wrong file. SCRIPT_DIR is safe either
+-- way because the launcher pins it via REAPER_AGENT_BRIDGE_DIR.
+local BRIDGE_FILE = join(SCRIPT_DIR, "reaper_agent_bridge.lua")
+
 local function read_file(path)
   local file = io.open(path, "rb")
   if not file then return nil end
@@ -3624,15 +3631,15 @@ local function command_reload_bridge(command)
   -- means run_command's dry_run short-circuit does not cover it — without this
   -- branch a dry_run would really reload.
   if command.dry_run then
-    return { dry_run = true, would_run = "reload_bridge", script_path = SCRIPT_PATH }
+    return { dry_run = true, would_run = "reload_bridge", script_path = BRIDGE_FILE }
   end
-  local chunk, err = loadfile(SCRIPT_PATH)
+  local chunk, err = loadfile(BRIDGE_FILE)
   local verdict = reload_verdict(chunk ~= nil, err, active_preview ~= nil)
   if verdict then error(verdict) end
   reload_requested = true
   return {
     reload = "scheduled",
-    script_path = SCRIPT_PATH,
+    script_path = BRIDGE_FILE,
     loaded_at = LOADED_AT,
     note = "reload runs after this reply; confirm via heartbeat loaded_at changing",
   }
@@ -3981,12 +3988,12 @@ local DRAIN_BUDGET = 0.03
 -- the bridge. (Should a partially-started fresh instance have written its own
 -- lock before dying, the re-claim overwrites it; nothing else is deferring.)
 local function perform_reload()
-  local chunk, err = loadfile(SCRIPT_PATH)
+  local chunk, err = loadfile(BRIDGE_FILE)
   if not chunk then
     log_line("reload aborted, compile failed: " .. tostring(err))
     return false
   end
-  log_line("bridge reloading; handing over to a fresh instance of " .. SCRIPT_PATH)
+  log_line("bridge reloading; handing over to a fresh instance of " .. BRIDGE_FILE)
   os.remove(lockfile)
   -- Loading via a chunk means get_action_context reports the ORIGINAL
   -- launcher, so point the fresh instance at its own dir the same way the
