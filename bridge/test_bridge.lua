@@ -729,6 +729,20 @@ eq(smv("pre_fx"), 1, "pre_fx is REAPER's 1")
 eq(smv("pre_fader"), 3, "pre_fader is REAPER's 3, not 2")
 eq(smv("prefader"), nil, "an unnamed mode is rejected, not guessed at")
 
+-- get_track_routing reads the same modes back by name. Two tables holding one
+-- fact drift, so assert they are exact inverses rather than trusting the eye.
+local smn = B.send_mode_names
+for _, name in ipairs({ "post_fader", "pre_fx", "pre_fader" }) do
+  eq(smn[smv(name)], name, name .. " survives the write/read round trip")
+end
+local named = 0
+for value, name in pairs(smn) do
+  eq(smv(name), value, "the read table's " .. name .. " matches the write path")
+  named = named + 1
+end
+eq(named, 3, "exactly three modes are named on both sides")
+eq(smn[2], nil, "REAPER's unused 2 is named on neither side")
+
 -- RENDER_FILE is the directory and RENDER_PATTERN the filename. render used to
 -- write the whole path into RENDER_FILE and never set the pattern, so it
 -- reported a path REAPER had not written. Both callers now split the same way.

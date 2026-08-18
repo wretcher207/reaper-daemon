@@ -255,7 +255,9 @@ Read-only.
 { "target_track_name": "Rhythm L" }
 ```
 Returns `sends` and `receives` (per entry: target/source track name,
-`volume_db`, `pan`, `mute`, `mono`, `phase_inverted`, channel mapping),
+`volume_db`, `pan`, `mode` — the same names `create_send` takes, or the raw
+integer if REAPER ever reports one that is not named — `mute`, `mono`,
+`phase_inverted`, channel mapping),
 `parent_track` (name/index/guid or null), track `volume_db`, `pan`,
 `master_send`, `phase_inverted`, and `automation_mode`. All volumes are
 converted to dB in the bridge (`D_VOL` is linear); hardware outputs are

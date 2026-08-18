@@ -1827,13 +1827,18 @@ local function command_set_track_pan(command)
 end
 
 -- REAPER's send-mode ints are not contiguous (2 is unused), so the wire format
--- is a name and this is the only place that knows the number.
+-- is a name and these two are the only places that know the numbers. The write
+-- path stays an explicit allowlist rather than a reverse lookup, so an unknown
+-- name is refused instead of resolving to whatever a table happens to hold; a
+-- selftest asserts the two never drift apart.
 local function send_mode_value(mode)
   if mode == "post_fader" then return 0 end
   if mode == "pre_fx" then return 1 end
   if mode == "pre_fader" then return 3 end
   return nil
 end
+
+local SEND_MODE_NAMES = { [0] = "post_fader", [1] = "pre_fx", [3] = "pre_fader" }
 
 local function command_create_send(command)
   local payload = command.payload or {}
@@ -3376,6 +3381,10 @@ local function command_get_track_routing(command)
         [category < 0 and "source_track_name" or "target_track_name"] = other_name,
         volume_db = db_from_volume(v("D_VOL")),
         pan = v("D_PAN"),
+        -- create_send writes this and nothing could read it back, so a send's
+        -- mode was the one field the bridge could set but never verify.
+        mode = SEND_MODE_NAMES[math.floor(v("I_SENDMODE"))]
+          or tostring(math.floor(v("I_SENDMODE"))),
         mute = v("B_MUTE") == 1,
         mono = v("B_MONO") == 1,
         phase_inverted = v("B_PHASE") == 1,
@@ -3977,6 +3986,7 @@ if _G.REAPER_BRIDGE_SELFTEST then
     position_plan = position_plan,
     velocity_summary = velocity_summary,
     send_mode_value = send_mode_value,
+    send_mode_names = SEND_MODE_NAMES,
     split_render_target = split_render_target,
   }
 end
