@@ -215,6 +215,40 @@ bridge refuses before opening the render window with
 `RENDER_PREFERENCES_UNSAFE` or `RENDER_PREFERENCES_RESTORE_FAILED`. Install
 SWS, or enable both preferences manually, then rerun capture preflight.
 
+### get_render_settings
+Read-only. No payload.
+```json
+{}
+```
+Returns the project's live render configuration: `settings` (source: 0 master
+mix, 2 stems of selected tracks — the same values `RENDER_SETTINGS` takes),
+`bounds_flag`, `start_pos`, `end_pos`, `sample_rate`, `channels`, `file`,
+`pattern`, and `targets` (the files REAPER says it would write). Exists because
+`render` and `capture_track_audio` write these values and nothing could read
+them back — the render-path clobber and the 2026-08-18 silent-render diagnosis
+both stalled on exactly this gap.
+
+### set_render_settings
+```json
+{ "settings": 0, "file": "C:/renders", "pattern": "mix", "bounds_flag": 2 }
+```
+Writes any subset of the keys `get_render_settings` reads (`targets` is
+read-only). Every written key is read straight back from REAPER into the
+reply's `applied` — check it, don't trust the request. Use it to restore a
+project's render path after `render` clobbers it. Render settings live outside
+the undo history: no undo point, and Ctrl+Z will not revert this.
+
+### get_items
+Read-only. Track selectors as usual.
+```json
+{ "target_track_name": "Kick - stem" }
+```
+Item inventory for one track: per item `position`, `length`, `muted`,
+`volume`, `selected`, active take `take_name`, `source_type`, `source_file`,
+`source_length`, and `source_readable` — an `io.open` check made from INSIDE
+REAPER's process, which tests the file access REAPER actually has (an outside
+shell's check can pass while REAPER's fails, or vice versa).
+
 ### save_project
 Gated — requires `allow_risk_level_3: true` in `bridge_config.json`, or the
 reply is `SAVE_BLOCKED`. No payload.

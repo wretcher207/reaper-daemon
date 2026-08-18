@@ -3676,6 +3676,12 @@ local NO_UNDO_BLOCK = {
   -- undo point could hold. Its handler carries its own dry_run branch because
   -- membership here bypasses run_command's dry_run short-circuit.
   reload_bridge = true,
+  get_items = true,
+  get_render_settings = true,
+  -- set_render_settings mutates state that lives OUTSIDE the undo history, so
+  -- a block would only add an empty undo point. Own dry_run branch, like
+  -- reload_bridge.
+  set_render_settings = true,
 }
 
 local function is_mutating(command_type)
@@ -3829,6 +3835,118 @@ handlers.insert_midi_file = command_insert_midi_file
 handlers.get_midi_notes = command_get_midi_notes
 handlers.set_note_velocities = command_set_note_velocities
 handlers.set_note_positions  = command_set_note_positions
+
+-- Diagnostic read/write surface added 2026-08-18. Defined in a do-block
+-- assigning straight onto `handlers`: the main chunk is at Lua's 200-local
+-- limit, so new top-level `local function`s no longer fit.
+do
+-- Read-only item inventory for one track. Built during the 2026-08-18
+-- silent-render diagnosis: the bridge could count items but not see them, so
+-- "are these items offline / do their sources resolve" was unanswerable.
+-- source_readable is io.open FROM INSIDE REAPER'S PROCESS — it tests the
+-- file access REAPER actually has, which an outside shell cannot.
+handlers.get_items = function(command)
+  local track, track_index = find_track(command.payload or {})
+  local items = {}
+  for i = 0, reaper.CountTrackMediaItems(track) - 1 do
+    local item = reaper.GetTrackMediaItem(track, i)
+    local take = reaper.GetActiveTake(item)
+    local entry = {
+      index = i,
+      position = reaper.GetMediaItemInfo_Value(item, "D_POSITION"),
+      length = reaper.GetMediaItemInfo_Value(item, "D_LENGTH"),
+      muted = reaper.GetMediaItemInfo_Value(item, "B_MUTE") == 1,
+      volume = reaper.GetMediaItemInfo_Value(item, "D_VOL"),
+      selected = reaper.IsMediaItemSelected(item),
+    }
+    if take then
+      local _, take_name = reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", "", false)
+      entry.take_name = take_name
+      local src = reaper.GetMediaItemTake_Source(take)
+      if src then
+        entry.source_type = reaper.GetMediaSourceType(src, "")
+        local filename = reaper.GetMediaSourceFileName(src, "")
+        if filename and filename ~= "" then
+          entry.source_file = filename
+          local f = io.open(filename, "rb")
+          entry.source_readable = f ~= nil
+          if f then f:close() end
+        end
+        local length, is_qn = reaper.GetMediaSourceLength(src)
+        entry.source_length = length
+        entry.source_length_is_qn = is_qn and true or false
+      end
+    else
+      entry.take_name = nil
+    end
+    items[#items + 1] = entry
+  end
+  local _, track_name = reaper.GetTrackName(track, "")
+  return { track = { index = track_index, name = track_name }, item_count = #items, items = items }
+end
+
+-- Read-only view of the project's render configuration. Exists because render
+-- and capture WRITE these values and nothing could read them back — the
+-- render-path clobber (2026-08-17) and the silent-render diagnosis (2026-08-18)
+-- both stalled on exactly this missing surface.
+local RENDER_NUM_KEYS = {
+  settings = "RENDER_SETTINGS", bounds_flag = "RENDER_BOUNDSFLAG",
+  start_pos = "RENDER_STARTPOS", end_pos = "RENDER_ENDPOS",
+  sample_rate = "RENDER_SRATE", channels = "RENDER_CHANNELS",
+}
+local RENDER_STR_KEYS = { file = "RENDER_FILE", pattern = "RENDER_PATTERN" }
+
+handlers.get_render_settings = function(command)
+  local out = {}
+  for name, key in pairs(RENDER_NUM_KEYS) do
+    out[name] = reaper.GetSetProjectInfo(0, key, 0, false)
+  end
+  for name, key in pairs(RENDER_STR_KEYS) do
+    local _, v = reaper.GetSetProjectInfo_String(0, key, "", false)
+    out[name] = v
+  end
+  local _, targets = reaper.GetSetProjectInfo_String(0, "RENDER_TARGETS", "", false)
+  out.targets = targets
+  return out
+end
+
+-- Writes render configuration and reads every written key straight back into
+-- the reply — same honesty rule as the render fix: a reply nobody can check
+-- against REAPER's own state is how the last render bug hid. Render settings
+-- live OUTSIDE the undo history, so no undo block (NO_UNDO_BLOCK), which means
+-- the dry_run branch here is load-bearing, like reload_bridge's.
+handlers.set_render_settings = function(command)
+  local payload = command.payload or {}
+  if command.dry_run or payload.dry_run then
+    return { dry_run = true, would_run = "set_render_settings" }
+  end
+  local applied, any = {}, false
+  for name, key in pairs(RENDER_NUM_KEYS) do
+    local v = payload[name]
+    if v ~= nil then
+      if type(v) ~= "number" then error("BAD_PAYLOAD: " .. name .. " must be a number") end
+      reaper.GetSetProjectInfo(0, key, v, true)
+      applied[name] = reaper.GetSetProjectInfo(0, key, 0, false)
+      any = true
+    end
+  end
+  for name, key in pairs(RENDER_STR_KEYS) do
+    local v = payload[name]
+    if v ~= nil then
+      if type(v) ~= "string" then error("BAD_PAYLOAD: " .. name .. " must be a string") end
+      reaper.GetSetProjectInfo_String(0, key, v, true)
+      local _, rb = reaper.GetSetProjectInfo_String(0, key, "", false)
+      applied[name] = rb
+      any = true
+    end
+  end
+  if not any then
+    error("BAD_PAYLOAD: nothing to set; accepted keys: settings, bounds_flag, "
+      .. "start_pos, end_pos, sample_rate, channels, file, pattern")
+  end
+  return { applied = applied }
+end
+end
 
 -- Bridge lifecycle
 handlers.reload_bridge = command_reload_bridge
