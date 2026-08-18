@@ -504,6 +504,53 @@ reporting an unchecked success. Results carry `applied`, `confirmed`, and
 
 ---
 
+### set_note_positions
+
+Move specific existing notes in time. One undo block. This is the write path a
+timing / humanize pass needs; `set_note_velocities` deliberately passes every
+position argument as nil and cannot move anything.
+
+```json
+{ "target_track_name": "Kontakt 8",
+  "notes": [[0, 24, 6, 126], [480, 24, 472, 592]],
+  "allow_partial": false }
+```
+
+Each row is `[start_ppq, pitch, new_ppq, new_end_ppq]`, or the object form
+`{"ppq": 0, "pitch": 24, "new_ppq": 6, "new_end_ppq": 126}`. The first two
+fields address the note as it is now; the last two say where it goes.
+`new_ppq` must be >= 0 and `new_end_ppq` must be greater than it.
+
+Notes are addressed by position and pitch, for the same reason as
+`set_note_velocities`: an index shifts as soon as anything is inserted or
+deleted, so an index-addressed edit built from an older read can land on the
+wrong note and still report success.
+
+**Destination collisions are refused.** This is the hazard a velocity write does
+not have: moving notes rewrites the very key notes are addressed by, so two hits
+nudged onto the same tick and pitch would leave a take that no later read can
+address unambiguously. Both cases are caught — two moved notes converging, and a
+moved note landing on a note the request left in place — and reported in
+`collisions`. Two different pitches on one tick is a chord, not a collision, and
+is allowed. Two notes trading places is allowed, because neither destination is
+occupied once both moves are taken together.
+
+The default is all-or-nothing across `missing` / `ambiguous` / `invalid` /
+`collisions`, on the same reasoning as the velocity pass: half a timing pass
+applied is a part that drifts in and out of feel, which is harder to diagnose by
+ear than no change at all. `allow_partial: true` applies what resolved.
+
+Writes use `noSort` and sort once at the end, because `MIDI_Sort` renumbers
+notes and sorting inside the loop would invalidate the indices the plan holds.
+
+After writing, the handler re-reads the take and confirms every applied note at
+its NEW `(ppq, pitch)`, checking the end position too; a mismatch fails
+`POSITION_WRITE_UNCONFIRMED`. Results carry `applied`, `confirmed`,
+`collisions`, and `max_move_ticks` / `mean_move_ticks` so a caller can sanity
+check the size of the move against the tempo without re-reading the take.
+
+---
+
 ## Composition
 
 ### batch

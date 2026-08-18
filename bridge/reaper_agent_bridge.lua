@@ -1211,6 +1211,193 @@ local function command_set_note_velocities(command)
   }
 end
 
+-- Pure: resolve requested (ppq, pitch -> new_ppq, new_end_ppq) rows against the
+-- notes a take actually has. Mirrors velocity_plan's bucketing so a caller can
+-- refuse the whole edit on any bucket but `plan` being non-empty.
+--
+-- Moving notes carries a hazard velocity writes do not: the edit changes the
+-- very key notes are addressed by. Two hits nudged onto the same tick and pitch
+-- would leave a take that no later read can address unambiguously, so
+-- destination collisions are refused here rather than discovered next session.
+local function position_plan(existing, requested)
+  local by_key, duplicated = {}, {}
+  for _, note in ipairs(existing) do
+    local key = note.ppq .. ":" .. note.pitch
+    if by_key[key] then duplicated[key] = true else by_key[key] = note end
+  end
+  local plan, missing, ambiguous, invalid, collisions = {}, {}, {}, {}, {}
+  local claimed = {}
+  for row, req in ipairs(requested) do
+    local key = tostring(req.ppq) .. ":" .. tostring(req.pitch)
+    local new_ppq = tonumber(req.new_ppq)
+    local new_end = tonumber(req.new_end_ppq)
+    new_ppq = new_ppq and math.floor(new_ppq + 0.5) or nil
+    new_end = new_end and math.floor(new_end + 0.5) or nil
+    local where = { row = row, ppq = req.ppq, pitch = req.pitch }
+    if not new_ppq or not new_end or new_ppq < 0 or new_end <= new_ppq then
+      where.new_ppq = req.new_ppq
+      where.new_end_ppq = req.new_end_ppq
+      where.reason = "new_ppq must be >= 0 and new_end_ppq must be greater than it"
+      invalid[#invalid + 1] = where
+    elseif duplicated[key] then
+      where.reason = "two notes share this tick and pitch"
+      ambiguous[#ambiguous + 1] = where
+    elseif claimed[key] then
+      where.reason = "this note was already addressed by row " .. claimed[key]
+      ambiguous[#ambiguous + 1] = where
+    elseif not by_key[key] then
+      missing[#missing + 1] = where
+    else
+      claimed[key] = row
+      local note = by_key[key]
+      plan[#plan + 1] = {
+        index = note.index,
+        ppq = note.ppq,
+        pitch = note.pitch,
+        end_ppq = note.end_ppq,
+        to_ppq = new_ppq,
+        to_end_ppq = new_end,
+      }
+    end
+  end
+
+  -- Where does every note in the take end up? Moved notes land on their
+  -- requested tick; notes no row addressed stay exactly where they are.
+  local landing = {}
+  for _, hit in ipairs(plan) do
+    local dest = hit.to_ppq .. ":" .. hit.pitch
+    if landing[dest] then
+      collisions[#collisions + 1] = {
+        ppq = hit.ppq, pitch = hit.pitch, new_ppq = hit.to_ppq,
+        reason = "another moved note lands on this tick and pitch",
+      }
+    else
+      landing[dest] = true
+    end
+  end
+  for _, note in ipairs(existing) do
+    local src = note.ppq .. ":" .. note.pitch
+    if not claimed[src] then
+      if landing[src] then
+        collisions[#collisions + 1] = {
+          ppq = note.ppq, pitch = note.pitch, new_ppq = note.ppq,
+          reason = "a moved note lands on this note, which the request left in place",
+        }
+      else
+        landing[src] = true
+      end
+    end
+  end
+
+  return { plan = plan, missing = missing, ambiguous = ambiguous,
+           invalid = invalid, collisions = collisions }
+end
+
+local function command_set_note_positions(command)
+  local payload = command.payload or {}
+  local rows = payload.notes
+  if type(rows) ~= "table" or #rows == 0 then
+    error("BAD_PAYLOAD: notes must be a non-empty array of " ..
+          "[ppq, pitch, new_ppq, new_end_ppq]")
+  end
+
+  local requested = {}
+  for i, row in ipairs(rows) do
+    if type(row) ~= "table" then
+      error("BAD_PAYLOAD: notes[" .. i .. "] is neither an array nor an object")
+    end
+    if row.ppq ~= nil or row.pitch ~= nil then
+      requested[i] = { ppq = math.floor(tonumber(row.ppq) or -1),
+                       pitch = math.floor(tonumber(row.pitch) or -1),
+                       new_ppq = row.new_ppq,
+                       new_end_ppq = row.new_end_ppq }
+    else
+      requested[i] = { ppq = math.floor(tonumber(row[1]) or -1),
+                       pitch = math.floor(tonumber(row[2]) or -1),
+                       new_ppq = row[3],
+                       new_end_ppq = row[4] }
+    end
+  end
+
+  local take, track, track_index = midi_take_for(payload)
+  local before = read_midi_notes(take)
+  local resolved = position_plan(before, requested)
+  local unresolved = #resolved.missing + #resolved.ambiguous +
+                     #resolved.invalid + #resolved.collisions
+
+  -- Same all-or-nothing stance as set_note_velocities. A timing pass is one
+  -- musical gesture; half of it applied is a part that drifts in and out of
+  -- feel, which is harder to diagnose by ear than no change at all.
+  if unresolved > 0 and payload.allow_partial ~= true then
+    error("NOTE_MATCH_FAILED: " .. unresolved .. " of " .. #requested ..
+      " requested notes did not resolve (" .. #resolved.missing .. " missing, " ..
+      #resolved.ambiguous .. " ambiguous, " .. #resolved.invalid ..
+      " invalid, " .. #resolved.collisions .. " colliding at their destination" ..
+      "); nothing was changed. The take holds " .. #before ..
+      " notes. Re-read it with get_midi_notes and rebuild the request: the " ..
+      "MIDI moved after the read this request was built from.")
+  end
+  if #resolved.plan == 0 then
+    error("NOTE_MATCH_FAILED: no requested note resolved; nothing was changed")
+  end
+
+  -- noSort on every write, one sort at the end: MIDI_Sort renumbers notes, so
+  -- sorting inside the loop would invalidate the indices the plan holds.
+  for _, hit in ipairs(resolved.plan) do
+    reaper.MIDI_SetNote(take, hit.index, nil, nil, hit.to_ppq, hit.to_end_ppq,
+                        nil, nil, nil, true)
+  end
+  reaper.MIDI_Sort(take)
+  reaper.UpdateArrange()
+
+  -- Read the take back and confirm each note at its NEW key. MIDI_SetNote
+  -- returning true is a claim about the call, not about the note.
+  local after = read_midi_notes(take)
+  local by_key = {}
+  for _, note in ipairs(after) do by_key[note.ppq .. ":" .. note.pitch] = note end
+  local confirmed, wrong = 0, {}
+  for _, hit in ipairs(resolved.plan) do
+    local note = by_key[hit.to_ppq .. ":" .. hit.pitch]
+    if note and note.ppq == hit.to_ppq and note.end_ppq == hit.to_end_ppq then
+      confirmed = confirmed + 1
+    else
+      wrong[#wrong + 1] = { from_ppq = hit.ppq, pitch = hit.pitch,
+                            wanted_ppq = hit.to_ppq,
+                            got_ppq = note and note.ppq or nil,
+                            wanted_end_ppq = hit.to_end_ppq,
+                            got_end_ppq = note and note.end_ppq or nil }
+    end
+  end
+  if #wrong > 0 then
+    error("POSITION_WRITE_UNCONFIRMED: " .. #wrong .. " of " .. #resolved.plan ..
+      " notes did not read back at the requested position. The edit is inside " ..
+      "one undo block; one REAPER undo reverts it.")
+  end
+
+  local _, track_name = reaper.GetTrackName(track, "")
+  local moved_max, moved_total = 0, 0
+  for _, hit in ipairs(resolved.plan) do
+    local d = math.abs(hit.to_ppq - hit.ppq)
+    if d > moved_max then moved_max = d end
+    moved_total = moved_total + d
+  end
+  return {
+    track = { index = track_index, name = track_name },
+    requested = #requested,
+    applied = #resolved.plan,
+    confirmed = confirmed,
+    unresolved = unresolved,
+    missing = resolved.missing,
+    ambiguous = resolved.ambiguous,
+    invalid = resolved.invalid,
+    collisions = resolved.collisions,
+    max_move_ticks = moved_max,
+    mean_move_ticks = moved_total / #resolved.plan,
+    verified_note = "Every applied note was re-read from the take and matched " ..
+      "the requested position.",
+  }
+end
+
 local function command_play()
   reaper.Main_OnCommand(1007, 0) -- 1007 = Transport: Play/stop
   return { transport = get_transport() }
@@ -3428,6 +3615,7 @@ handlers.delete_items_in_range = command_delete_items_in_range
 handlers.insert_midi_file = command_insert_midi_file
 handlers.get_midi_notes = command_get_midi_notes
 handlers.set_note_velocities = command_set_note_velocities
+handlers.set_note_positions  = command_set_note_positions
 
 -- Composition
 handlers.batch = command_batch
@@ -3673,6 +3861,7 @@ if _G.REAPER_BRIDGE_SELFTEST then
     expected_capture_scope = expected_capture_scope,
     preflight_verdict = preflight_verdict,
     velocity_plan = velocity_plan,
+    position_plan = position_plan,
     velocity_summary = velocity_summary,
   }
 end

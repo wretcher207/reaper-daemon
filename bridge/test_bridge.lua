@@ -631,5 +631,94 @@ eq(summary[2].count, 1, "a single hit summarises as itself")
 eq(summary[2].min, summary[2].max, "and its min equals its max")
 eq(#vs({}), 0, "an empty take summarises to nothing")
 
+-- position_plan: the timing engine's write path. Moving notes rewrites the very
+-- key notes are addressed by, so this bucketing carries a hazard velocity
+-- writes do not, and the destination-collision cases below are the point.
+local pp = B.position_plan
+local function take(...)
+  local out = {}
+  for i, n in ipairs({ ... }) do
+    out[i] = { index = i - 1, ppq = n[1], pitch = n[2], end_ppq = n[3] or (n[1] + 120),
+               velocity = n[4] or 100 }
+  end
+  return out
+end
+
+local base = take({ 0, 24 }, { 480, 24 }, { 960, 38 })
+
+local r = pp(base, {
+  { ppq = 0,   pitch = 24, new_ppq = 5,   new_end_ppq = 125 },
+  { ppq = 480, pitch = 24, new_ppq = 474, new_end_ppq = 594 },
+})
+eq(#r.plan, 2, "both addressable notes resolve")
+eq(#r.missing + #r.ambiguous + #r.invalid + #r.collisions, 0, "and nothing else fires")
+eq(r.plan[1].index, 0, "the plan carries the take index, not the row number")
+eq(r.plan[1].to_ppq, 5, "the requested start is kept")
+eq(r.plan[1].to_end_ppq, 125, "and so is the requested end")
+eq(r.plan[2].ppq, 480, "the source key is kept so the caller can report the move")
+
+-- A note the take does not hold is missing, not silently skipped: the caller
+-- refuses the whole pass on it, because a partial timing pass drifts in and
+-- out of feel.
+r = pp(base, { { ppq = 7, pitch = 24, new_ppq = 8, new_end_ppq = 128 } })
+eq(#r.missing, 1, "an unmatched source lands in missing")
+eq(#r.plan, 0, "and contributes nothing to the plan")
+
+-- Two notes stacked on one tick and pitch cannot be told apart, so neither is
+-- guessed at. Same stance as velocity_plan.
+local stacked = take({ 0, 24 }, { 0, 24 })
+r = pp(stacked, { { ppq = 0, pitch = 24, new_ppq = 10, new_end_ppq = 130 } })
+eq(#r.ambiguous, 1, "a doubled source tick+pitch is ambiguous")
+eq(#r.plan, 0, "and is never moved on a guess")
+
+-- Addressing the same note twice is the caller contradicting itself.
+r = pp(base, {
+  { ppq = 0, pitch = 24, new_ppq = 5,  new_end_ppq = 125 },
+  { ppq = 0, pitch = 24, new_ppq = 9,  new_end_ppq = 129 },
+})
+eq(#r.ambiguous, 1, "the second row addressing one note is ambiguous")
+eq(#r.plan, 1, "the first row still planned")
+
+-- Geometry the take cannot hold.
+r = pp(base, { { ppq = 0, pitch = 24, new_ppq = -1, new_end_ppq = 100 } })
+eq(#r.invalid, 1, "a negative destination is invalid")
+r = pp(base, { { ppq = 0, pitch = 24, new_ppq = 100, new_end_ppq = 100 } })
+eq(#r.invalid, 1, "a zero-length note is invalid")
+r = pp(base, { { ppq = 0, pitch = 24, new_ppq = 100, new_end_ppq = 50 } })
+eq(#r.invalid, 1, "an end before its start is invalid")
+r = pp(base, { { ppq = 0, pitch = 24, new_ppq = nil, new_end_ppq = 50 } })
+eq(#r.invalid, 1, "a missing destination is invalid")
+
+-- The collision guard. Two moved notes converging on one tick would leave a
+-- take no later read can address, which is exactly how a timing pass poisons
+-- the next one.
+r = pp(base, {
+  { ppq = 0,   pitch = 24, new_ppq = 240, new_end_ppq = 360 },
+  { ppq = 480, pitch = 24, new_ppq = 240, new_end_ppq = 360 },
+})
+eq(#r.collisions, 1, "two moved notes landing on one tick+pitch collide")
+
+-- A moved note landing on a note the request left alone is the same hazard
+-- wearing the other face, and is caught even though no row mentions the victim.
+r = pp(base, { { ppq = 0, pitch = 24, new_ppq = 480, new_end_ppq = 600 } })
+eq(#r.collisions, 1, "moving onto an untouched note collides")
+
+-- Same tick, different pitch is a chord, not a collision: a kick and a crash
+-- share the downbeat on every heavy record ever made.
+r = pp(base, { { ppq = 960, pitch = 38, new_ppq = 0, new_end_ppq = 120 } })
+eq(#r.collisions, 0, "a different pitch on the same tick is a chord, not a collision")
+eq(#r.plan, 1, "and it plans normally")
+
+-- Swapping two notes past each other is legal: neither destination is occupied
+-- once both moves are taken together.
+r = pp(base, {
+  { ppq = 0,   pitch = 24, new_ppq = 480, new_end_ppq = 600 },
+  { ppq = 480, pitch = 24, new_ppq = 0,   new_end_ppq = 120 },
+})
+eq(#r.collisions, 0, "two notes trading places do not collide")
+eq(#r.plan, 2, "and both are planned")
+
+eq(#pp(base, {}).plan, 0, "an empty request plans nothing")
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))
