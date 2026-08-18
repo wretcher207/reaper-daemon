@@ -112,9 +112,11 @@ the same object.
 ### get_context
 `{ "include_fx": true }` — project name, tempo, cursor, transport, time
 selection, every track (with FX names when `include_fx`), markers, regions.
-Also `sample_rate` and `sample_rate_overridden`: with the project's sample-rate
-override off, `sample_rate` reads `0` and REAPER runs at the audio device's
-rate, so only an overridden rate is a real number.
+Also `sample_rate` and `sample_rate_overridden`. `sample_rate` is the rate
+stored in the project and reads back whether or not it is in force; when
+`sample_rate_overridden` is false, REAPER runs at the audio device's rate
+instead, so the number alone does not tell you what is playing. Check the flag
+before treating the rate as the session's.
 
 ### get_fx_parameters
 ```json
@@ -334,7 +336,8 @@ object taking the same shared selectors as the source, so
 both ends resolve by GUID, exact name, substring, or selection under identical
 rules; it is required, and `BAD_PAYLOAD` if it is missing or resolves to the
 source track itself. `volume_db` and `mode` are both optional; a send REAPER
-creates starts at unity, post-fader.
+creates starts at unity, post-fader. Both are validated before the send is
+created, so a refused command leaves no send behind.
 
 `mode` is one of `post_fader` (REAPER's 0), `pre_fx` (1), or `pre_fader` (3) —
 named because REAPER's integers are not contiguous. Anything else is

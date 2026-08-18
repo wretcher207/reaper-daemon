@@ -547,8 +547,10 @@ local function command_get_context(command)
     project_name = get_project_name(),
     tempo = reaper.Master_GetTempo(),
     has_tempo_changes = reaper.CountTempoTimeSigMarkers(0) > 0,
-    -- With the project override off, PROJECT_SRATE reads 0 and REAPER runs at
-    -- the audio device's rate; sample_rate_overridden says which number is real.
+    -- PROJECT_SRATE is the rate STORED in the project and reads back whether or
+    -- not it is in force (measured 2026-08-17: 44100 with the override off).
+    -- When sample_rate_overridden is false REAPER runs at the audio device's
+    -- rate instead, so the number alone does not say what is playing.
     sample_rate = reaper.GetSetProjectInfo(0, "PROJECT_SRATE", 0, false),
     sample_rate_overridden = reaper.GetSetProjectInfo(0, "PROJECT_SRATE_USE", 0, false) == 1,
     cursor = { seconds = cursor, bar = bar_from_time(cursor) },
@@ -1846,20 +1848,31 @@ local function command_create_send(command)
   if target == source then
     error("BAD_PAYLOAD: destination resolves to the source track")
   end
+  -- Resolve the optional values BEFORE creating anything. Validating the mode
+  -- after CreateTrackSend left a stray unity-gain send behind on a command that
+  -- then reported BAD_PAYLOAD (found on the first live run, 2026-08-17): a
+  -- refused command must mutate nothing.
+  local volume = nil
+  if payload.volume_db ~= nil then
+    local db = tonumber(payload.volume_db)
+    if not db then error("BAD_VALUE: volume_db must be a number") end
+    volume = volume_from_db(db)
+  end
+  local mode = nil
+  if payload.mode ~= nil then
+    mode = send_mode_value(payload.mode)
+    if not mode then
+      error("BAD_PAYLOAD: mode must be post_fader, pre_fx, or pre_fader")
+    end
+  end
   local send_index = reaper.CreateTrackSend(source, target)
   if not send_index or send_index < 0 then
     error("CREATE_SEND_FAILED: REAPER did not create the send")
   end
-  if payload.volume_db ~= nil then
-    local db = tonumber(payload.volume_db)
-    if not db then error("BAD_VALUE: volume_db must be a number") end
-    reaper.SetTrackSendInfo_Value(source, 0, send_index, "D_VOL", volume_from_db(db))
+  if volume ~= nil then
+    reaper.SetTrackSendInfo_Value(source, 0, send_index, "D_VOL", volume)
   end
-  if payload.mode ~= nil then
-    local mode = send_mode_value(payload.mode)
-    if not mode then
-      error("BAD_PAYLOAD: mode must be post_fader, pre_fx, or pre_fader")
-    end
+  if mode ~= nil then
     reaper.SetTrackSendInfo_Value(source, 0, send_index, "I_SENDMODE", mode)
   end
   reaper.UpdateArrange()
