@@ -112,6 +112,9 @@ the same object.
 ### get_context
 `{ "include_fx": true }` — project name, tempo, cursor, transport, time
 selection, every track (with FX names when `include_fx`), markers, regions.
+Also `sample_rate` and `sample_rate_overridden`: with the project's sample-rate
+override off, `sample_rate` reads `0` and REAPER runs at the audio device's
+rate, so only an overridden rate is a real number.
 
 ### get_fx_parameters
 ```json
@@ -186,7 +189,12 @@ Gated — requires `allow_risk_level_3: true` in `bridge_config.json`.
 ```
 `bounds`: `project`, `time_selection`, `regions`, `selected_items`. Uses
 REAPER's most recent render settings (format, sample rate); configure those
-once in REAPER's Render dialog. Render is synchronous — it blocks the bridge
+once in REAPER's Render dialog. `output_file` is split into `RENDER_FILE` (the
+directory) and `RENDER_PATTERN` (the filename, minus a trailing `.wav` — the
+extension comes from the sink format), the same split `capture_track_audio`
+uses. The reply's `target` is read back from `RENDER_TARGETS`, so it is what
+REAPER says it will write; `output_file` in the reply is the raw `RENDER_FILE`
+directory. Render is synchronous — it blocks the bridge
 for the entire render duration, so `heartbeat.alive_at` goes stale. The
 heartbeat written just before render includes `"busy": "render"` so an agent
 can distinguish "rendering" from "bridge died".
@@ -200,6 +208,17 @@ If SWS is missing, the setting cannot be read, or either write fails, the
 bridge refuses before opening the render window with
 `RENDER_PREFERENCES_UNSAFE` or `RENDER_PREFERENCES_RESTORE_FAILED`. Install
 SWS, or enable both preferences manually, then rerun capture preflight.
+
+### save_project
+Gated — requires `allow_risk_level_3: true` in `bridge_config.json`, or the
+reply is `SAVE_BLOCKED`. No payload.
+```json
+{}
+```
+Saves the open project over its existing `.rpp` (no Save As prompt). Gated with
+render and capture rather than on its own, because overwriting the file on disk
+is the one mutation an undo block cannot take back. Returns `saved` and
+`project_name`.
 
 ### capture_track_audio
 Gated — requires `allow_risk_level_3: true` in `bridge_config.json`.
@@ -236,8 +255,10 @@ Read-only.
 Returns `sends` and `receives` (per entry: target/source track name,
 `volume_db`, `pan`, `mute`, `mono`, `phase_inverted`, channel mapping),
 `parent_track` (name/index/guid or null), track `volume_db`, `pan`,
-`phase_inverted`, and `automation_mode`. All volumes are converted to dB in
-the bridge (`D_VOL` is linear); hardware outputs are excluded.
+`master_send`, `phase_inverted`, and `automation_mode`. All volumes are
+converted to dB in the bridge (`D_VOL` is linear); hardware outputs are
+excluded. This is the read side of `create_send` and `set_master_send`: what
+those two write is what `sends` and `master_send` report back.
 
 ### get_selected_track
 Read-only, no payload. The Post Mortem panel's Track-screen idle card
@@ -301,6 +322,37 @@ default to `true` when omitted.
 ### set_track_color
 `{ "target_track_name": "Drums", "color": {"r":180,"g":20,"b":20} }` — `color`
 may also be a native REAPER color integer.
+
+### create_send
+```json
+{ "target_track_name": "Snare",
+  "destination": { "target_track_name": "Drum Buss" },
+  "volume_db": -6.0, "mode": "post_fader" }
+```
+Creates a track send from the source to the destination. `destination` is an
+object taking the same shared selectors as the source, so
+both ends resolve by GUID, exact name, substring, or selection under identical
+rules; it is required, and `BAD_PAYLOAD` if it is missing or resolves to the
+source track itself. `volume_db` and `mode` are both optional; a send REAPER
+creates starts at unity, post-fader.
+
+`mode` is one of `post_fader` (REAPER's 0), `pre_fx` (1), or `pre_fader` (3) —
+named because REAPER's integers are not contiguous. Anything else is
+`BAD_PAYLOAD` rather than a silent post-fader send. Returns `source` and
+`destination` track summaries plus `send_index`, which is the index
+`get_track_routing` lists the new send at.
+
+Sends are the whole of the bridge's routing writes. Folder routing would need
+tracks reordered and folder depths rewritten, which the API makes fragile
+enough to lose an arrangement; a send is safe and `Ctrl+Z`-reversible.
+
+### set_master_send
+`{ "target_track_name": "Snare", "enabled": false }` — turns the track's direct
+feed to the master bus on or off (`B_MAINSEND`). `enabled` must be a boolean;
+anything else is `BAD_PAYLOAD`, since a defaulted value here silently changes
+what the mix sums. A source feeding a bus usually stops feeding the master
+directly, and this is that switch. Read it back as `master_send` from
+`get_track_routing`.
 
 ### snapshot_track_state
 ```json
