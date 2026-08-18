@@ -18,7 +18,11 @@ Every command is a JSON file in `inbox/`. Every result is a JSON file in
 ```
 
 `dry_run: true` on a mutating command returns what *would* run without changing
-the project. Read-only commands ignore `dry_run` and execute normally.
+the project. It is honored in the envelope OR inside `payload` (`reaperd.py
+cmd` can only reach the payload, and a dry_run that silently executes is the
+worst available inversion). Read-only commands ignore `dry_run` and execute
+normally — except `reload_bridge`, which honors it despite never touching the
+project.
 
 `token` (optional): when `auth_token` is set in `bridge_config.json`, every
 command must include a matching `token` or it's rejected with `AUTH_FAILED`.

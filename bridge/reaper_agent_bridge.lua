@@ -3629,8 +3629,9 @@ end
 local function command_reload_bridge(command)
   -- reload_bridge sits in NO_UNDO_BLOCK (it never touches the project), which
   -- means run_command's dry_run short-circuit does not cover it — without this
-  -- branch a dry_run would really reload.
-  if command.dry_run then
+  -- branch a dry_run would really reload. Same either-position rule as
+  -- run_command's.
+  if command.dry_run or (type(command.payload) == "table" and command.payload.dry_run) then
     return { dry_run = true, would_run = "reload_bridge", script_path = BRIDGE_FILE }
   end
   local chunk, err = loadfile(BRIDGE_FILE)
@@ -3690,7 +3691,12 @@ local function run_command(command, in_batch)
   local handler = handlers[command.type]
   if not handler then error("UNKNOWN_COMMAND: " .. tostring(command.type)) end
 
-  if command.dry_run and is_mutating(command.type) then
+  -- dry_run is an envelope field by convention, but `reaperd.py cmd` can only
+  -- reach the payload — and a dry_run that silently EXECUTES is the worst
+  -- inversion available (caught live 2026-08-18: a payload dry_run on
+  -- reload_bridge really reloaded). Honor it in either position.
+  local payload_dry = type(command.payload) == "table" and command.payload.dry_run
+  if (command.dry_run or payload_dry) and is_mutating(command.type) then
     return { dry_run = true, would_run = command.type, payload = command.payload or {} }
   end
 
@@ -4158,3 +4164,4 @@ last_sweep = reaper.time_precise()
 
 log_line("bridge started")
 loop()
+
