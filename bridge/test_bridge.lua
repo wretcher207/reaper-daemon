@@ -743,6 +743,18 @@ end
 eq(named, 3, "exactly three modes are named on both sides")
 eq(smn[2], nil, "REAPER's unused 2 is named on neither side")
 
+-- save_project refuses a project with no file rather than letting REAPER open a
+-- Save As dialog, which would block the defer loop until a human clicked it.
+-- Refusing is the whole point, so the empty cases must not fall through.
+local ste = B.save_target_error
+eq(ste("C:\\media\\song.rpp"), nil, "a real project path saves")
+eq(ste("/home/d/song.rpp"), nil, "a POSIX project path saves")
+ok(ste(""):find("SAVE_UNSAFE", 1, true) ~= nil,
+   "an empty path refuses before REAPER can open a dialog")
+ok(ste(nil):find("SAVE_UNSAFE", 1, true) ~= nil, "a nil path refuses too")
+ok(ste(nil):find("save it once", 1, true) ~= nil,
+   "the refusal says how to make it saveable")
+
 -- RENDER_FILE is the directory and RENDER_PATTERN the filename. render used to
 -- write the whole path into RENDER_FILE and never set the pattern, so it
 -- reported a path REAPER had not written. Both callers now split the same way.

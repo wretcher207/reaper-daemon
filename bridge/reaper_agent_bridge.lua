@@ -3110,19 +3110,36 @@ local function command_render(command)
   }
 end
 
+-- A project REAPER has never written has no path to overwrite, so
+-- Main_SaveProject opens a Save As dialog — and that modal blocks the defer loop
+-- until a human dismisses it, the same failure the render preferences exist to
+-- prevent. The bridge is headless by definition and nobody may be at the
+-- machine, so refuse rather than gamble. Pure, so the selftest covers it without
+-- a project open.
+local function save_target_error(project_path)
+  if project_path == nil or project_path == "" then
+    return "SAVE_UNSAFE: the open project has never been saved, so saving would " ..
+      "open a Save As dialog and block the bridge; save it once in REAPER first"
+  end
+  return nil
+end
+
 -- Saving overwrites the user's .rpp on disk, which no undo block can take back,
 -- so it rides the same gate as render and capture rather than one of its own.
--- HAZARD: on a project that has never been saved there is no path to write to,
--- and Main_SaveProject opens a Save As dialog — a modal that blocks the defer
--- loop until a human dismisses it, exactly like the render-dialog case. Only
--- call this on a project that already has a file; get_context's project_name
--- falls back to "Untitled" when there is none.
 local function command_save_project()
   if not config.allow_risk_level_3 then
     error("SAVE_BLOCKED: save_project is gated; set allow_risk_level_3 true in bridge_config.json")
   end
+  -- EnumProjects(-1) is the active project; its filename is "" until the project
+  -- has been saved once. get_project_name's "Untitled" fallback reads the same
+  -- state, one step further removed.
+  local _, project_path = reaper.EnumProjects(-1, "")
+  local unsafe = save_target_error(project_path)
+  if unsafe then error(unsafe) end
   reaper.Main_SaveProject(0, false)
-  return { saved = true, project_name = get_project_name() }
+  -- Name the file that was actually written, not just the project: a reply that
+  -- can't be checked against the disk is how the render bug hid.
+  return { saved = true, project_name = get_project_name(), project_path = project_path }
 end
 
 -- Post Mortem capture: render ONE track's post-FX output to a temp WAV using
@@ -3992,6 +4009,7 @@ if _G.REAPER_BRIDGE_SELFTEST then
     velocity_summary = velocity_summary,
     send_mode_value = send_mode_value,
     send_mode_names = SEND_MODE_NAMES,
+    save_target_error = save_target_error,
     split_render_target = split_render_target,
   }
 end
