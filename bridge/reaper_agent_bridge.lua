@@ -3112,6 +3112,11 @@ end
 
 -- Saving overwrites the user's .rpp on disk, which no undo block can take back,
 -- so it rides the same gate as render and capture rather than one of its own.
+-- HAZARD: on a project that has never been saved there is no path to write to,
+-- and Main_SaveProject opens a Save As dialog — a modal that blocks the defer
+-- loop until a human dismisses it, exactly like the render-dialog case. Only
+-- call this on a project that already has a file; get_context's project_name
+-- falls back to "Untitled" when there is none.
 local function command_save_project()
   if not config.allow_risk_level_3 then
     error("SAVE_BLOCKED: save_project is gated; set allow_risk_level_3 true in bridge_config.json")

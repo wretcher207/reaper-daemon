@@ -222,6 +222,12 @@ render and capture rather than on its own, because overwriting the file on disk
 is the one mutation an undo block cannot take back. Returns `saved` and
 `project_name`.
 
+**Only call this on a project that has been saved at least once.** A project
+with no file has nothing to overwrite, so REAPER opens a Save As dialog — a
+modal that blocks the bridge's defer loop until a human dismisses it, the same
+failure mode the render preferences exist to prevent. `get_context`'s
+`project_name` reads `Untitled` when there is no file; check it first.
+
 ### capture_track_audio
 Gated — requires `allow_risk_level_3: true` in `bridge_config.json`.
 ```json
