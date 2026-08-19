@@ -747,6 +747,21 @@ eq(#r.collisions, 1, "two moved notes landing on one tick+pitch collide")
 r = pp(base, { { ppq = 0, pitch = 24, new_ppq = 480, new_end_ppq = 600 } })
 eq(#r.collisions, 1, "moving onto an untouched note collides")
 
+-- Two untouched notes already stacked on one tick and pitch are a pre-existing
+-- condition, not a hazard this request created. A write that leaves them alone
+-- must not be refused over them: a take carrying stacked duplicates would
+-- otherwise reject every timing pass, including ones that never go near them.
+local with_stack = take({ 0, 24 }, { 0, 24 }, { 480, 24 }, { 960, 38 })
+r = pp(with_stack, { { ppq = 960, pitch = 38, new_ppq = 950, new_end_ppq = 1070 } })
+eq(#r.collisions, 0, "an untouched stacked pair never collides with itself")
+eq(#r.plan, 1, "and the unrelated move plans normally")
+
+-- But the stack is still a protected destination: a moved note landing on it
+-- collides, once per note it would bury.
+r = pp(with_stack, { { ppq = 480, pitch = 24, new_ppq = 0, new_end_ppq = 120 } })
+eq(#r.collisions, 2, "moving onto a stacked pair collides with each buried note")
+eq(#r.plan, 1, "the move itself still plans; the caller refuses on the collisions")
+
 -- Same tick, different pitch is a chord, not a collision: a kick and a crash
 -- share the downbeat on every heavy record ever made.
 r = pp(base, { { ppq = 960, pitch = 38, new_ppq = 0, new_end_ppq = 120 } })
