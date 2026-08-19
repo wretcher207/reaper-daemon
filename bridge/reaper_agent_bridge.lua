@@ -1354,17 +1354,17 @@ local function position_plan(existing, requested)
       landing[dest] = true
     end
   end
+  -- Unclaimed notes are checked against moved destinations only, and are never
+  -- entered into `landing` themselves: two untouched notes already stacked on
+  -- one tick and pitch are a pre-existing condition this request neither
+  -- created nor worsened, and must not veto an edit that leaves them alone.
   for _, note in ipairs(existing) do
     local src = note.ppq .. ":" .. note.pitch
-    if not claimed[src] then
-      if landing[src] then
-        collisions[#collisions + 1] = {
-          ppq = note.ppq, pitch = note.pitch, new_ppq = note.ppq,
-          reason = "a moved note lands on this note, which the request left in place",
-        }
-      else
-        landing[src] = true
-      end
+    if not claimed[src] and landing[src] then
+      collisions[#collisions + 1] = {
+        ppq = note.ppq, pitch = note.pitch, new_ppq = note.ppq,
+        reason = "a moved note lands on this note, which the request left in place",
+      }
     end
   end
 
@@ -1450,7 +1450,8 @@ local function command_set_note_positions(command)
   if #wrong > 0 then
     error("POSITION_WRITE_UNCONFIRMED: " .. #wrong .. " of " .. #resolved.plan ..
       " notes did not read back at the requested position. The edit is inside " ..
-      "one undo block; one REAPER undo reverts it.")
+      "one undo block; one REAPER undo reverts it. Mismatches: " ..
+      json.encode(wrong))
   end
 
   local _, track_name = reaper.GetTrackName(track, "")
