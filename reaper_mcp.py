@@ -111,7 +111,7 @@ def _text(text, is_error=False):
     return out
 
 
-def _reply_result(reply, note=None):
+def _reply_result(reply, note=None, extra=None):
     """Format a bridge reply as an MCP tool result.
 
     `note` goes INSIDE the JSON body, never in front of it: the console's
@@ -127,10 +127,14 @@ def _reply_result(reply, note=None):
             body["data"] = reply["data"]
         if reply.get("dry_run"):
             body["dry_run"] = True
+        if extra:
+            body.update(extra)
         if note:
             body["console_note"] = note
         return _text(json.dumps(body, indent=1))
     body = {"ok": False, "error": reply.get("error")}
+    if extra:
+        body.update(extra)
     if note:
         body["console_note"] = note
     return _text(json.dumps(body, indent=1), is_error=True)
@@ -202,6 +206,25 @@ DRY_RUN_PROP = {
 # Tool handlers
 # ---------------------------------------------------------------------------
 
+def _forward(cmd_type, args, keys, timeout_ms=DEFAULT_TIMEOUT_MS,
+             track=False, dry_run=False, extra=None):
+    """Mechanical arg -> payload forwarding shared by the thin tool handlers.
+
+    Copies each key verbatim from args (missing keys become None, which _send
+    strips). `track` prepends the shared track-selector fields, `dry_run`
+    forwards the tool's dry_run flag, and `extra` carries any per-tool
+    computed values (defaults, validated fields).
+    """
+    payload = _track_payload(args) if track else {}
+    for key in keys:
+        payload[key] = args.get(key)
+    if extra:
+        payload.update(extra)
+    return _reply_result(_send(cmd_type, payload, timeout_ms=timeout_ms,
+                               dry_run=bool(args.get("dry_run")) if dry_run
+                               else False))
+
+
 def tool_get_status(args):
     alive = reaperd.status_ok(bridge_root=BRIDGE_ROOT, quiet=True)
     info = {"alive": bool(alive), "bridge_root": BRIDGE_ROOT}
@@ -227,21 +250,19 @@ def tool_get_status(args):
 
 
 def tool_get_context(args):
-    return _reply_result(_send("get_context",
-                               {"include_fx": args.get("include_fx", True)}))
+    return _forward("get_context", args, (),
+                    extra={"include_fx": args.get("include_fx", True)})
 
 
 def tool_scan_fx(args):
-    payload = _track_payload(args)
-    payload["include_values"] = args.get("include_values", False)
-    return _reply_result(_send("scan_fx", payload, timeout_ms=30000))
+    return _forward("scan_fx", args, (), track=True, timeout_ms=30000,
+                    extra={"include_values": args.get("include_values", False)})
 
 
 def tool_get_fx_parameters(args):
     base = _track_payload(args)
     for key in ("fx_name_contains", "fx_index", "fx_scope", "param_name_contains"):
-        if args.get(key) is not None:
-            base[key] = args[key]
+        base[key] = args.get(key)
     base = {k: v for k, v in base.items() if v is not None}
     data, err = reaperd.scan_fx_parameter_data(
         base, BRIDGE_ROOT, include_values=args.get("include_values", True))
@@ -251,7 +272,7 @@ def tool_get_fx_parameters(args):
 
 
 def tool_get_track_routing(args):
-    return _reply_result(_send("get_track_routing", _track_payload(args)))
+    return _forward("get_track_routing", args, (), track=True)
 
 
 _TRANSPORT_SIMPLE = {"play", "stop", "pause", "record"}
@@ -328,32 +349,19 @@ def tool_fx(args):
 
 
 def tool_set_fx_param(args):
-    payload = _track_payload(args)
-    payload.update({
-        "fx_name_contains": args.get("fx_name_contains"),
-        "fx_index": args.get("fx_index"), "fx_scope": args.get("fx_scope"),
-        "param_name_contains": args.get("param_name_contains"),
-        "param_index": args.get("param_index"),
-        "normalized_value": args.get("normalized_value"),
-        "formatted_value": args.get("formatted_value"),
-        "relative": args.get("relative"),
-    })
-    return _reply_result(_send("set_fx_param", payload,
-                               dry_run=bool(args.get("dry_run"))))
+    return _forward("set_fx_param", args,
+                    ("fx_name_contains", "fx_index", "fx_scope",
+                     "param_name_contains", "param_index", "normalized_value",
+                     "formatted_value", "relative"),
+                    track=True, dry_run=True)
 
 
 def tool_write_automation(args):
-    payload = _track_payload(args)
-    payload.update({
-        "fx_name_contains": args.get("fx_name_contains"),
-        "fx_index": args.get("fx_index"), "fx_scope": args.get("fx_scope"),
-        "param_name_contains": args.get("param_name_contains"),
-        "param_index": args.get("param_index"),
-        "points": args.get("points"),
-        "clear_existing_in_range": args.get("clear_existing_in_range"),
-    })
-    return _reply_result(_send("write_fx_param_automation", payload,
-                               timeout_ms=30000, dry_run=bool(args.get("dry_run"))))
+    return _forward("write_fx_param_automation", args,
+                    ("fx_name_contains", "fx_index", "fx_scope",
+                     "param_name_contains", "param_index", "points",
+                     "clear_existing_in_range"),
+                    track=True, timeout_ms=30000, dry_run=True)
 
 
 _MARKER_ACTIONS = {"add_marker", "add_region", "delete_marker"}
@@ -363,47 +371,30 @@ def tool_markers(args):
     action = args.get("action")
     if action not in _MARKER_ACTIONS:
         return _text(f"unknown markers action: {action!r}", is_error=True)
-    payload = {
-        "position": args.get("position"), "start": args.get("start"),
-        "end": args.get("end"), "length_bars": args.get("length_bars"),
-        "name": args.get("name"), "color": args.get("color"),
-        "marker_index": args.get("marker_index"),
-        "is_region": args.get("is_region"),
-    }
-    return _reply_result(_send(action, payload, dry_run=bool(args.get("dry_run"))))
+    return _forward(action, args,
+                    ("position", "start", "end", "length_bars", "name",
+                     "color", "marker_index", "is_region"),
+                    dry_run=True)
 
 
 def tool_insert_midi_file(args):
-    payload = _track_payload(args)
-    payload.update({
-        "midi_path": args.get("midi_path"),
-        "position": args.get("position") or {"type": "cursor"},
-        "length": args.get("length"), "loop": args.get("loop"),
-        "replace_existing_in_range": args.get("replace_existing_in_range"),
-    })
-    return _reply_result(_send("insert_midi_file", payload, timeout_ms=30000,
-                               dry_run=bool(args.get("dry_run"))))
+    return _forward("insert_midi_file", args,
+                    ("midi_path", "length", "loop",
+                     "replace_existing_in_range"),
+                    track=True, timeout_ms=30000, dry_run=True,
+                    extra={"position": args.get("position") or {"type": "cursor"}})
 
 
 def tool_delete_items_in_range(args):
-    payload = _track_payload(args)
-    payload.update({
-        "range": args.get("range"), "length_bars": args.get("length_bars"),
-        "length_seconds": args.get("length_seconds"),
-        "all_tracks": args.get("all_tracks"),
-    })
-    return _reply_result(_send("delete_items_in_range", payload,
-                               dry_run=bool(args.get("dry_run"))))
+    return _forward("delete_items_in_range", args,
+                    ("range", "length_bars", "length_seconds", "all_tracks"),
+                    track=True, dry_run=True)
 
 
 def tool_batch(args):
-    payload = {
-        "commands": args.get("commands"),
-        "stop_on_error": args.get("stop_on_error", True),
-        "undo_label": args.get("undo_label"),
-    }
-    return _reply_result(_send("batch", payload, timeout_ms=60000,
-                               dry_run=bool(args.get("dry_run"))))
+    return _forward("batch", args, ("commands", "undo_label"),
+                    timeout_ms=60000, dry_run=True,
+                    extra={"stop_on_error": args.get("stop_on_error", True)})
 
 
 def tool_capture_track_audio(args):
@@ -685,18 +676,9 @@ def tool_insert_groove(args):
                       dry_run=bool(args.get("dry_run")))
         summary = (gen_proc.stdout or "").strip()
         if not reply.get("ok"):
-            return _text(json.dumps({"ok": False, "error": reply.get("error"),
-                                     "generated": summary}, indent=1),
-                         is_error=True)
-        body = {"ok": True, "generated": summary,
-                "midi_temp_file_deleted": True}
-        if reply.get("message"):
-            body["message"] = reply["message"]
-        if reply.get("data") is not None:
-            body["data"] = reply["data"]
-        if reply.get("dry_run"):
-            body["dry_run"] = True
-        return _text(json.dumps(body, indent=1))
+            return _reply_result(reply, extra={"generated": summary})
+        return _reply_result(reply, extra={"generated": summary,
+                                           "midi_temp_file_deleted": True})
     finally:
         # Success, DSL error, bridge rejection, crash: the temp MIDI never
         # survives the call (cmd_groove's contract).
@@ -725,7 +707,8 @@ def _verify_mutator(cmd_type, payload):
                              timeout_ms=30000, resolve=True, repair=True)
 
 
-def _verify_result_text(res, error_statuses, note=None):
+def _verify_result_text(res, note=None):
+    # isError ONLY for REFUSED: it is the one status that proves nothing ran.
     if note:
         res = dict(res, console_note=note)
     try:
@@ -733,7 +716,7 @@ def _verify_result_text(res, error_statuses, note=None):
     except ValueError:
         body = json.dumps(verifyloop._sanitize_nonfinite(res), indent=1,
                           allow_nan=False)
-    return _text(body, is_error=res.get("status") in error_statuses)
+    return _text(body, is_error=res.get("status") == "REFUSED")
 
 
 def tool_verify_change(args):
@@ -762,7 +745,7 @@ def tool_verify_change(args):
     # whose handler can still have made a partial mid-edit change — is
     # UNVERIFIED: a real outcome the model must read and relay, never
     # auto-retry.
-    return _verify_result_text(res, ("REFUSED",), note=clamp_note)
+    return _verify_result_text(res, note=clamp_note)
 
 
 def tool_tune_param(args):
@@ -822,7 +805,7 @@ def tool_tune_param(args):
     # IDENTITY_CHANGED/SCOPE_CHANGED happen after sets may have applied —
     # marking them as tool errors would invite a retry on top of live
     # changes. The model must read `final` (the read-back state) instead.
-    return _verify_result_text(res, ("REFUSED",), note=clamp_note)
+    return _verify_result_text(res, note=clamp_note)
 
 
 # --- Post Mortem integration -------------------------------------------------
@@ -1664,20 +1647,7 @@ def main():
         except ValueError:
             response = _rpc_error(None, -32700, "parse error")
         else:
-            if isinstance(msg, list):
-                # JSON-RPC batch (allowed by the pre-2025-06-18 protocol
-                # versions we advertise): answer each request, one array back.
-                # An empty batch is invalid; all-notifications gets no reply.
-                if not msg:
-                    response = _rpc_error(None, -32600, "invalid request")
-                else:
-                    answers = [r for r in (
-                        handle_message(m) if isinstance(m, dict)
-                        else _rpc_error(None, -32600, "invalid request")
-                        for m in msg
-                    ) if r is not None]
-                    response = answers or None
-            elif not isinstance(msg, dict):
+            if not isinstance(msg, dict):
                 response = _rpc_error(None, -32600, "invalid request")
             else:
                 response = handle_message(msg)

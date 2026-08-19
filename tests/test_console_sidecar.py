@@ -37,10 +37,17 @@ from console_fakes import (  # noqa: E402
 def console_root(tmp_path):
     for name in ("inbox", "outbox", "processing", "bridge", "logs",
                  "console", "console/prompts", "console/control",
-                 "console/events", "console/raw", "console/audio"):
+                 "console/events", "console/raw"):
         (tmp_path / name).mkdir(parents=True, exist_ok=True)
     write_heartbeat(str(tmp_path))
     return str(tmp_path)
+
+
+def stamped_id():
+    """Timestamp-prefixed id so a sorted listing is chronological (what the
+    console panel writes as control-file names)."""
+    return (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            + "-" + os.urandom(4).hex())
 
 
 def write_heartbeat(root, busy=None, project="test.rpp", age=0.0):
@@ -1083,7 +1090,7 @@ def test_a_prompt_file_is_consumed_and_carries_its_focus_envelope(
     sidecar = make_sidecar(sidecars, console_root, {})
     sidecar._open_session_files("prompt-test")
     path = os.path.join(console_root, "console", "prompts",
-                        cs.stamped_id() + ".json")
+                        stamped_id() + ".json")
     cs.atomic_write_json(path, {"text": "make it louder",
                                 "focus": {"track": "Drums", "bars": "17-24"}})
     sidecar.poll_prompts()
@@ -1141,7 +1148,7 @@ def test_a_shutdown_control_file_stops_the_daemon_cleanly(console_root, sidecars
         assert wait_for(lambda: sidecar.proc is not None)
         cs.atomic_write_json(
             os.path.join(console_root, "console", "control",
-                         cs.stamped_id() + ".json"), {"action": "shutdown"})
+                         stamped_id() + ".json"), {"action": "shutdown"})
         assert wait_for(lambda: sidecar.stop_reason == "shutdown_control", timeout=5.0)
         thread.join(timeout=10)
         assert sidecar.proc.poll() is not None
@@ -1176,7 +1183,7 @@ def test_an_expensive_turn_arms_the_warning_for_the_next_send(
     allowed, code, _ = sidecar.gate()
     assert (allowed, code) == (False, "TURN_WARN_UNACKNOWLEDGED")
     cs.atomic_write_json(
-        os.path.join(console_root, "console", "control", cs.stamped_id() + ".json"),
+        os.path.join(console_root, "console", "control", stamped_id() + ".json"),
         {"action": "ack_warn"})
     sidecar.poll_control()
     assert sidecar.gate()[0] is True

@@ -99,9 +99,8 @@ def reaper_running():
         return None
 
 
-def load_drum_config(bridge_root=None):
+def load_drum_config(bridge_root):
     """Read optional drum-config.json (user kit defaults). None if absent."""
-    bridge_root = bridge_root or BRIDGE_ROOT
     path = os.path.join(bridge_root, "drum-config.json")
     if os.path.isfile(path):
         try:
@@ -610,6 +609,23 @@ def _bridge_sender(bridge_root):
     return sender
 
 
+def _print_json_result(res):
+    """Print a measure/verify result as one JSON line.
+
+    allow_nan=False: emitting bare NaN would be invalid JSON for the MCP
+    path; verifyloop sanitizes non-finite values, this enforces it. The
+    fallback mirrors the MCP result path: a non-finite float that slipped
+    through (e.g. copied verbatim from a bridge reply) must not turn
+    --json mode into a traceback after the mutation may already have run.
+    """
+    import verifyloop
+    try:
+        print(json.dumps(res, separators=(",", ":"), allow_nan=False))
+    except ValueError:
+        print(json.dumps(verifyloop._sanitize_nonfinite(res),
+                         separators=(",", ":"), allow_nan=False))
+
+
 def cmd_measure(args):
     import verifyloop
     res = verifyloop.measure(
@@ -617,16 +633,7 @@ def cmd_measure(args):
         seconds=args.seconds, start_seconds=args.start,
         keep_wav=args.keep_wav)
     if args.json:
-        # allow_nan=False: emitting bare NaN would be invalid JSON for the
-        # MCP path; verifyloop sanitizes non-finite values, this enforces it.
-        try:
-            print(json.dumps(res, separators=(",", ":"), allow_nan=False))
-        except ValueError:
-            # Same fallback the MCP result path uses: a non-finite float
-            # that slipped through (e.g. copied verbatim from a bridge
-            # reply) must not turn --json mode into a traceback.
-            print(json.dumps(verifyloop._sanitize_nonfinite(res),
-                             separators=(",", ":"), allow_nan=False))
+        _print_json_result(res)
     elif res.get("ok"):
         print(verifyloop.format_measure(res))
     else:
@@ -751,14 +758,7 @@ def cmd_verify(args):
         seconds=args.seconds, start_seconds=args.start,
         keep_wav=args.keep_wav, progress=progress)
     if args.json:
-        try:
-            print(json.dumps(res, separators=(",", ":"), allow_nan=False))
-        except ValueError:
-            # A non-finite float in the result (embedded payload or bridge
-            # reply) must not crash --json into exit 1 ("not applied") after
-            # the mutation may already have run. Same guard as the MCP path.
-            print(json.dumps(verifyloop._sanitize_nonfinite(res),
-                             separators=(",", ":"), allow_nan=False))
+        _print_json_result(res)
     else:
         print(verifyloop.format_verify(res))
     # Default 2, not 1: by this point the mutation may have run, so a result
@@ -1187,9 +1187,7 @@ def cmd_profile(args):
 
 
 def cmd_list_maps(args):
-    skill_dir = os.path.join(args.bridge_root, "skills", "drum-apparatus")
-    if skill_dir not in sys.path:
-        sys.path.insert(0, skill_dir)
+    _skill_path(args.bridge_root)
     try:
         from drumgen.catalog import load_maps  # noqa: E402
     except Exception as e:
@@ -1200,21 +1198,22 @@ def cmd_list_maps(args):
     return 0
 
 
-OVERLAY_DIR_NAME = "maps"  # sibling of catalog/, under skills/drum-apparatus/
-
-
 def _overlay_dir(bridge_root):
-    return os.path.join(bridge_root, "skills", "drum-apparatus", OVERLAY_DIR_NAME)
+    # "maps" is a sibling of catalog/, under skills/drum-apparatus/
+    return os.path.join(bridge_root, "skills", "drum-apparatus", "maps")
 
 
 def _skill_path(bridge_root):
+    """Ensure skills/drum-apparatus is importable and return its path."""
     p = os.path.join(bridge_root, "skills", "drum-apparatus")
-    return p, p in sys.path or sys.path.insert(0, p)
+    if p not in sys.path:
+        sys.path.insert(0, p)
+    return p
 
 
 def cmd_discover_map(args):
     br = args.bridge_root
-    skill_dir, _ = _skill_path(br)
+    _skill_path(br)
     try:
         from drumgen.mapdetect import match_roles, format_report  # noqa: E402
     except Exception as e:
@@ -1320,7 +1319,7 @@ def cmd_add_map(args):
               file=sys.stderr)
         return 1
     # Validate roles are integers; warn on unknown roles.
-    skill_dir, _ = _skill_path(br)
+    _skill_path(br)
     try:
         from drumgen.catalog import ROLE_KEYS  # noqa: E402
     except Exception:
@@ -1399,15 +1398,7 @@ def build_parser():
     s = sub.add_parser("measure",
                        help="capture one track once and print measured audio metrics")
     s.add_argument("track", help="track name or 'master'")
-    s.add_argument("--seconds", type=float, default=None,
-                   help="capture length 1-60 (default 10)")
-    s.add_argument("--start", type=float, default=None,
-                   help="capture start in seconds (default: time selection start "
-                        "if active, else edit cursor)")
-    s.add_argument("--json", action="store_true",
-                   help="machine-readable JSON instead of the human table")
-    s.add_argument("--keep-wav", action="store_true",
-                   help="keep the capture WAV (default: delete after analysis)")
+    _add_verify_options(s)
     s.set_defaults(func=cmd_measure)
 
     s = sub.add_parser(

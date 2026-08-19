@@ -1280,7 +1280,7 @@ def test_stdio_framing_end_to_end(root):
             rpc("initialize", {"protocolVersion": "2025-06-18"}, mid=1),
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             rpc("tools/list", mid=2),
-            [rpc("ping", mid=3), rpc("ping", mid=4)],  # JSON-RPC batch
+            [rpc("ping", mid=3), rpc("ping", mid=4)],  # JSON-RPC batch: rejected
             "this is not json",
         ]
         stdin_data = "\n".join(
@@ -1294,7 +1294,10 @@ def test_stdio_framing_end_to_end(root):
     for frame in frames:
         lines.extend(frame if isinstance(frame, list) else [frame])
     by_id = {m.get("id"): m for m in lines}
-    assert by_id[3]["result"] == {} and by_id[4]["result"] == {}  # batch answered
+    # Batch requests are not supported: one -32600 invalid-request back.
+    invalid = [m for m in lines if m.get("error", {}).get("code") == -32600]
+    assert invalid, "batch array must produce a -32600 invalid-request error"
+    assert 3 not in by_id and 4 not in by_id
     assert by_id[1]["result"]["protocolVersion"] == "2025-06-18"
     assert any(t["name"] == "get_context"
                for t in by_id[2]["result"]["tools"])

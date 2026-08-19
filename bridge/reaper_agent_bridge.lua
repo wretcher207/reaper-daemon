@@ -114,7 +114,6 @@ local function default_config()
     bridge_root = DEFAULT_BRIDGE_ROOT,
     poll_interval_seconds = 0.25,
     allow_risk_level_3 = false,
-    bridge_version = 3,
   }
 end
 
@@ -220,9 +219,6 @@ end
 local function read_lock()
   local text = read_file(lockfile)
   if not text then return nil end
-  -- Backward-compat: pre-3.1 locks were a bare epoch timestamp.
-  local started_only = tonumber(text:match("^%d+$"))
-  if started_only then return { started = started_only, busy = "none" } end
   local ok, parsed = pcall(json.decode, text)
   if ok and type(parsed) == "table" then return parsed end
   return nil
@@ -345,8 +341,20 @@ local function list_json_files(dir)
   return files
 end
 
-local function selected_item_count()
-  return reaper.CountSelectedMediaItems(0)
+-- Visit every track FX, then every input FX (whose api_index carries REAPER's
+-- 0x1000000 offset). fn(index, api_index, scope, name).
+local function for_each_fx(track, fn)
+  for i = 0, reaper.TrackFX_GetCount(track) - 1 do
+    local _, name = reaper.TrackFX_GetFXName(track, i, "")
+    fn(i, i, "track", name)
+  end
+  if reaper.TrackFX_GetRecCount then
+    for i = 0, reaper.TrackFX_GetRecCount(track) - 1 do
+      local api_index = 0x1000000 + i
+      local _, name = reaper.TrackFX_GetFXName(track, api_index, "")
+      fn(i, api_index, "input", name)
+    end
+  end
 end
 
 local function db_from_volume(volume)
@@ -516,72 +524,53 @@ local function get_transport()
 end
 
 local function get_tracks(include_fx)
-  local tracks = {}
-  for i = 0, reaper.CountTracks(0) - 1 do
-    local track = reaper.GetTrack(0, i)
-    local _, name = reaper.GetTrackName(track, "")
+  local function track_row(track, index, is_master)
     local volume = reaper.GetMediaTrackInfo_Value(track, "D_VOL")
-    local track_info = {
-      index = i + 1,
+    local name = "MASTER"
+    if not is_master then
+      local _, n = reaper.GetTrackName(track, "")
+      name = n
+    end
+    local info = {
+      index = index,
+      is_master = is_master or nil,
       guid = reaper.GetTrackGUID(track),
       name = name,
       selected = reaper.IsTrackSelected(track),
       muted = reaper.GetMediaTrackInfo_Value(track, "B_MUTE") == 1,
       soloed = reaper.GetMediaTrackInfo_Value(track, "I_SOLO") ~= 0,
-      armed = reaper.GetMediaTrackInfo_Value(track, "I_RECARM") == 1,
+      armed = not is_master and
+        reaper.GetMediaTrackInfo_Value(track, "I_RECARM") == 1,
       volume = volume,
       volume_db = db_from_volume(volume),
       pan = reaper.GetMediaTrackInfo_Value(track, "D_PAN"),
-      folder_depth = reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH"),
-      item_count = reaper.CountTrackMediaItems(track),
+      folder_depth = is_master and 0 or
+        reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH"),
+      item_count = is_master and 0 or reaper.CountTrackMediaItems(track),
     }
     if include_fx then
-      track_info.fx = {}
-      for fx = 0, reaper.TrackFX_GetCount(track) - 1 do
-        local _, fx_name = reaper.TrackFX_GetFXName(track, fx, "")
-        track_info.fx[#track_info.fx + 1] = { index = fx, api_index = fx, scope = "track", name = fx_name }
-      end
-      track_info.input_fx = {}
-      if reaper.TrackFX_GetRecCount then
-        for fx = 0, reaper.TrackFX_GetRecCount(track) - 1 do
-          local api_index = 0x1000000 + fx
-          local _, fx_name = reaper.TrackFX_GetFXName(track, api_index, "")
-          track_info.input_fx[#track_info.input_fx + 1] = { index = fx, api_index = api_index, scope = "input", name = fx_name }
+      info.fx = {}
+      info.input_fx = {}
+      for_each_fx(track, function(fx, api_index, scope, fx_name)
+        -- The master's 0x1000000 slots are monitoring FX, not input FX, so
+        -- the documented shape keeps them out.
+        if not (is_master and scope == "input") then
+          local list = scope == "input" and info.input_fx or info.fx
+          list[#list + 1] = { index = fx, api_index = api_index, scope = scope, name = fx_name }
         end
-      end
+      end)
     end
-    tracks[#tracks + 1] = track_info
+    return info
   end
 
+  local tracks = {}
+  for i = 0, reaper.CountTracks(0) - 1 do
+    tracks[#tracks + 1] = track_row(reaper.GetTrack(0, i), i + 1, false)
+  end
   -- The master track is not in CountTracks/GetTrack, so add it explicitly or it
   -- is invisible to the documented get_context discovery call. index 0 + is_master
   -- match find_track's master convention.
-  local master = reaper.GetMasterTrack(0)
-  local master_vol = reaper.GetMediaTrackInfo_Value(master, "D_VOL")
-  local master_info = {
-    index = 0,
-    is_master = true,
-    guid = reaper.GetTrackGUID(master),
-    name = "MASTER",
-    selected = reaper.IsTrackSelected(master),
-    muted = reaper.GetMediaTrackInfo_Value(master, "B_MUTE") == 1,
-    soloed = reaper.GetMediaTrackInfo_Value(master, "I_SOLO") ~= 0,
-    armed = false,
-    volume = master_vol,
-    volume_db = db_from_volume(master_vol),
-    pan = reaper.GetMediaTrackInfo_Value(master, "D_PAN"),
-    folder_depth = 0,
-    item_count = 0,
-  }
-  if include_fx then
-    master_info.fx = {}
-    for fx = 0, reaper.TrackFX_GetCount(master) - 1 do
-      local _, fx_name = reaper.TrackFX_GetFXName(master, fx, "")
-      master_info.fx[#master_info.fx + 1] = { index = fx, api_index = fx, scope = "track", name = fx_name }
-    end
-    master_info.input_fx = {}
-  end
-  tracks[#tracks + 1] = master_info
+  tracks[#tracks + 1] = track_row(reaper.GetMasterTrack(0), 0, true)
   return tracks
 end
 
@@ -633,7 +622,7 @@ local function command_get_context(command)
     markers = markers,
     regions = regions,
     selected_track_count = reaper.CountSelectedTracks(0),
-    selected_item_count = selected_item_count(),
+    selected_item_count = reaper.CountSelectedMediaItems(0),
   }
 end
 
@@ -736,22 +725,13 @@ local function find_fx(payload)
     error("NO_FX_SELECTOR: Provide fx_name_contains or fx_index")
   end
 
-  local function add_matches(count, api_offset, match_scope)
-    for fx = 0, count - 1 do
-      local api_index = api_offset + fx
-      local _, fx_name = reaper.TrackFX_GetFXName(track, api_index, "")
-      if contains_ci(fx_name, needle) then
-        matches[#matches + 1] = { index = fx, api_index = api_index, scope = match_scope, name = fx_name }
-      end
+  for_each_fx(track, function(fx, api_index, match_scope, fx_name)
+    local wanted = match_scope == "input" and search_input_fx or
+                   match_scope == "track" and search_track_fx
+    if wanted and contains_ci(fx_name, needle) then
+      matches[#matches + 1] = { index = fx, api_index = api_index, scope = match_scope, name = fx_name }
     end
-  end
-
-  if search_track_fx then
-    add_matches(reaper.TrackFX_GetCount(track), 0, "track")
-  end
-  if search_input_fx and reaper.TrackFX_GetRecCount then
-    add_matches(reaper.TrackFX_GetRecCount(track), 0x1000000, "input")
-  end
+  end)
 
   if #matches == 0 then error("NO_FX: No FX matched " .. tostring(needle)) end
   if #matches > 1 then error("AMBIGUOUS_FX: Multiple FX matched " .. tostring(needle)) end
@@ -819,11 +799,7 @@ local function time_from_point(point)
     local whole_bar = math.floor(bar)
     local beat_offset = 0
     if beat > 0 then beat_offset = beat - 1 end
-    local ok, value = pcall(function()
-      return reaper.TimeMap2_beatsToTime(0, beat_offset, math.max(0, whole_bar - 1))
-    end)
-    if ok and type(value) == "number" then return value end
-    return time_from_bar(bar)
+    return reaper.TimeMap2_beatsToTime(0, beat_offset, math.max(0, whole_bar - 1))
   end
   error("BAD_POINT_TIME: Automation point needs time, seconds, or bar")
 end
@@ -1063,14 +1039,47 @@ local function read_midi_notes(take)
   return notes
 end
 
--- Pure: resolve requested (ppq, pitch, velocity) rows against the notes a take
+-- Pure: parse the wire rows of a note edit. Rows arrive as arrays
+-- ([ppq, pitch, ...extras]) or objects; `fields` names the extras in array
+-- order. Shared by set_note_velocities and set_note_positions.
+local note_edit = {}
+
+function note_edit.parse_rows(rows, fields, shape_hint)
+  if type(rows) ~= "table" or #rows == 0 then
+    error("BAD_PAYLOAD: notes must be a non-empty array of " .. shape_hint)
+  end
+  local requested = {}
+  for i, row in ipairs(rows) do
+    if type(row) ~= "table" then
+      error("BAD_PAYLOAD: notes[" .. i .. "] is neither an array nor an object")
+    end
+    local req
+    if row.ppq ~= nil or row.pitch ~= nil then
+      req = { ppq = math.floor(tonumber(row.ppq) or -1),
+              pitch = math.floor(tonumber(row.pitch) or -1) }
+      for _, f in ipairs(fields) do req[f] = row[f] end
+    else
+      req = { ppq = math.floor(tonumber(row[1]) or -1),
+              pitch = math.floor(tonumber(row[2]) or -1) }
+      for j, f in ipairs(fields) do req[f] = row[j + 2] end
+    end
+    requested[i] = req
+  end
+  return requested
+end
+
+-- Pure: resolve rows addressed by (ppq, pitch) against the notes a take
 -- actually has. Every row lands in exactly one bucket, so the caller can refuse
 -- the whole edit on any bucket but `plan` being non-empty.
 --
 -- Two notes stacked on the same pitch AND the same tick are reported as
--- ambiguous rather than picked between. Guessing there means writing a
--- velocity onto a note the caller never looked at.
-local function velocity_plan(existing, requested)
+-- ambiguous rather than picked between. Guessing there means writing onto a
+-- note the caller never looked at.
+--
+-- `validate(req, where)` returns the plan entry's edit fields (annotating and
+-- returning nil for an invalid row); `augment(entry, note)` copies whatever the
+-- caller wants recorded from the resolved note.
+function note_edit.resolve_rows(existing, requested, validate, augment)
   local by_key, duplicated = {}, {}
   for _, note in ipairs(existing) do
     local key = note.ppq .. ":" .. note.pitch
@@ -1080,11 +1089,9 @@ local function velocity_plan(existing, requested)
   local claimed = {}
   for row, req in ipairs(requested) do
     local key = tostring(req.ppq) .. ":" .. tostring(req.pitch)
-    local velocity = tonumber(req.velocity)
-    velocity = velocity and math.floor(velocity) or nil
     local where = { row = row, ppq = req.ppq, pitch = req.pitch }
-    if not velocity or velocity < 1 or velocity > 127 then
-      where.velocity = req.velocity
+    local fields = validate(req, where)
+    if not fields then
       invalid[#invalid + 1] = where
     elseif duplicated[key] then
       where.reason = "two notes share this tick and pitch"
@@ -1097,16 +1104,28 @@ local function velocity_plan(existing, requested)
     else
       claimed[key] = row
       local note = by_key[key]
-      plan[#plan + 1] = {
-        index = note.index,
-        ppq = note.ppq,
-        pitch = note.pitch,
-        from = note.velocity,
-        to = velocity,
-      }
+      local entry = { index = note.index, ppq = note.ppq, pitch = note.pitch }
+      for k, v in pairs(fields) do entry[k] = v end
+      if augment then augment(entry, note) end
+      plan[#plan + 1] = entry
     end
   end
-  return { plan = plan, missing = missing, ambiguous = ambiguous, invalid = invalid }
+  return { plan = plan, missing = missing, ambiguous = ambiguous,
+           invalid = invalid, claimed = claimed }
+end
+
+local function velocity_plan(existing, requested)
+  return note_edit.resolve_rows(existing, requested,
+    function(req, where)
+      local velocity = tonumber(req.velocity)
+      velocity = velocity and math.floor(velocity) or nil
+      if not velocity or velocity < 1 or velocity > 127 then
+        where.velocity = req.velocity
+        return nil
+      end
+      return { to = velocity }
+    end,
+    function(entry, note) entry.from = note.velocity end)
 end
 
 -- Pure: fold a note list into a per-pitch velocity summary. This is what makes
@@ -1204,90 +1223,30 @@ local function command_get_midi_notes(command)
 end
 
 local function command_set_note_velocities(command)
-  local payload = command.payload or {}
-  local rows = payload.notes
-  if type(rows) ~= "table" or #rows == 0 then
-    error("BAD_PAYLOAD: notes must be a non-empty array of [ppq, pitch, velocity]")
-  end
-
-  local requested = {}
-  for i, row in ipairs(rows) do
-    if type(row) ~= "table" then
-      error("BAD_PAYLOAD: notes[" .. i .. "] is neither an array nor an object")
-    end
-    if row.ppq ~= nil or row.pitch ~= nil then
-      requested[i] = { ppq = math.floor(tonumber(row.ppq) or -1),
-                       pitch = math.floor(tonumber(row.pitch) or -1),
-                       velocity = row.velocity }
-    else
-      requested[i] = { ppq = math.floor(tonumber(row[1]) or -1),
-                       pitch = math.floor(tonumber(row[2]) or -1),
-                       velocity = row[3] }
-    end
-  end
-
-  local take, track, track_index = midi_take_for(payload)
-  local before = read_midi_notes(take)
-  local resolved = velocity_plan(before, requested)
-  local unresolved = #resolved.missing + #resolved.ambiguous + #resolved.invalid
-
-  -- Default is all-or-nothing. A velocity pass is one musical gesture: half of
-  -- it applied is worse than none of it, because the half that landed is
-  -- indistinguishable by ear from the half that did not.
-  if unresolved > 0 and payload.allow_partial ~= true then
-    error("NOTE_MATCH_FAILED: " .. unresolved .. " of " .. #requested ..
-      " requested notes did not resolve (" .. #resolved.missing .. " missing, " ..
-      #resolved.ambiguous .. " ambiguous, " .. #resolved.invalid ..
-      " outside 1-127); nothing was changed. The take holds " .. #before ..
-      " notes. Re-read it with get_midi_notes and rebuild the request: the " ..
-      "MIDI moved after the read this request was built from.")
-  end
-  if #resolved.plan == 0 then
-    error("NOTE_MATCH_FAILED: no requested note resolved; nothing was changed")
-  end
-
-  for _, hit in ipairs(resolved.plan) do
-    reaper.MIDI_SetNote(take, hit.index, nil, nil, nil, nil, nil, nil, hit.to, true)
-  end
-  reaper.MIDI_Sort(take)
-  reaper.UpdateArrange()
-
-  -- Read the take back and confirm each note by (ppq, pitch), because
-  -- MIDI_SetNote returning true is a claim about the call, not about the note.
-  local after = read_midi_notes(take)
-  local by_key = {}
-  for _, note in ipairs(after) do by_key[note.ppq .. ":" .. note.pitch] = note end
-  local confirmed, wrong = 0, {}
-  for _, hit in ipairs(resolved.plan) do
-    local note = by_key[hit.ppq .. ":" .. hit.pitch]
-    if note and note.velocity == hit.to then
-      confirmed = confirmed + 1
-    else
-      wrong[#wrong + 1] = { ppq = hit.ppq, pitch = hit.pitch, wanted = hit.to,
-                            got = note and note.velocity or nil }
-    end
-  end
-  if #wrong > 0 then
-    error("VELOCITY_WRITE_UNCONFIRMED: " .. #wrong .. " of " .. #resolved.plan ..
-      " notes did not read back at the requested velocity. The edit is inside " ..
-      "one undo block; one REAPER undo reverts it.")
-  end
-
-  local _, track_name = reaper.GetTrackName(track, "")
-  return {
-    track = { index = track_index, name = track_name },
-    requested = #requested,
-    applied = #resolved.plan,
-    confirmed = confirmed,
-    unresolved = unresolved,
-    missing = resolved.missing,
-    ambiguous = resolved.ambiguous,
-    invalid = resolved.invalid,
-    velocity_before = velocity_summary(before),
-    velocity_after = velocity_summary(after),
-    verified_note = "Every applied note was re-read from the take and matched " ..
-      "the requested velocity.",
-  }
+  return note_edit.apply(command, {
+    fields = { "velocity" },
+    shape_hint = "[ppq, pitch, velocity]",
+    plan = velocity_plan,
+    noun = "velocity",
+    unconfirmed_code = "VELOCITY_WRITE_UNCONFIRMED",
+    bucket_text = function(resolved)
+      return #resolved.missing .. " missing, " .. #resolved.ambiguous ..
+        " ambiguous, " .. #resolved.invalid .. " outside 1-127"
+    end,
+    write = function(take, hit)
+      reaper.MIDI_SetNote(take, hit.index, nil, nil, nil, nil, nil, nil, hit.to, true)
+    end,
+    confirm = function(by_key, hit)
+      local note = by_key[hit.ppq .. ":" .. hit.pitch]
+      if note and note.velocity == hit.to then return true end
+      return false, { ppq = hit.ppq, pitch = hit.pitch, wanted = hit.to,
+                      got = note and note.velocity or nil }
+    end,
+    finish = function(result, resolved, before, after)
+      result.velocity_before = velocity_summary(before)
+      result.velocity_after = velocity_summary(after)
+    end,
+  })
 end
 
 -- Pure: resolve requested (ppq, pitch -> new_ppq, new_end_ppq) rows against the
@@ -1299,46 +1258,23 @@ end
 -- would leave a take that no later read can address unambiguously, so
 -- destination collisions are refused here rather than discovered next session.
 local function position_plan(existing, requested)
-  local by_key, duplicated = {}, {}
-  for _, note in ipairs(existing) do
-    local key = note.ppq .. ":" .. note.pitch
-    if by_key[key] then duplicated[key] = true else by_key[key] = note end
-  end
-  local plan, missing, ambiguous, invalid, collisions = {}, {}, {}, {}, {}
-  local claimed = {}
-  for row, req in ipairs(requested) do
-    local key = tostring(req.ppq) .. ":" .. tostring(req.pitch)
-    local new_ppq = tonumber(req.new_ppq)
-    local new_end = tonumber(req.new_end_ppq)
-    new_ppq = new_ppq and math.floor(new_ppq + 0.5) or nil
-    new_end = new_end and math.floor(new_end + 0.5) or nil
-    local where = { row = row, ppq = req.ppq, pitch = req.pitch }
-    if not new_ppq or not new_end or new_ppq < 0 or new_end <= new_ppq then
-      where.new_ppq = req.new_ppq
-      where.new_end_ppq = req.new_end_ppq
-      where.reason = "new_ppq must be >= 0 and new_end_ppq must be greater than it"
-      invalid[#invalid + 1] = where
-    elseif duplicated[key] then
-      where.reason = "two notes share this tick and pitch"
-      ambiguous[#ambiguous + 1] = where
-    elseif claimed[key] then
-      where.reason = "this note was already addressed by row " .. claimed[key]
-      ambiguous[#ambiguous + 1] = where
-    elseif not by_key[key] then
-      missing[#missing + 1] = where
-    else
-      claimed[key] = row
-      local note = by_key[key]
-      plan[#plan + 1] = {
-        index = note.index,
-        ppq = note.ppq,
-        pitch = note.pitch,
-        end_ppq = note.end_ppq,
-        to_ppq = new_ppq,
-        to_end_ppq = new_end,
-      }
-    end
-  end
+  local resolved = note_edit.resolve_rows(existing, requested,
+    function(req, where)
+      local new_ppq = tonumber(req.new_ppq)
+      local new_end = tonumber(req.new_end_ppq)
+      new_ppq = new_ppq and math.floor(new_ppq + 0.5) or nil
+      new_end = new_end and math.floor(new_end + 0.5) or nil
+      if not new_ppq or not new_end or new_ppq < 0 or new_end <= new_ppq then
+        where.new_ppq = req.new_ppq
+        where.new_end_ppq = req.new_end_ppq
+        where.reason = "new_ppq must be >= 0 and new_end_ppq must be greater than it"
+        return nil
+      end
+      return { to_ppq = new_ppq, to_end_ppq = new_end }
+    end,
+    function(entry, note) entry.end_ppq = note.end_ppq end)
+  local plan, claimed = resolved.plan, resolved.claimed
+  local collisions = {}
 
   -- Where does every note in the take end up? Moved notes land on their
   -- requested tick; notes no row addressed stay exactly where they are.
@@ -1368,50 +1304,32 @@ local function position_plan(existing, requested)
     end
   end
 
-  return { plan = plan, missing = missing, ambiguous = ambiguous,
-           invalid = invalid, collisions = collisions }
+  resolved.collisions = collisions
+  return resolved
 end
 
-local function command_set_note_positions(command)
+-- Shared scaffold for the two note-edit commands: parse rows, resolve them,
+-- refuse all-or-nothing, write with noSort (MIDI_Sort renumbers notes, so
+-- sorting inside the loop would invalidate the indices the plan holds), then
+-- read the take back and confirm every note -- MIDI_SetNote returning true is
+-- a claim about the call, not about the note. `spec` supplies what differs:
+-- the row fields, the plan fn, the write, the confirm, and the result extras.
+function note_edit.apply(command, spec)
   local payload = command.payload or {}
-  local rows = payload.notes
-  if type(rows) ~= "table" or #rows == 0 then
-    error("BAD_PAYLOAD: notes must be a non-empty array of " ..
-          "[ppq, pitch, new_ppq, new_end_ppq]")
-  end
-
-  local requested = {}
-  for i, row in ipairs(rows) do
-    if type(row) ~= "table" then
-      error("BAD_PAYLOAD: notes[" .. i .. "] is neither an array nor an object")
-    end
-    if row.ppq ~= nil or row.pitch ~= nil then
-      requested[i] = { ppq = math.floor(tonumber(row.ppq) or -1),
-                       pitch = math.floor(tonumber(row.pitch) or -1),
-                       new_ppq = row.new_ppq,
-                       new_end_ppq = row.new_end_ppq }
-    else
-      requested[i] = { ppq = math.floor(tonumber(row[1]) or -1),
-                       pitch = math.floor(tonumber(row[2]) or -1),
-                       new_ppq = row[3],
-                       new_end_ppq = row[4] }
-    end
-  end
+  local requested = note_edit.parse_rows(payload.notes, spec.fields, spec.shape_hint)
 
   local take, track, track_index = midi_take_for(payload)
   local before = read_midi_notes(take)
-  local resolved = position_plan(before, requested)
-  local unresolved = #resolved.missing + #resolved.ambiguous +
-                     #resolved.invalid + #resolved.collisions
+  local resolved = spec.plan(before, requested)
+  local unresolved = #resolved.missing + #resolved.ambiguous + #resolved.invalid
+    + (resolved.collisions and #resolved.collisions or 0)
 
-  -- Same all-or-nothing stance as set_note_velocities. A timing pass is one
-  -- musical gesture; half of it applied is a part that drifts in and out of
-  -- feel, which is harder to diagnose by ear than no change at all.
+  -- Default is all-or-nothing. A velocity or timing pass is one musical
+  -- gesture: half of it applied is worse than none of it, because the half
+  -- that landed is indistinguishable by ear from the half that did not.
   if unresolved > 0 and payload.allow_partial ~= true then
     error("NOTE_MATCH_FAILED: " .. unresolved .. " of " .. #requested ..
-      " requested notes did not resolve (" .. #resolved.missing .. " missing, " ..
-      #resolved.ambiguous .. " ambiguous, " .. #resolved.invalid ..
-      " invalid, " .. #resolved.collisions .. " colliding at their destination" ..
+      " requested notes did not resolve (" .. spec.bucket_text(resolved) ..
       "); nothing was changed. The take holds " .. #before ..
       " notes. Re-read it with get_midi_notes and rebuild the request: the " ..
       "MIDI moved after the read this request was built from.")
@@ -1420,47 +1338,32 @@ local function command_set_note_positions(command)
     error("NOTE_MATCH_FAILED: no requested note resolved; nothing was changed")
   end
 
-  -- noSort on every write, one sort at the end: MIDI_Sort renumbers notes, so
-  -- sorting inside the loop would invalidate the indices the plan holds.
   for _, hit in ipairs(resolved.plan) do
-    reaper.MIDI_SetNote(take, hit.index, nil, nil, hit.to_ppq, hit.to_end_ppq,
-                        nil, nil, nil, true)
+    spec.write(take, hit)
   end
   reaper.MIDI_Sort(take)
   reaper.UpdateArrange()
 
-  -- Read the take back and confirm each note at its NEW key. MIDI_SetNote
-  -- returning true is a claim about the call, not about the note.
   local after = read_midi_notes(take)
   local by_key = {}
   for _, note in ipairs(after) do by_key[note.ppq .. ":" .. note.pitch] = note end
   local confirmed, wrong = 0, {}
   for _, hit in ipairs(resolved.plan) do
-    local note = by_key[hit.to_ppq .. ":" .. hit.pitch]
-    if note and note.ppq == hit.to_ppq and note.end_ppq == hit.to_end_ppq then
+    local ok, wrong_entry = spec.confirm(by_key, hit)
+    if ok then
       confirmed = confirmed + 1
     else
-      wrong[#wrong + 1] = { from_ppq = hit.ppq, pitch = hit.pitch,
-                            wanted_ppq = hit.to_ppq,
-                            got_ppq = note and note.ppq or nil,
-                            wanted_end_ppq = hit.to_end_ppq,
-                            got_end_ppq = note and note.end_ppq or nil }
+      wrong[#wrong + 1] = wrong_entry
     end
   end
   if #wrong > 0 then
-    error("POSITION_WRITE_UNCONFIRMED: " .. #wrong .. " of " .. #resolved.plan ..
-      " notes did not read back at the requested position. The edit is inside " ..
-      "one undo block; one REAPER undo reverts it.")
+    error(spec.unconfirmed_code .. ": " .. #wrong .. " of " .. #resolved.plan ..
+      " notes did not read back at the requested " .. spec.noun ..
+      ". The edit is inside one undo block; one REAPER undo reverts it.")
   end
 
   local _, track_name = reaper.GetTrackName(track, "")
-  local moved_max, moved_total = 0, 0
-  for _, hit in ipairs(resolved.plan) do
-    local d = math.abs(hit.to_ppq - hit.ppq)
-    if d > moved_max then moved_max = d end
-    moved_total = moved_total + d
-  end
-  return {
+  local result = {
     track = { index = track_index, name = track_name },
     requested = #requested,
     applied = #resolved.plan,
@@ -1469,12 +1372,53 @@ local function command_set_note_positions(command)
     missing = resolved.missing,
     ambiguous = resolved.ambiguous,
     invalid = resolved.invalid,
-    collisions = resolved.collisions,
-    max_move_ticks = moved_max,
-    mean_move_ticks = moved_total / #resolved.plan,
     verified_note = "Every applied note was re-read from the take and matched " ..
-      "the requested position.",
+      "the requested " .. spec.noun .. ".",
   }
+  spec.finish(result, resolved, before, after)
+  return result
+end
+
+local function command_set_note_positions(command)
+  return note_edit.apply(command, {
+    fields = { "new_ppq", "new_end_ppq" },
+    shape_hint = "[ppq, pitch, new_ppq, new_end_ppq]",
+    plan = position_plan,
+    noun = "position",
+    unconfirmed_code = "POSITION_WRITE_UNCONFIRMED",
+    bucket_text = function(resolved)
+      return #resolved.missing .. " missing, " .. #resolved.ambiguous ..
+        " ambiguous, " .. #resolved.invalid .. " invalid, " ..
+        #resolved.collisions .. " colliding at their destination"
+    end,
+    write = function(take, hit)
+      reaper.MIDI_SetNote(take, hit.index, nil, nil, hit.to_ppq, hit.to_end_ppq,
+                          nil, nil, nil, true)
+    end,
+    -- Confirm each note at its NEW key: the move rewrote the address.
+    confirm = function(by_key, hit)
+      local note = by_key[hit.to_ppq .. ":" .. hit.pitch]
+      if note and note.ppq == hit.to_ppq and note.end_ppq == hit.to_end_ppq then
+        return true
+      end
+      return false, { from_ppq = hit.ppq, pitch = hit.pitch,
+                      wanted_ppq = hit.to_ppq,
+                      got_ppq = note and note.ppq or nil,
+                      wanted_end_ppq = hit.to_end_ppq,
+                      got_end_ppq = note and note.end_ppq or nil }
+    end,
+    finish = function(result, resolved)
+      local moved_max, moved_total = 0, 0
+      for _, hit in ipairs(resolved.plan) do
+        local d = math.abs(hit.to_ppq - hit.ppq)
+        if d > moved_max then moved_max = d end
+        moved_total = moved_total + d
+      end
+      result.collisions = resolved.collisions
+      result.max_move_ticks = moved_max
+      result.mean_move_ticks = moved_total / #resolved.plan
+    end,
+  })
 end
 
 local function command_play()
@@ -1982,25 +1926,13 @@ local SNAPSHOT_STATE_DIR = join(root, "state", "snapshots")
 
 local function enumerate_track_fx(track)
   local fx = {}
-  for i = 0, reaper.TrackFX_GetCount(track) - 1 do
-    local _, name = reaper.TrackFX_GetFXName(track, i, "")
+  for_each_fx(track, function(i, api_index, scope, name)
     fx[#fx + 1] = {
-      guid = reaper.TrackFX_GetFXGUID(track, i),
-      index = i, api_index = i, scope = "track", name = name,
-      enabled = reaper.TrackFX_GetEnabled(track, i),
+      guid = reaper.TrackFX_GetFXGUID(track, api_index),
+      index = i, api_index = api_index, scope = scope, name = name,
+      enabled = reaper.TrackFX_GetEnabled(track, api_index),
     }
-  end
-  if reaper.TrackFX_GetRecCount then
-    for i = 0, reaper.TrackFX_GetRecCount(track) - 1 do
-      local api_index = 0x1000000 + i
-      local _, name = reaper.TrackFX_GetFXName(track, api_index, "")
-      fx[#fx + 1] = {
-        guid = reaper.TrackFX_GetFXGUID(track, api_index),
-        index = i, api_index = api_index, scope = "input", name = name,
-        enabled = reaper.TrackFX_GetEnabled(track, api_index),
-      }
-    end
-  end
+  end)
   return fx
 end
 
@@ -2833,16 +2765,7 @@ end
 local function command_delete_items_in_range(command)
   local payload = command.payload or {}
   local start_time, range_end = resolve_position(payload.range or payload.position or { type = "time_selection" })
-  local end_time = range_end
-  if not end_time then
-    if payload.length_bars then
-      end_time = bars_from(start_time, tonumber(payload.length_bars) or 1)
-    elseif payload.length_seconds then
-      end_time = start_time + (tonumber(payload.length_seconds) or 0)
-    else
-      error("BAD_RANGE: range needs an explicit end, length_bars, or length_seconds")
-    end
-  end
+  local end_time = range_end or resolve_range_end(payload, start_time)
   local targets = {}
   if payload.all_tracks == true then
     for i = 0, reaper.CountTracks(0) - 1 do targets[#targets + 1] = reaper.GetTrack(0, i) end
@@ -3055,10 +2978,6 @@ local function command_get_selected_track(command)
   return {
     selected = true,
     selected_count = selected_count,
-    -- Top-level name/guid kept for compatibility with the pre-3.11 minimal
-    -- reply shape; track{} is the canonical location.
-    name = summary.name,
-    guid = summary.guid,
     track = summary,
     fx_count = reaper.TrackFX_GetCount(track),
     item_count = item_count,
@@ -3522,32 +3441,24 @@ end
 
 local function scan_track_fx(track, include_values, max_params)
   local entries = {}
-  local function scan(count, api_offset, scope)
-    for fx = 0, count - 1 do
-      local api_index = api_offset + fx
-      local _, fx_name = reaper.TrackFX_GetFXName(track, api_index, "")
-      local entry = fx_summary(track, api_index, fx, scope, fx_name, {
-        enabled = reaper.TrackFX_GetEnabled(track, api_index),
-        parameter_count = reaper.TrackFX_GetNumParams(track, api_index),
-      })
-      entry.parameters = {}
-      local limit = math.min(entry.parameter_count, max_params)
-      for p = 0, limit - 1 do
-        if include_values then
-          entry.parameters[#entry.parameters + 1] = get_fx_param_info(track, api_index, p)
-        else
-          local _, pname = reaper.TrackFX_GetParamName(track, api_index, p, "")
-          entry.parameters[#entry.parameters + 1] = { index = p, name = pname }
-        end
+  for_each_fx(track, function(fx, api_index, scope, fx_name)
+    local entry = fx_summary(track, api_index, fx, scope, fx_name, {
+      enabled = reaper.TrackFX_GetEnabled(track, api_index),
+      parameter_count = reaper.TrackFX_GetNumParams(track, api_index),
+    })
+    entry.parameters = {}
+    local limit = math.min(entry.parameter_count, max_params)
+    for p = 0, limit - 1 do
+      if include_values then
+        entry.parameters[#entry.parameters + 1] = get_fx_param_info(track, api_index, p)
+      else
+        local _, pname = reaper.TrackFX_GetParamName(track, api_index, p, "")
+        entry.parameters[#entry.parameters + 1] = { index = p, name = pname }
       end
-      entry.parameters_truncated = entry.parameter_count > limit
-      entries[#entries + 1] = entry
     end
-  end
-  scan(reaper.TrackFX_GetCount(track), 0, "track")
-  if reaper.TrackFX_GetRecCount then
-    scan(reaper.TrackFX_GetRecCount(track), 0x1000000, "input")
-  end
+    entry.parameters_truncated = entry.parameter_count > limit
+    entries[#entries + 1] = entry
+  end)
   return entries
 end
 
@@ -3623,6 +3534,7 @@ local function command_discover_drum_map(command)
   local max_pitch = payload.max_pitch or 127
   local notes = {}
   local any_name = false
+  local note_count = 0
   for _, chan in ipairs(channels) do
     for pitch = 0, max_pitch do
       -- GetTrackMIDINoteNameEx takes the MediaTrack (the non-Ex variant wants
@@ -3635,6 +3547,7 @@ local function command_discover_drum_map(command)
         -- channel so the agent can report which channel a kit lives on.
         if notes[tostring(pitch)] == nil then
           notes[tostring(pitch)] = { name = name, channel = chan }
+          note_count = note_count + 1
         end
       end
     end
@@ -3650,9 +3563,7 @@ local function command_discover_drum_map(command)
     fx = fx_names,
     channels = channels,
     has_note_names = any_name,
-    note_count = (function()
-      local n = 0; for _ in pairs(notes) do n = n + 1 end return n
-    end)(),
+    note_count = note_count,
     notes = notes,
   }
 end
@@ -3930,8 +3841,6 @@ handlers.get_items = function(command)
         entry.source_length = length
         entry.source_length_is_qn = is_qn and true or false
       end
-    else
-      entry.take_name = nil
     end
     items[#items + 1] = entry
   end

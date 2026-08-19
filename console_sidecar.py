@@ -204,12 +204,6 @@ def utc_date(ts=None):
     return dt.strftime("%Y-%m-%d")
 
 
-def stamped_id():
-    """Timestamp-prefixed id so a sorted listing is chronological."""
-    return (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            + "-" + secrets.token_hex(4))
-
-
 # ---------------------------------------------------------------------------
 # Write classes. The distinction between them is load-bearing.
 # ---------------------------------------------------------------------------
@@ -1196,7 +1190,6 @@ class ConsoleSidecar:
             "control": os.path.join(self.console, "control"),
             "events": os.path.join(self.console, "events"),
             "raw": os.path.join(self.console, "raw"),
-            "audio": os.path.join(self.console, "audio"),
         }
         for path in self.dirs.values():
             os.makedirs(path, exist_ok=True)
@@ -1222,7 +1215,6 @@ class ConsoleSidecar:
 
         self.status = "starting"
         self.capabilities = set()
-        self.child_tools = None
         self.turn_in_flight = False
         self.turn_started = None
         self.turn_seq = 0
@@ -1247,9 +1239,12 @@ class ConsoleSidecar:
         self.started_at = time.time()
         self.stop_reason = None
         self._stopping = threading.Event()
+        # At most one control request is ever in flight (interrupt() is the
+        # only producer), so one event + one result slot replace the old
+        # per-request-id dicts, which leaked entries on wait=False.
         self._control_seq = 0
-        self._control_waiters = {}
-        self._control_results = {}
+        self._control_done = threading.Event()
+        self._control_result = None
         self._result_event = threading.Event()
         self._readers = []
         self._stderr_thread = None
@@ -1428,7 +1423,6 @@ class ConsoleSidecar:
                 "warn_pending": not self.warn_acknowledged,
                 "cache_cold": self.cache_cold,
                 "capabilities": sorted(self.capabilities),
-                "tool_count": self.child_tools,
                 "events_file": (os.path.relpath(self.events_path, self.root).replace("\\", "/")
                                 if self.events_path else None),
                 "bridge_ok": self.bridge_ok,
@@ -1606,9 +1600,6 @@ class ConsoleSidecar:
         if isinstance(caps, dict):
             caps = [k for k, v in caps.items() if v]
         self.capabilities = set(str(c) for c in caps)
-        tools = obj.get("tools")
-        if isinstance(tools, list):
-            self.child_tools = len(tools)
         if sid and self.session_id and sid != self.session_id:
             # Not fatal, but worth a loud log: the id we minted is the one the
             # panel's events file is named after.
@@ -1639,11 +1630,8 @@ class ConsoleSidecar:
 
     def _on_control_response(self, obj):
         response = obj.get("response") or {}
-        rid = response.get("request_id") or obj.get("request_id")
-        self._control_results[rid] = response
-        waiter = self._control_waiters.get(rid)
-        if waiter is not None:
-            waiter.set()
+        self._control_result = response
+        self._control_done.set()
 
     def _on_tool_call(self, event):
         """Park a mutating call until its result says whether it landed. A tool
@@ -1914,22 +1902,19 @@ class ConsoleSidecar:
                        "child has not advertised interrupt_receipt_v1")
         self._control_seq += 1
         rid = f"req_{self._control_seq}"
-        waiter = threading.Event()
-        self._control_waiters[rid] = waiter
+        self._control_done.clear()
+        self._control_result = None
         failure = self._write_stdin({"type": "control_request",
                                      "request_id": rid,
                                      "request": {"subtype": "interrupt"}})
         if failure:
-            self._control_waiters.pop(rid, None)
             return failure
         if not wait:
             return ok(request_id=rid, awaited=False)
-        if not waiter.wait(self.stdin_timeout):
-            self._control_waiters.pop(rid, None)
+        if not self._control_done.wait(self.stdin_timeout):
             return err("INTERRUPT_TIMEOUT",
                        f"no control_response within {self.stdin_timeout}s")
-        self._control_waiters.pop(rid, None)
-        return ok(response=self._control_results.pop(rid, None))
+        return ok(response=self._control_result)
 
     # -- panel / control polling ------------------------------------------
 
@@ -2149,7 +2134,7 @@ class ConsoleSidecar:
             return []
         self._last_sweep = now
         entries = []
-        for name in ("events", "raw", "audio"):
+        for name in ("events", "raw"):
             for path in glob.glob(os.path.join(self.dirs[name], "*")):
                 try:
                     stat = os.stat(path)

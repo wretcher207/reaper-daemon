@@ -50,12 +50,39 @@ def load_maps():
     return maps
 
 
+# Fallbacks for roles a sparse map does not carry: try each candidate in
+# order. Consumed two ways: mapdetect fills a discovered map by trying each
+# candidate against the directly-matched roles, and groovekit's renderer
+# walks a single-parent chain built from the FIRST candidate of each list.
+ROLE_FALLBACKS = {
+    "KICK_L":          ["KICK_R"],
+    "SNARE_FLAM":      ["SNARE"],
+    "SNARE_GHOST":     ["SNARE"],
+    "SNARE_RIM":       ["SNARE"],
+    "HH_CLOSED_EDGE":  ["HH_CLOSED_TIP"],
+    "HH_OPEN_2":       ["HH_OPEN_1"],
+    "HH_OPEN_3":       ["HH_OPEN_1"],
+    "HH_PEDAL":        ["HH_CLOSED_TIP"],
+    "RIDE_CRASH":      ["RIDE_TIP", "RIDE_BELL"],
+    "RIDE_BELL":       ["RIDE_TIP"],
+    "BIG_CRASH":       ["CRASH_R", "CRASH_L"],
+    "CRASH_L":         ["CRASH_R"],
+    "CHINA_L":         ["CHINA_R"],
+    "SPLASH_L":        ["SPLASH_R"],
+    "TOM_2":           ["TOM_1"],
+    "TOM_3":           ["TOM_2", "TOM_1"],
+    "TOM_4":           ["TOM_3", "TOM_2", "TOM_1"],
+    "BELL":            ["RIDE_BELL"],
+    "STACK":           ["CHINA_R", "CRASH_R"],
+    # Choke articulations (hit-and-grab) are OPTIONAL roles — not in
+    # ROLE_KEYS, so maps aren't required to have them. A kit without choke
+    # notes (GM, Monarch, ...) degrades to the open cymbal instead of
+    # dropping the hit.
+    "CHINA_CHOKE":     ["CHINA_R"],
+    "CRASH_CHOKE":     ["CRASH_R"],
+    "SPLASH_CHOKE":    ["SPLASH_R"],
+}
+
+
 def load_grooves():
     return json.loads((_CATALOG / "grooves.json").read_text())
-
-
-def find_groove(name):
-    for g in load_grooves():
-        if g["name"].lower() == name.lower():
-            return g
-    raise KeyError(f"NO_GROOVE: {name}")

@@ -6,52 +6,33 @@ Two layers:
      jitter with unison lock) automatically in render().
 
 It authors via the step-grid DSL, not a named-groove catalog: it does NOT use
-grooves.json / find_groove. It reuses smf.write_smf / smf.parse_smf and
-catalog.load_maps, plus a handful of behaviours (originally ported from the
-now-removed feel/render modules):
+grooves.json. It reuses smf.write_smf / smf.parse_smf and catalog.load_maps,
+plus a handful of behaviours (originally ported from the now-removed
+feel/render modules):
   - ROLE_LIMB map
   - CLOSED_TO_OPEN (hat falls open when the left foot kicks anywhere in the bar)
-  - LEFT_FOOT_STRENGTH = 92 (left-foot kick velocity * 0.92)
-  - kick R/L alternation on consecutive kick hits
+  - kick R/L alternation on consecutive kick hits (the off foot lands
+    7-9 velocity lower in a genuine fast run)
   - a per-(bar,step) timing offset cache so simultaneous hits share one offset
 """
 
 import math
 import random
 
+from .catalog import ROLE_FALLBACKS as _ROLE_FALLBACK_LISTS
 from .catalog import load_maps
 from .smf import write_smf
 
 # Fallbacks for sparse maps (e.g. a discovered map with no explicit snare
-# ghost articulation). render() resolves each role through this table so a
-# missing role routes to its parent piece instead of KeyError-ing.
-ROLE_FALLBACKS = {
-    "KICK_L": "KICK_R",
-    "SNARE_FLAM": "SNARE", "SNARE_GHOST": "SNARE", "SNARE_RIM": "SNARE",
-    "HH_CLOSED_EDGE": "HH_CLOSED_TIP",
-    "HH_OPEN_2": "HH_OPEN_1", "HH_OPEN_3": "HH_OPEN_1",
-    "HH_PEDAL": "HH_CLOSED_TIP",
-    "RIDE_CRASH": "RIDE_TIP", "RIDE_BELL": "RIDE_TIP",
-    "BIG_CRASH": "CRASH_R", "CRASH_L": "CRASH_R",
-    "CHINA_L": "CHINA_R",
-    "SPLASH_L": "SPLASH_R",
-    "TOM_2": "TOM_1", "TOM_3": "TOM_2", "TOM_4": "TOM_3",
-    "BELL": "RIDE_BELL",
-    "STACK": "CHINA_R",
-    # Choke articulations (hit-and-grab) are OPTIONAL roles — not in
-    # ROLE_KEYS, so maps aren't required to have them. A kit without choke
-    # notes (GM, Monarch, ...) degrades to the open cymbal instead of
-    # dropping the hit.
-    "CHINA_CHOKE": "CHINA_R",
-    "CRASH_CHOKE": "CRASH_R",
-    "SPLASH_CHOKE": "SPLASH_R",
-}
+# ghost articulation). render() resolves each role through this chain so a
+# missing role routes to its parent piece instead of KeyError-ing. Derived
+# from the shared ordered-list table in catalog.py: pitch_for() walks parent
+# by parent, so it takes each list's first (preferred) candidate.
+ROLE_FALLBACKS = {role: chain[0] for role, chain in _ROLE_FALLBACK_LISTS.items()}
 
 # ---------------------------------------------------------------------------
 # Ported constants / behaviour
 # ---------------------------------------------------------------------------
-
-LEFT_FOOT_STRENGTH = 92  # percent; left-foot kick velocity * 0.92
 
 NOTE_DUR_QN = 0.12  # like the old NOTE_DUR_QN
 
@@ -169,7 +150,6 @@ HAT_OPEN_VARS = ["HH_OPEN_1", "HH_OPEN_2", "HH_OPEN_3"]
 
 # A cell is one of these characters.
 CELL_REST = "."
-CELL_HIT = "x"
 CELL_ACCENT = "X"
 CELL_GHOST = "o"
 CELL_FLAM = "f"
@@ -530,7 +510,7 @@ def render(sections, params, rng):
                 prev = g
             _flush(streak)
 
-            intents = []  # ordered: dict(gstep, role, vel, is_left)
+            intents = []  # ordered: dict(gstep, bar, step_in_bar, role, vel, cell)
             for gstep, c in enumerate(full):
                 if c == CELL_REST:
                     continue
@@ -599,8 +579,7 @@ def render(sections, params, rng):
 
                 intents.append({
                     "gstep": gstep, "bar": bar_idx, "step_in_bar": step_in_bar,
-                    "role": role, "vel": vel, "is_left": is_left,
-                    "cell": c,
+                    "role": role, "vel": vel, "cell": c,
                 })
 
             # ----- (5) FATIGUE ENVELOPE on runs -----

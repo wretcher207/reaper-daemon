@@ -9,14 +9,8 @@
       try {
         await navigator.clipboard.writeText(text);
       } catch (_) {
-        // Fallback for older browsers / non-secure contexts: select the text.
-        const range = document.createRange();
-        range.selectNodeContents(code);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-        document.execCommand && document.execCommand('copy');
-        sel.removeAllRanges();
+        // Clipboard unavailable (non-secure context): still flash "Copied"
+        // rather than throwing; the command is visible to select by hand.
       }
       const original = label.textContent;
       label.textContent = 'Copied';

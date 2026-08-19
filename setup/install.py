@@ -41,11 +41,6 @@ def find_resource_dir():
     return os.path.join(xdg, "REAPER")
 
 
-def bridge_dir_for(repo_root):
-    """Absolute path to this clone's bridge/ folder."""
-    return os.path.join(os.path.abspath(repo_root), "bridge")
-
-
 def block_text(bridge_dir):
     # Escape backslashes and double quotes so the path is safe inside a Lua
     # double-quoted string (matters on Windows, and for paths containing ").
@@ -161,7 +156,7 @@ def strip_block(text):
 
 
 def install(repo_root, resource_dir, dry_run=False):
-    bridge_dir = bridge_dir_for(repo_root)
+    bridge_dir = os.path.join(os.path.abspath(repo_root), "bridge")
     bridge_file = os.path.join(bridge_dir, "reaper_agent_bridge.lua")
     if not os.path.isdir(resource_dir):
         print(f"error: REAPER resource dir not found at: {resource_dir}", file=sys.stderr)

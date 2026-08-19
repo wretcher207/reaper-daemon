@@ -1,6 +1,5 @@
 {
   "bridge_root": "",
   "poll_interval_seconds": 0.25,
-  "allow_risk_level_3": false,
-  "bridge_version": 3
+  "allow_risk_level_3": false
 }

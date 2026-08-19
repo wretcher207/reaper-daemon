@@ -377,10 +377,10 @@ end
 -- Pure guard for an evidence-backed parameter restore. `restore` means the
 -- value is still exactly the agent's result; `already` is idempotent; `changed`
 -- refuses to overwrite a later human or agent edit.
-function M.restore_decision(current, before, after, epsilon)
+function M.restore_decision(current, before, after)
   current, before, after = tonumber(current), tonumber(before), tonumber(after)
   if not current or not before or not after then return "incomplete" end
-  epsilon = tonumber(epsilon) or 0.000001
+  local epsilon = 0.000001
   if math.abs(current - before) <= epsilon then return "already" end
   if math.abs(current - after) <= epsilon then return "restore" end
   return "changed"
@@ -458,7 +458,6 @@ local S = {
   last_focus = 0,
   frame = 0,
   force_bottom = true,
-  spawn_attempted = false,
   edits = 0,
   seen_tools = {},
   ab_enabled = nil,
@@ -1180,7 +1179,6 @@ reaper.RecursiveCreateDirectory(P.events, 0)
 reaper.RecursiveCreateDirectory(join(BRIDGE_ROOT, "logs"), 0)
 
 S.start_time = reaper.time_precise()
-S.last_beat = 0
 log("panel opened; root=" .. BRIDGE_ROOT)
 
 -- Start the sidecar if nothing is publishing state. Done once, at open: a

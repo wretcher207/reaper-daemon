@@ -20,7 +20,7 @@ Public API:
 
 import re
 
-from .catalog import ROLE_KEYS
+from .catalog import ROLE_FALLBACKS, ROLE_KEYS
 
 # ---------------------------------------------------------------------------
 # Family / modifier detection
@@ -152,36 +152,8 @@ def classify(name):
 # Role assembly
 # ---------------------------------------------------------------------------
 
-# Roles that have no direct counterpart in most libraries and are filled by
-# falling back to a sibling role. Order = try in sequence.
-FALLBACKS = {
-    "KICK_L":          ["KICK_R"],
-    "SNARE_FLAM":      ["SNARE"],
-    "SNARE_GHOST":     ["SNARE"],
-    "SNARE_RIM":       ["SNARE"],
-    "HH_CLOSED_EDGE":  ["HH_CLOSED_TIP"],
-    "HH_OPEN_2":       ["HH_OPEN_1"],
-    "HH_OPEN_3":       ["HH_OPEN_1"],
-    "RIDE_CRASH":      ["RIDE_TIP", "RIDE_BELL"],
-    "BIG_CRASH":       ["CRASH_R", "CRASH_L"],
-    "CRASH_L":         ["CRASH_R"],
-    "CHINA_L":         ["CHINA_R"],
-    "SPLASH_L":        ["SPLASH_R"],
-    "TOM_2":           ["TOM_1"],
-    "TOM_3":           ["TOM_2", "TOM_1"],
-    "TOM_4":           ["TOM_3", "TOM_2", "TOM_1"],
-    "BELL":            ["RIDE_BELL"],
-    "STACK":           ["CHINA_R", "CRASH_R"],
-    "HH_PEDAL":        ["HH_CLOSED_TIP"],
-}
-
-
-def _resolve_fallback(role, direct, seen):
-    """Return a pitch for ``role`` via the fallback chain, or None."""
-    for fb in FALLBACKS.get(role, []):
-        if fb in direct:
-            return direct[fb]
-    return None
+# Roles missing from a library fall back to a sibling role via the shared
+# ROLE_FALLBACKS table in catalog.py (order = try in sequence).
 
 
 def match_roles(notes):
@@ -227,10 +199,6 @@ def match_roles(notes):
 
     direct = {}
 
-    def pick(bucket, keyfn):
-        """Sort a bucket and return it (stable by keyfn then pitch)."""
-        return sorted(bucket, key=lambda d: (keyfn(d), d["pitch"]))
-
     # --- kick -------------------------------------------------------------
     if buckets["kick"]:
         ks = sorted(buckets["kick"], key=lambda d: d["pitch"])
@@ -243,7 +211,7 @@ def match_roles(notes):
         flams = [d for d in buckets["snare"] if d["mod"] == "flam"]
         rims = [d for d in buckets["snare"] if d["mod"] == "rim"]
         mains = [d for d in buckets["snare"] if d["mod"] is None]
-        main = pick(mains, lambda d: 0) if mains else pick(buckets["snare"], lambda d: 0)
+        main = sorted(mains or buckets["snare"], key=lambda d: d["pitch"])
         direct["SNARE"] = main[0]["pitch"]
         if ghosts:
             direct["SNARE_GHOST"] = ghosts[0]["pitch"]
@@ -336,9 +304,10 @@ def match_roles(notes):
     for role in ROLE_KEYS:
         if role in direct:
             continue
-        p = _resolve_fallback(role, direct, set())
-        if p is not None:
-            fallback[role] = p
+        for fb in ROLE_FALLBACKS.get(role, []):
+            if fb in direct:
+                fallback[role] = direct[fb]
+                break
 
     full = dict(direct)
     full.update(fallback)
