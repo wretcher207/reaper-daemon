@@ -67,6 +67,7 @@ def test_tools_list_names_and_schemas():
     tools = {t["name"]: t for t in resp["result"]["tools"]}
     for expected in ("get_status", "get_context", "scan_fx", "track", "fx",
                      "set_fx_param", "get_fx_param_automation", "batch",
+                     "write_automation", "apply_automation_transaction",
                      "capture_track_audio",
                      "verify_change", "tune_param",
                      "analyze_track", "compare_tracks",
@@ -98,6 +99,32 @@ def test_get_fx_param_automation_forwards_read_only_payload(root):
     assert record[0]["payload"]["target_track_guid"] == "{TRACK}"
     assert record[0]["payload"]["fx_guid"] == "{FX}"
     assert record[0]["dry_run"] is False
+
+
+def test_apply_automation_transaction_forwards_writes(root):
+    record = []
+    fake_bridge(root, {"ok": True, "type": "apply_automation_transaction",
+                       "data": {"rolled_back": False, "transaction_id": "tx-01",
+                                "touched_envelopes": [
+                                    {"track_guid": "{L}", "param_index": 13},
+                                    {"track_guid": "{R}", "param_index": 13}]}},
+                record=record)
+    writes = [
+        {"target_track_guid": "{L}", "fx_guid": "{FX-L}", "param_index": 13,
+         "points": [{"time": 10.0, "value": 1.0}]},
+        {"target_track_guid": "{R}", "fx_guid": "{FX-R}", "param_index": 13,
+         "points": [{"time": 10.0, "value": 1.0}]},
+    ]
+    resp = call("apply_automation_transaction",
+                {"writes": writes, "transaction_id": "tx-01", "dry_run": True})
+    body = json.loads(result_text(resp))
+    assert body["ok"] is True
+    assert body["data"]["rolled_back"] is False
+    assert len(body["data"]["touched_envelopes"]) == 2
+    assert record[0]["type"] == "apply_automation_transaction"
+    assert record[0]["payload"]["writes"] == writes
+    assert record[0]["payload"]["transaction_id"] == "tx-01"
+    assert record[0]["dry_run"] is True
 
 
 def test_unknown_method_is_32601():

@@ -1036,5 +1036,345 @@ eq(present.neighbor_after.time, 21, "handler reports following neighbor")
 eq(present.automation_items[1].pool_id, 12, "automation item pool identity is reported")
 eq(present.automation_items[1].muted, false, "automation item mute state is reported")
 
+-- Musical automation phase 2: transactional writes. A mutable fake envelope
+-- stands in for the real object; every claim is proved by rereading it, never
+-- by trusting the write path's own bookkeeping.
+local function make_fake_envelope(points)
+  local env = {
+    points = {},
+    state = { B_ACTIVE = 1, B_VISIBLE = 0, B_ARM = 0, I_TCPH = 0 },
+    items = {}, exists = true, created = false,
+    fail_insert_at = nil, corrupt_value_at = nil,
+  }
+  for _, p in ipairs(points or {}) do
+    env.points[#env.points + 1] = {
+      time = p[1], value = p[2], shape = p[3] or 0,
+      tension = p[4] or 0, selected = p[5] or false,
+    }
+  end
+  return env
+end
+
+local write_track_mode = 1
+local envelopes = {}            -- track guid -> fake envelope (or nil = absent)
+local automation_write = auto.write_command
+local automation_transaction = auto.transaction_command
+local function bind_write_fakes()
+  _G.reaper.GetTrack = function(_, index)
+    if index == 0 then return "L-track" end
+    if index == 1 then return "R-track" end
+    return nil
+  end
+  _G.reaper.CountTracks = function() return 2 end
+  _G.reaper.GetTrackGUID = function(track)
+    if track == "L-track" then return "{L}" end
+    if track == "R-track" then return "{R}" end
+    return "{MASTER}"
+  end
+  _G.reaper.GetTrackName = function(track)
+    if track == "L-track" then return true, "Guitar L" end
+    if track == "R-track" then return true, "Guitar R" end
+    return true, "Automation Track"
+  end
+  _G.reaper.TrackFX_GetFXGUID = function(track)
+    if track == "L-track" then return "{FX-L}" end
+    if track == "R-track" then return "{FX-R}" end
+    return "{AUTO-FX}"
+  end
+  _G.reaper.GetFXEnvelope = function(track, _, _, create)
+    local env = envelopes[reaper.GetTrackGUID(track)]
+    if env and env.exists then return env end
+    if create and env then env.exists, env.created = true, true; return env end
+    return nil
+  end
+  _G.reaper.CountEnvelopePointsEx = function(env, item)
+    return item == -1 and #env.points or 0
+  end
+  _G.reaper.GetEnvelopePointEx = function(env, item, index)
+    local p = env.points[index + 1]
+    if not p then return false end
+    local value = p.value
+    if env.corrupt_value_at and math.abs(p.time - env.corrupt_value_at) < 1e-9 then
+      value = value + 0.01
+    end
+    return true, p.time, value, p.shape, p.tension, p.selected
+  end
+  _G.reaper.InsertEnvelopePointEx = function(env, _, time, value, shape, tension, selected)
+    if env.fail_insert_at and math.abs(time - env.fail_insert_at) < 1e-9 then
+      return false
+    end
+    env.points[#env.points + 1] = {
+      time = time, value = value, shape = shape,
+      tension = tension, selected = selected,
+    }
+    return true
+  end
+  _G.reaper.DeleteEnvelopePointEx = function(env, _, index)
+    table.remove(env.points, index + 1)
+    return true
+  end
+  _G.reaper.Envelope_SortPoints = function(env)
+    table.sort(env.points, function(a, b) return a.time < b.time end)
+    return true
+  end
+  _G.reaper.GetEnvelopeInfo_Value = function(env, key) return env.state[key] end
+  _G.reaper.SetEnvelopeInfo_Value = function(env, key, value)
+    env.state[key] = value
+    return true
+  end
+  _G.reaper.CountAutomationItems = function(env) return #env.items end
+  _G.reaper.GetSetAutomationItemInfo = function(env, index, key)
+    local item = env.items[index + 1]
+    return item and item[key] or 0
+  end
+  _G.reaper.GetMediaTrackInfo_Value = function(_, key)
+    if key == "I_AUTOMODE" then return write_track_mode end
+    return 0
+  end
+  _G.reaper.SetMediaTrackInfo_Value = function(_, key, value)
+    if key == "I_AUTOMODE" then write_track_mode = math.floor(value + 0.5) end
+    return true
+  end
+  _G.reaper.SetCursorContext = function() end
+  _G.reaper.TrackList_AdjustWindows = function() end
+  _G.reaper.UpdateArrange = function() end
+  _G.reaper.TimeMap2_timeToBeats = function(_, time) return time, 0 end
+end
+
+local function envelope_times(env)
+  local times = {}
+  for _, p in ipairs(env.points) do times[#times + 1] = p.time end
+  return times
+end
+
+local function write_payload(overrides)
+  local payload = {
+    target_track_guid = "{L}", fx_guid = "{FX-L}", param_index = 0,
+    ranges = { { start_time = 10, end_time = 20 } },
+    points = { { time = 12, value = 0.6 }, { time = 18, value = 0.7 } },
+  }
+  if overrides then
+    for key, value in pairs(overrides) do payload[key] = value end
+  end
+  return payload
+end
+
+-- Replacement writes exactly the declared scope, inclusively, and leaves
+-- neighbors untouched.
+bind_write_fakes()
+envelopes["{L}"] = make_fake_envelope({
+  { 9, 0.1 }, { 10, 0.2 }, { 15, 0.3, 1 }, { 20, 0.4 }, { 21, 0.5 },
+})
+local replaced = automation_write({ payload = write_payload() })
+eq(replaced.verification.requested, 2, "write reports requested point count")
+eq(replaced.verification.replaced, 3, "in-range preimage points are replaced")
+eq(replaced.verification.inserted, 2, "new points are inserted")
+eq(replaced.verification.skipped, 0, "nothing identical to skip")
+eq(replaced.verification.confirmed, 2, "reread confirms written points")
+eq(replaced.verification.refused, 0, "nothing refused on success")
+eq(replaced.inserted_count, 2, "legacy inserted_count agrees with verification")
+eq(replaced.cleared_range.start_time, 10, "cleared range reports inclusive start")
+eq(replaced.cleared_range.end_time, 20, "cleared range reports inclusive end")
+eq(#envelopes["{L}"].points, 4, "neighbors survive the replacement")
+eq(envelopes["{L}"].points[1].time, 9, "neighbor before range is untouched")
+eq(envelopes["{L}"].points[1].value, 0.1, "neighbor before range keeps its value")
+eq(envelopes["{L}"].points[4].time, 21, "neighbor after range is untouched")
+eq(envelopes["{L}"].state.B_VISIBLE, 1, "successful write shows the envelope")
+eq(replaced.envelope.visible, true, "reply reports envelope shown")
+eq(replaced.automation_mode, "read", "reply reports track automation mode")
+eq(replaced.final_hash ~= nil, true, "reply carries the live canonical hash")
+
+-- Re-applying an identical point is idempotent: the existing point is kept,
+-- counted as skipped, and never deleted and re-inserted.
+envelopes["{L}"] = make_fake_envelope({
+  { 9, 0.1 }, { 10, 0.2 }, { 15, 0.3, 1 }, { 20, 0.4 }, { 21, 0.5 },
+})
+local idempotent = automation_write({ payload = write_payload({
+  points = { { time = 15, value = 0.3, shape = "square" }, { time = 16, value = 0.35 } },
+}) })
+eq(idempotent.verification.replaced, 2, "identical point is not counted as replaced")
+eq(idempotent.verification.skipped, 1, "identical point is skipped, not rewritten")
+eq(idempotent.verification.inserted, 1, "only the new point is inserted")
+eq(#envelopes["{L}"].points, 4, "identical point survives as one point")
+
+-- The 1e-7 boundary tolerance carries through the write path: nanosecond
+-- drift from bar/marker conversion is inside the inclusive range.
+envelopes["{L}"] = make_fake_envelope({ { 9, 0.1 }, { 20 + 1.4e-9, 0.4 }, { 21, 0.5 } })
+local drifted = automation_write({ payload = write_payload({
+  points = { { time = 20, value = 0.9 } },
+}) })
+eq(drifted.verification.replaced, 1, "nanosecond-drifted end boundary is replaced")
+eq(drifted.verification.confirmed, 1, "replacement at the boundary is confirmed")
+eq(envelopes["{L}"].points[2].value, 0.9, "boundary point holds the new value")
+
+-- Append mode (no ranges, no clear flag) inserts without deleting anything.
+envelopes["{L}"] = make_fake_envelope({ { 9, 0.1 }, { 10, 0.2 } })
+local appended = automation_write({ payload = write_payload({
+  ranges = {}, points = { { time = 30, value = 0.5 } },
+}) })
+eq(appended.verification.replaced, 0, "append mode replaces nothing")
+eq(appended.cleared_range, nil, "append mode reports no cleared range")
+eq(#envelopes["{L}"].points, 3, "append mode keeps preexisting points")
+
+-- Legacy clear_existing_in_range infers the scope from the point extent.
+envelopes["{L}"] = make_fake_envelope({ { 12, 0.2 }, { 18, 0.3 }, { 25, 0.4 } })
+local legacy = automation_write({ payload = write_payload({
+  ranges = {},
+  clear_existing_in_range = true,
+  points = { { time = 12, value = 0.6 }, { time = 18, value = 0.7 } },
+}) })
+eq(legacy.verification.replaced, 2, "legacy clear flag replaces the point extent")
+eq(#envelopes["{L}"].points, 3, "legacy inference leaves later points alone")
+
+-- Refusals prove the typed code and that nothing was mutated.
+local function refused(payload, expected_code, mutation_message)
+  envelopes["{L}"] = make_fake_envelope({ { 9, 0.1 }, { 15, 0.3 }, { 21, 0.5 } })
+  local before = envelope_times(envelopes["{L}"])
+  local ok, err = pcall(automation_write, { payload = payload })
+  eq(ok, false, "invalid write refuses instead of partially applying")
+  eq(ecf(err, "MISSING"), expected_code, mutation_message)
+  eq(#envelopes["{L}"].points, #before, "refused write changes no points")
+  eq(envelopes["{L}"].state.B_VISIBLE, 0, "refused write does not show the envelope")
+  return err
+end
+
+refused(write_payload({ points = { { time = 25, value = 0.5 } } }),
+  "POINT_OUTSIDE_RANGE", "point outside every declared range is refused")
+refused(write_payload({ points = { { time = 12, value = 1.5 } } }),
+  "BAD_POINT_VALUE", "out-of-range value is refused, not clamped")
+refused(write_payload({ points = { { time = 12, value = 0.5 },
+                                    { time = 12, value = 0.6 } } }),
+  "DUPLICATE_POINT_TIME", "duplicate request times are refused")
+refused(write_payload({ points = {} }), "NO_POINTS", "empty point list is refused")
+refused(write_payload({ ranges = { { start_time = 20, end_time = 10 } } }),
+  "BAD_AUTOMATION_RANGE", "reversed range is refused")
+
+-- A write intersecting an automation item refuses before any mutation.
+envelopes["{L}"] = make_fake_envelope({ { 9, 0.1 }, { 15, 0.3 } })
+envelopes["{L}"].items = { { D_POSITION = 12, D_LENGTH = 4 } }
+local item_hit = pcall(automation_write, { payload = write_payload() })
+eq(item_hit, false, "automation-item intersection refuses")
+envelopes["{L}"].items = { { D_POSITION = 100, D_LENGTH = 10 } }
+local item_clear = automation_write({ payload = write_payload() })
+eq(item_clear.verification.confirmed, 2,
+   "a non-intersecting automation item does not block the write")
+
+-- An injected insert failure restores the full preimage: points AND the
+-- envelope state the write had started showing.
+envelopes["{L}"] = make_fake_envelope({
+  { 9, 0.1 }, { 10, 0.2 }, { 15, 0.3 }, { 20, 0.4 }, { 21, 0.5 },
+})
+envelopes["{L}"].fail_insert_at = 18
+local rolled, rolled_err = pcall(automation_write, { payload = write_payload() })
+eq(rolled, false, "insert failure refuses the write")
+eq(ecf(rolled_err, "MISSING"), "AUTOMATION_ROLLED_BACK",
+   "injected failure reports a rolled-back transaction")
+eq(rolled_err:find("restored and reread 1", 1, true) ~= nil, true,
+   "rollback reports what it restored and reread")
+eq(#envelopes["{L}"].points, 5, "rollback restores every preimage point")
+eq(envelopes["{L}"].points[3].time, 15, "restored points keep their positions")
+eq(envelopes["{L}"].points[3].value, 0.3, "restored points keep their values")
+eq(envelopes["{L}"].state.B_VISIBLE, 0, "rollback restores envelope visibility")
+eq(envelopes["{L}"].state.B_ARM, 0, "rollback restores envelope arm state")
+eq(write_track_mode, 1, "rollback leaves the track automation mode alone")
+
+-- A reread that disagrees with the write is unconfirmed and rolls back,
+-- even though every API call "succeeded".
+envelopes["{L}"] = make_fake_envelope({ { 9, 0.1 }, { 15, 0.3 } })
+envelopes["{L}"].corrupt_value_at = 12
+local unconfirmed, unconfirmed_err = pcall(automation_write, {
+  payload = write_payload({ points = { { time = 12, value = 0.6 } } }),
+})
+eq(unconfirmed, false, "write with corrupted readback refuses")
+eq(unconfirmed_err:find("AUTOMATION_WRITE_UNCONFIRMED", 1, true) ~= nil, true,
+   "corrupted readback is reported as unconfirmed, then rolled back")
+eq(#envelopes["{L}"].points, 2, "unconfirmed write restores the preimage")
+
+-- Rollback of an envelope the transaction created: ReaScript cannot delete
+-- an FX envelope, so it is emptied and hidden, and the reply says so.
+envelopes["{L}"] = make_fake_envelope({})
+envelopes["{L}"].exists = false
+envelopes["{L}"].fail_insert_at = 12
+local created, created_err = pcall(automation_write, {
+  payload = write_payload({ ranges = {}, points = { { time = 12, value = 0.6 } } }),
+})
+eq(created, false, "failed create-and-write refuses")
+eq(created_err:find("emptied and hidden", 1, true) ~= nil, true,
+   "created-envelope rollback reports what it could not fully undo")
+eq(#envelopes["{L}"].points, 0, "created envelope is emptied on rollback")
+eq(envelopes["{L}"].state.B_VISIBLE, 0, "created envelope is hidden on rollback")
+
+-- Multi-envelope transactions: one failing right-channel write restores the
+-- left channel too — the Phase 2 exit gate, offline.
+envelopes["{L}"] = make_fake_envelope({ { 9, 0.1 }, { 15, 0.3 } })
+envelopes["{R}"] = make_fake_envelope({ { 9, 0.1 }, { 15, 0.3 } })
+envelopes["{R}"].fail_insert_at = 18
+local function stereo_writes()
+  return {
+    target_track_guid = "{L}", fx_guid = "{FX-L}", param_index = 0,
+    ranges = { { start_time = 10, end_time = 20 } },
+    points = { { time = 12, value = 0.6 } },
+  }, {
+    target_track_guid = "{R}", fx_guid = "{FX-R}", param_index = 0,
+    ranges = { { start_time = 10, end_time = 20 } },
+    points = { { time = 18, value = 0.7 } },
+  }
+end
+local left_write, right_write = stereo_writes()
+local stereo_fail, stereo_err = pcall(automation_transaction, {
+  payload = { writes = { left_write, right_write } },
+})
+eq(stereo_fail, false, "right-channel failure fails the transaction")
+eq(ecf(stereo_err, "MISSING"), "AUTOMATION_ROLLED_BACK",
+   "stereo failure reports the rollback")
+eq(#envelopes["{L}"].points, 2, "left channel is restored to its preimage")
+eq(envelopes["{L}"].points[2].value, 0.3, "left channel keeps its original values")
+eq(#envelopes["{R}"].points, 2, "right channel is restored to its preimage")
+
+-- Validation happens for every write before any mutation: a bad second
+-- write must not even create the first write's envelope.
+envelopes["{L}"] = make_fake_envelope({})
+envelopes["{L}"].exists = false
+envelopes["{R}"] = make_fake_envelope({})
+local bad_left, bad_right = stereo_writes()
+bad_right.points = { { time = 25, value = 0.5 } }
+local prevalidated = pcall(automation_transaction, {
+  payload = { writes = { bad_left, bad_right } },
+})
+eq(prevalidated, false, "one invalid write refuses the transaction")
+eq(envelopes["{L}"].exists, false, "nothing is created before every write validates")
+
+-- A successful transaction reports identity, counts, and one touched
+-- envelope per write.
+envelopes["{L}"] = make_fake_envelope({ { 9, 0.1 }, { 15, 0.3 } })
+envelopes["{R}"] = make_fake_envelope({ { 9, 0.1 }, { 15, 0.3 } })
+local ok_left, ok_right = stereo_writes()
+ok_right.points = { { time = 18, value = 0.7 }, { time = 19, value = 0.8 } }
+local transaction = automation_transaction({
+  id = "cli-2026-test",
+  payload = { writes = { ok_left, ok_right }, transaction_id = "tx-01" },
+})
+eq(transaction.rolled_back, false, "successful transaction is not rolled back")
+eq(transaction.transaction_id, "tx-01", "transaction id echoes the payload")
+eq(#transaction.touched_envelopes, 2, "touched envelopes are enumerated")
+eq(transaction.touched_envelopes[2].track_guid, "{R}", "touched envelope names its track")
+eq(transaction.touched_envelopes[1].param_name, "Cutoff", "touched envelope names its parameter")
+eq(transaction.writes[2].verification.confirmed, 2, "per-write counts are reported")
+eq(transaction.writes[1].final_hash == transaction.writes[2].final_hash, false,
+   "per-write final hashes are computed independently")
+
+-- Two writes aiming at one envelope are a payload bug, not a merge.
+local dup_a, dup_b = stereo_writes()
+dup_b.target_track_guid = "{L}"
+dup_b.fx_guid = "{FX-L}"
+envelopes["{L}"] = make_fake_envelope({})
+local _, dup_err = pcall(automation_transaction, {
+  payload = { writes = { dup_a, dup_b } },
+})
+eq(ecf(dup_err, "MISSING"), "BAD_PAYLOAD", "duplicate envelope targets are refused")
+
+eq(pcall(automation_transaction, { payload = { writes = {} } }), false,
+   "empty transaction refuses")
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))

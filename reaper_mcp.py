@@ -363,8 +363,14 @@ def tool_write_automation(args):
     return _forward("write_fx_param_automation", args,
                     ("fx_name_contains", "fx_index", "fx_scope",
                      "param_name_contains", "param_index", "points",
-                     "clear_existing_in_range"),
+                     "ranges", "clear_existing_in_range", "show_envelopes"),
                     track=True, timeout_ms=30000, dry_run=True)
+
+
+def tool_apply_automation_transaction(args):
+    return _forward("apply_automation_transaction", args,
+                    ("writes", "transaction_id", "show_envelopes"),
+                    timeout_ms=30000, dry_run=True)
 
 
 def tool_get_fx_param_automation(args):
@@ -1266,9 +1272,10 @@ TOOLS = [
     },
     {
         "name": "write_automation",
-        "description": ("Write an FX-parameter automation envelope: points with "
-                        "bar/beat or time, normalized 0-1 values, shapes (linear, "
-                        "square, slow, fast, bezier). Undo-block wrapped."),
+        "description": ("Write one FX-parameter envelope transactionally: "
+                        "snapshot, inclusive-range replacement, reread "
+                        "confirmation, and automatic rollback on any failure. "
+                        "A declared range always means replacement."),
         "inputSchema": _schema({
             **TRACK_PROPS, **DRY_RUN_PROP,
             "fx_name_contains": {"type": "string"},
@@ -1278,9 +1285,29 @@ TOOLS = [
             "param_index": {"type": "integer"},
             "points": {"type": "array", "items": {"type": "object"},
                        "description": "[{bar, beat, value, shape} | {time|seconds, value, shape}]"},
+            "ranges": {"type": "array", "items": {"type": "object"},
+                       "description": "[{start_time, end_time}] inclusive replacement scope"},
             "clear_existing_in_range": {"type": "boolean"},
+            "show_envelopes": {"type": "boolean"},
         }, required=["points"]),
         "handler": tool_write_automation,
+    },
+    {
+        "name": "apply_automation_transaction",
+        "description": ("Atomically write several FX-parameter envelopes (e.g. "
+                        "a stereo pair) in one undo block. Every envelope is "
+                        "snapshotted before mutation; any failure restores all "
+                        "of them and rereads the restoration before reporting."),
+        "inputSchema": _schema({
+            **DRY_RUN_PROP,
+            "writes": {"type": "array", "items": {"type": "object"},
+                       "description": ("[{target_track_guid|target_track_name|"
+                                       "target_track_index, fx_guid|fx_name_contains|"
+                                       "fx_index, param_index, points, ranges}]")},
+            "transaction_id": {"type": "string"},
+            "show_envelopes": {"type": "boolean"},
+        }, required=["writes"]),
+        "handler": tool_apply_automation_transaction,
     },
     {
         "name": "markers",

@@ -509,15 +509,79 @@ directly.
 
 ### write_fx_param_automation
 ```json
-{ "target_track_name": "Lead", "fx_name_contains": "Filter",
-  "param_name_contains": "Cutoff", "clear_existing_in_range": true,
+{ "target_track_guid": "{TRACK-GUID}", "fx_guid": "{FX-GUID}",
+  "param_index": 13,
+  "ranges": [ { "start_time": 10.0, "end_time": 20.0 } ],
   "points": [
-    { "bar": 33, "beat": 1, "value": 0.0, "shape": "linear" },
-    { "bar": 37, "beat": 1, "value": 1.0, "shape": "linear" }
+    { "time": 10.0, "value": 1.0, "shape": "square" },
+    { "time": 15.0, "value": 0.5, "shape": "square" },
+    { "time": 20.0, "value": 0.2897, "shape": "linear" }
   ] }
 ```
 Point time: `time`, `seconds`, or `bar` (+ optional `beat`). Values normalized
-0.0–1.0. `shape`: `linear`, `square`, `slow`, `fast`, `bezier`.
+0.0–1.0 and refused (not clamped) outside it. `shape`: `linear`, `square`,
+`slow`, `fast`, `bezier`. `tension` and `selected` are optional.
+
+The write is transactional. Before any mutation the bridge snapshots the
+envelope (existence, all points, active/visible/arm/lane state, track
+automation mode). A declared replacement scope — `ranges` (an array of
+inclusive `{start_time, end_time}`), a single `range`/`position`, or the
+legacy `clear_existing_in_range: true` inference from the point extent —
+means replacement: existing points inside the scope are deleted (inclusive
+ends, same 1e-7 tolerance as the read command) and the submitted points are
+inserted. Every submitted point must lie inside a declared range
+(`POINT_OUTSIDE_RANGE`). With no declared scope and no clear flag the write
+appends without deleting. A submitted point that exactly reproduces an
+existing in-scope point is skipped, not deleted and rewritten, so re-applying
+the same write is idempotent. Duplicate times inside one request are refused
+(`DUPLICATE_POINT_TIME`), as is a write whose scope intersects an automation
+item (`AUTOMATION_ITEM_UNSUPPORTED` — automation items are read-only for now).
+
+After writing, the bridge rereads the envelope and proves it: every submitted
+point must reread back exactly, and the whole envelope must equal the intended
+final state (kept preimage plus new points), which simultaneously proves
+points outside the scope are untouched. Any failure — insert rejected, reread
+mismatch, outside point changed — restores the complete preimage and rereads
+the restoration before reporting, so the error is
+`AUTOMATION_ROLLED_BACK: <cause>; restored and reread N envelope(s)` (or
+`ROLLBACK_UNCONFIRMED` if the restore itself could not be proven; one REAPER
+undo reverts the whole thing). An envelope the transaction created is restored
+to empty/hidden/unarmed — ReaScript has no envelope-delete call — and the
+error says so; one REAPER undo removes it outright.
+
+The reply carries the legacy `inserted_count`, `points`, and `cleared_range`
+fields, plus the envelope state, track automation mode, `final_hash` (the
+same canonical hash the read command returns), and
+`verification: { requested, replaced, inserted, skipped, confirmed, refused }`
+— `refused` is nonzero only in a refused reply, which never mutates. By
+default a successful write shows and arms the envelope lane (as before);
+`show_envelopes: false` writes data only. The command sits inside one named
+undo block (`undo_label` on the command envelope).
+
+### apply_automation_transaction
+```json
+{ "writes": [
+    { "target_track_guid": "{L}", "fx_guid": "{FX-L}", "param_index": 13,
+      "ranges": [ { "start_time": 10.0, "end_time": 20.0 } ],
+      "points": [ { "time": 10.0, "value": 1.0 } ] },
+    { "target_track_guid": "{R}", "fx_guid": "{FX-R}", "param_index": 13,
+      "ranges": [ { "start_time": 10.0, "end_time": 20.0 } ],
+      "points": [ { "time": 10.0, "value": 1.0 } ] }
+  ],
+  "transaction_id": "optional-caller-id" }
+```
+Atomically applies several envelope writes — the stereo-pair case — in ONE
+undo block. Every write is validated and snapshotted before anything mutates;
+two writes targeting the same envelope are a `BAD_PAYLOAD` (merge their
+points). If any write fails or fails verification, every mutated envelope is
+restored to its preimage and reread before the command reports
+`AUTOMATION_ROLLED_BACK`, so a failed right channel leaves the left channel
+unchanged. The reply carries `transaction_id` (echoed from the payload or the
+command id), `rolled_back: false`, `touched_envelopes` (exact track/FX/
+parameter identities), and per-write summaries with the same `verification`
+counts and `final_hash` as `write_fx_param_automation`. Same per-write
+semantics (inclusive replacement, idempotent skips, automation-item refusal)
+as that command; `show_envelopes` defaults true.
 
 ### get_fx_param_automation
 
