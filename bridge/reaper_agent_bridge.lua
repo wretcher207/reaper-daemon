@@ -692,6 +692,22 @@ local function find_fx(payload)
   local search_input_fx = scope == "all" or scope == "input" or scope == "rec" or scope == "record"
   local matches = {}
 
+  if payload.fx_guid then
+    for_each_fx(track, function(fx, api_index, match_scope, fx_name)
+      local wanted = match_scope == "input" and search_input_fx or
+                     match_scope == "track" and search_track_fx
+      if wanted and reaper.TrackFX_GetFXGUID(track, api_index) == payload.fx_guid then
+        matches[#matches + 1] = {
+          index = fx, api_index = api_index, scope = match_scope, name = fx_name,
+        }
+      end
+    end)
+    if #matches == 0 then error("NO_FX: No FX with guid " .. tostring(payload.fx_guid)) end
+    if #matches > 1 then error("AMBIGUOUS_FX: Multiple FX have guid " .. tostring(payload.fx_guid)) end
+    return track, track_index, matches[1].api_index, matches[1].name,
+      matches[1].scope, matches[1].index
+  end
+
   if payload.fx_index ~= nil then
     -- A bare fx_index with no scope used to silently mean "track FX N" — an
     -- agent that meant input FX N but forgot fx_scope hit the wrong plugin and
@@ -1629,6 +1645,10 @@ local function command_set_fx_param(command)
     display_fx_index, fx_scope, fx_name, before, after)
 end
 
+local AUTOMATION_MODE_NAMES = {
+  [0] = "trim/read", [1] = "read", [2] = "touch", [3] = "write", [4] = "latch",
+}
+
 local function command_write_fx_param_automation(command)
   local payload = command.payload or {}
   local track, track_index, api_index, fx_name, fx_scope, display_fx_index = find_fx(payload)
@@ -1697,6 +1717,199 @@ local function command_write_fx_param_automation(command)
     inserted_count = #inserted,
     cleared_range = payload.clear_existing_in_range and { start_time = start_time, end_time = end_time } or nil,
     points = inserted,
+  }
+end
+
+-- Independent, read-only FX-envelope evidence. Keep the helpers behind one
+-- table: the bridge main chunk is close to Lua's 200-local limit.
+local automation = {}
+
+function automation.hash_text(text)
+  -- FNV-1a/32 is not a security primitive; it is a compact change detector for
+  -- canonical envelope rows. Prefix the algorithm so a later upgrade cannot
+  -- be mistaken for the same hash surface.
+  local hash = 2166136261
+  for i = 1, #text do
+    hash = ((hash ~ text:byte(i)) * 16777619) & 0xffffffff
+  end
+  return "fnv1a32:" .. string.format("%08x", hash)
+end
+
+function automation.canonicalize(points, time_to_qn)
+  local response_points, canonical_rows, by_time = {}, {}, {}
+  for i, source in ipairs(points or {}) do
+    local point = {}
+    for key, value in pairs(source) do point[key] = value end
+    point.enumeration_order = tonumber(point.enumeration_order) or i
+    point.qn_tick = math.floor((time_to_qn(point.time) * 960) + 0.5)
+    point.value_tick = math.floor((point.value * 1000000) + 0.5)
+    response_points[#response_points + 1] = point
+    local item_id = point.automation_item_id or "underlying"
+    canonical_rows[#canonical_rows + 1] = table.concat({
+      tostring(point.qn_tick), tostring(point.value_tick),
+      tostring(point.shape), string.format("%.17g", point.tension or 0),
+      point.selected and "1" or "0", tostring(item_id),
+    }, "|")
+    local time_key = string.format("%.17g", point.time)
+    local group = by_time[time_key]
+    if not group then
+      group = { time = point.time, enumeration_order = {} }
+      by_time[time_key] = group
+    end
+    group.enumeration_order[#group.enumeration_order + 1] = point.enumeration_order
+  end
+
+  -- Response order is chronological and preserves REAPER enumeration order at
+  -- duplicate times. The hash is tuple-sorted, so REAPER reordering two equal-
+  -- time points does not manufacture a false content change.
+  table.sort(response_points, function(a, b)
+    if a.time ~= b.time then return a.time < b.time end
+    return a.enumeration_order < b.enumeration_order
+  end)
+  table.sort(canonical_rows)
+
+  local duplicates = {}
+  for _, group in pairs(by_time) do
+    if #group.enumeration_order > 1 then
+      duplicates[#duplicates + 1] = group
+    end
+  end
+  table.sort(duplicates, function(a, b) return a.time < b.time end)
+  return response_points, automation.hash_text(table.concat(canonical_rows, "\n")), duplicates
+end
+
+function automation.select_range(points, start_time, end_time, include_neighbors)
+  local inside, before, after = {}, nil, nil
+  -- Marker/bar conversion and envelope insertion can represent the same
+  -- musical position a few nanoseconds apart. Treat sub-microsecond drift as
+  -- equality or an exact marker-end reset falls outside an "inclusive" range.
+  local boundary_epsilon = 1e-7
+  for _, point in ipairs(points or {}) do
+    local t = point.time
+    if (start_time == nil or t >= start_time - boundary_epsilon)
+       and (end_time == nil or t <= end_time + boundary_epsilon) then
+      inside[#inside + 1] = point
+    elseif include_neighbors and start_time ~= nil and t < start_time - boundary_epsilon
+           and (not before or t > before.time
+                or (t == before.time and point.enumeration_order > before.enumeration_order)) then
+      before = point
+    elseif include_neighbors and end_time ~= nil and t > end_time + boundary_epsilon
+           and (not after or t < after.time
+                or (t == after.time and point.enumeration_order < after.enumeration_order)) then
+      after = point
+    end
+  end
+  return inside, before, after
+end
+
+function automation.read_command(command)
+  local payload = command.payload or {}
+  local track, track_index, api_index, fx_name, fx_scope, display_fx_index = find_fx(payload)
+  local param_index, param_info = find_fx_param(track, api_index, payload)
+  local start_time = payload.start_time ~= nil and tonumber(payload.start_time) or nil
+  local end_time = payload.end_time ~= nil and tonumber(payload.end_time) or nil
+  if (payload.start_time ~= nil and start_time == nil)
+     or (payload.end_time ~= nil and end_time == nil) then
+    error("BAD_AUTOMATION_RANGE: start_time and end_time must be numbers")
+  end
+  if (start_time == nil) ~= (end_time == nil) then
+    error("BAD_AUTOMATION_RANGE: provide both start_time and end_time, or neither")
+  end
+  if start_time and (start_time ~= start_time or end_time ~= end_time
+      or start_time == math.huge or start_time == -math.huge
+      or end_time == math.huge or end_time == -math.huge
+      or end_time < start_time) then
+    error("BAD_AUTOMATION_RANGE: range must be finite and end_time >= start_time")
+  end
+
+  -- false is load-bearing: this command must never create an envelope merely
+  -- by observing it.
+  local envelope = reaper.GetFXEnvelope(track, api_index, param_index, false)
+  local all_points, automation_items = {}, {}
+  local envelope_state = { exists = envelope ~= nil }
+  local enumeration_order = 0
+
+  if envelope then
+    local _, envelope_name = reaper.GetEnvelopeName(envelope, "")
+    local function env_value(key)
+      local ok, value = pcall(reaper.GetEnvelopeInfo_Value, envelope, key)
+      return ok and finite_or_nil(value) or nil
+    end
+    envelope_state.name = envelope_name
+    envelope_state.active = env_value("B_ACTIVE") == 1
+    envelope_state.visible = env_value("B_VISIBLE") == 1
+    envelope_state.armed = env_value("B_ARM") == 1
+    envelope_state.lane_height = env_value("I_TCPH")
+
+    local function read_points(autoitem_index, item_id)
+      local count = reaper.CountEnvelopePointsEx(envelope, autoitem_index)
+      for point_index = 0, count - 1 do
+        local ok, time, value, shape, tension, selected =
+          reaper.GetEnvelopePointEx(envelope, autoitem_index, point_index)
+        if ok then
+          enumeration_order = enumeration_order + 1
+          all_points[#all_points + 1] = {
+            index = point_index,
+            enumeration_order = enumeration_order,
+            time = time,
+            value = value,
+            shape = shape,
+            tension = tension,
+            selected = selected == true,
+            automation_item = autoitem_index >= 0 and autoitem_index or nil,
+            automation_item_id = item_id,
+          }
+        end
+      end
+    end
+
+    read_points(-1, "underlying")
+    local item_count = reaper.CountAutomationItems(envelope)
+    for item_index = 0, item_count - 1 do
+      local function item_value(key)
+        return finite_or_nil(reaper.GetSetAutomationItemInfo(envelope, item_index, key, 0, false))
+      end
+      local item = {
+        index = item_index,
+        pool_id = item_value("D_POOL_ID"),
+        position = item_value("D_POSITION"),
+        length = item_value("D_LENGTH"),
+        start_offset = item_value("D_STARTOFFS"),
+        play_rate = item_value("D_PLAYRATE"),
+        looped = item_value("D_LOOPSRC") == 1,
+        baseline = item_value("D_BASELINE"),
+        amplitude = item_value("D_AMPLITUDE"),
+        selected = item_value("D_UISEL") == 1,
+        muted = item_value("D_MUTE") == 1,
+      }
+      item.identity = "item:" .. tostring(item.index) .. "/pool:" .. tostring(item.pool_id)
+      automation_items[#automation_items + 1] = item
+      read_points(item_index, item.identity)
+    end
+  end
+
+  local selected_points, before, after = automation.select_range(
+    all_points, start_time, end_time, payload.include_neighbors == true)
+  local canonical_points, canonical_hash, duplicates = automation.canonicalize(
+    selected_points, function(time) return reaper.TimeMap2_timeToQN(0, time) end)
+  local _, track_name = reaper.GetTrackName(track, "")
+  local automode = math.floor(reaper.GetMediaTrackInfo_Value(track, "I_AUTOMODE"))
+  return {
+    track = { index = track_index, name = track_name, guid = reaper.GetTrackGUID(track) },
+    fx = fx_summary(track, api_index, display_fx_index or api_index, fx_scope or "track", fx_name),
+    parameter = param_info,
+    envelope = envelope_state,
+    automation_mode = AUTOMATION_MODE_NAMES[automode] or tostring(automode),
+    range = start_time and { start_time = start_time, end_time = end_time,
+                             inclusive_start = true, inclusive_end = true } or nil,
+    point_count = #canonical_points,
+    points = canonical_points,
+    neighbor_before = before,
+    neighbor_after = after,
+    duplicate_times = duplicates,
+    automation_items = automation_items,
+    canonical_hash = canonical_hash,
+    canonical_hash_algorithm = "range-epsilon-1e-7s,qn-1/960,value-1e-6,tuple-sort,fnv1a32",
   }
 end
 
@@ -3364,10 +3577,6 @@ local function command_capture_track_audio(command)
   return result
 end
 
-local AUTOMATION_MODE_NAMES = {
-  [0] = "trim/read", [1] = "read", [2] = "touch", [3] = "write", [4] = "latch",
-}
-
 -- Read-only routing snapshot for mix diagnosis: sends, receives, parent bus,
 -- volume, pan, phase, automation mode. All volumes are converted to dB here
 -- in the bridge (D_VOL is linear, 1.0 = unity) so clients always see dB.
@@ -3618,6 +3827,7 @@ local handlers = {}
 -- Everything else mutates the project and gets wrapped. Named for what it IS.
 local NO_UNDO_BLOCK = {
   get_context = true, get_fx_parameters = true, scan_fx = true,
+  get_fx_param_automation = true,
   enum_installed_fx = true,
   discover_drum_map = true,
   get_track_routing = true,
@@ -3789,6 +3999,7 @@ handlers.bypass_fx = command_bypass_fx
 handlers.move_fx = command_move_fx
 handlers.set_fx_param = command_set_fx_param
 handlers.write_fx_param_automation = command_write_fx_param_automation
+handlers.get_fx_param_automation = automation.read_command
 
 -- Markers / regions / items
 handlers.add_marker = command_add_marker
@@ -4185,6 +4396,7 @@ if _G.REAPER_BRIDGE_SELFTEST then
     restore_render_autoclose = restore_render_autoclose,
     render_preferences_error = render_preferences_error,
     fx_summary = fx_summary,
+    find_fx = find_fx,
     set_fx_param_result = set_fx_param_result,
     batch_result = batch_result,
     capture_provenance = capture_provenance,
@@ -4204,6 +4416,7 @@ if _G.REAPER_BRIDGE_SELFTEST then
     save_target_error = save_target_error,
     split_render_target = split_render_target,
     reload_verdict = reload_verdict,
+    automation = automation,
   }
 end
 

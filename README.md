@@ -236,10 +236,11 @@ Claude Desktop (`claude_desktop_config.json`):
 Then just ask: *"add a ReaEQ to the bass and carve 2 dB at 300 Hz"*, *"what
 plugins are on the master?"*, *"program a d-beat groove at bar 33"*.
 
-24 tools: project/FX discovery (`get_context`, `scan_fx`,
+25 tools: project/FX discovery (`get_context`, `scan_fx`,
 `get_fx_parameters`, `get_track_routing`), transport, tracks, FX chains,
-`set_fx_param` (formatted values like `"-16.00 dB"` work), automation
-envelopes, markers/regions, MIDI insertion, `batch` (one undo block),
+`set_fx_param` (formatted values like `"-16.00 dB"` work), independent
+automation-envelope readback (`get_fx_param_automation`) and writes,
+markers/regions, MIDI insertion, `batch` (one undo block),
 post-FX stem capture, the drum-workflow trio (`profile_track` and
 `riff_grid`, which analyze a guitar stem out of the SAVED `.rpp` on disk
 rather than REAPER's live project, a caveat every payload carries, plus

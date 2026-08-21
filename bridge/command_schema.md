@@ -519,6 +519,28 @@ directly.
 Point time: `time`, `seconds`, or `bar` (+ optional `beat`). Values normalized
 0.0–1.0. `shape`: `linear`, `square`, `slow`, `fast`, `bezier`.
 
+### get_fx_param_automation
+
+Read one existing FX-parameter envelope without creating, showing, or arming
+it. Prefer GUID selectors for the track and FX when using the raw bridge.
+
+```json
+{ "target_track_guid": "{TRACK-GUID}", "fx_guid": "{FX-GUID}",
+  "param_index": 13, "start_time": 10.0, "end_time": 20.0,
+  "include_neighbors": true }
+```
+
+`start_time` and `end_time` are optional as a pair. Their boundaries are both
+inclusive, with a 1e-7-second equality tolerance for nanosecond differences
+introduced when the same bar position is converted separately for a marker and
+an envelope point. The result reports resolved track/FX/parameter identity, track
+automation mode, non-mutating envelope state, base and automation-item points,
+nearest outside neighbors when requested, exact duplicate-time groups, and a
+canonical hash. Canonical time is quantized to 1/960 quarter note and value to
+1e-6; tuple ordering makes the hash stable if REAPER reorders equal-time points.
+An absent envelope is a successful read with `envelope.exists: false`, zero
+points, and the canonical empty hash.
+
 ---
 
 ## Markers / regions / items

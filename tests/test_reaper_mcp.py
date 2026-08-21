@@ -66,7 +66,8 @@ def test_tools_list_names_and_schemas():
     resp = reaper_mcp.handle_message(rpc("tools/list"))
     tools = {t["name"]: t for t in resp["result"]["tools"]}
     for expected in ("get_status", "get_context", "scan_fx", "track", "fx",
-                     "set_fx_param", "batch", "capture_track_audio",
+                     "set_fx_param", "get_fx_param_automation", "batch",
+                     "capture_track_audio",
                      "verify_change", "tune_param",
                      "analyze_track", "compare_tracks",
                      "complete_postmortem_onboarding", "raw_command"):
@@ -76,6 +77,27 @@ def test_tools_list_names_and_schemas():
     assert tools["verify_change"]["inputSchema"]["required"] == [
         "track", "command_type", "payload"]
     assert tools["tune_param"]["inputSchema"]["required"] == ["track", "target"]
+
+
+def test_get_fx_param_automation_forwards_read_only_payload(root):
+    record = []
+    fake_bridge(root, {"ok": True, "type": "get_fx_param_automation",
+                       "data": {"envelope": {"exists": False},
+                                "canonical_hash": "fnv1a32:811c9dc5"}},
+                record=record)
+    resp = call("get_fx_param_automation", {
+        "target_track_guid": "{TRACK}", "fx_guid": "{FX}",
+        "param_index": 13, "start_time": 10.0, "end_time": 20.0,
+        "include_neighbors": True,
+    })
+    body = json.loads(result_text(resp))
+    assert body["ok"] is True
+    assert body["data"]["envelope"]["exists"] is False
+    assert body["data"]["canonical_hash"] == "fnv1a32:811c9dc5"
+    assert record[0]["type"] == "get_fx_param_automation"
+    assert record[0]["payload"]["target_track_guid"] == "{TRACK}"
+    assert record[0]["payload"]["fx_guid"] == "{FX}"
+    assert record[0]["dry_run"] is False
 
 
 def test_unknown_method_is_32601():

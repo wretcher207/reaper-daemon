@@ -122,8 +122,37 @@ eq(fxs.parameter_count, 37, "FX summary keeps extra fields")
 eq(fx_guid_calls[1].track, "track-object", "FX GUID receives the real track")
 eq(fx_guid_calls[1].api_index, 0x1000002, "FX GUID receives encoded API index")
 
+-- Stable FX GUIDs are first-class selectors for readback. This must span track
+-- and input FX without forcing a caller back to a movable index.
+_G.reaper.GetMasterTrack = function() return "master-object" end
+_G.reaper.CountTracks = function() return 1 end
+_G.reaper.GetTrack = function(_, index) return index == 0 and "track-object" or nil end
+_G.reaper.GetTrackGUID = function(track)
+  if track == "track-object" then return "{TRACK-GUID}" end
+  if track == "master-object" then return "{MASTER-GUID}" end
+end
+_G.reaper.TrackFX_GetCount = function() return 1 end
+_G.reaper.TrackFX_GetRecCount = function() return 1 end
+_G.reaper.TrackFX_GetFXName = function(_, api_index)
+  return true, api_index >= 0x1000000 and "Input Test" or "Track Test"
+end
+_G.reaper.TrackFX_GetFXGUID = function(_, api_index)
+  return api_index >= 0x1000000 and "{INPUT-FX}" or "{TRACK-FX}"
+end
+local found_track, found_track_index, found_api_index, found_name, found_scope, found_index =
+  B.find_fx({ target_track_guid = "{TRACK-GUID}", fx_guid = "{INPUT-FX}" })
+eq(found_track, "track-object", "FX GUID lookup keeps the resolved track")
+eq(found_track_index, 1, "FX GUID lookup keeps the track index")
+eq(found_api_index, 0x1000000, "FX GUID lookup resolves encoded input-FX index")
+eq(found_name, "Input Test", "FX GUID lookup reports the resolved plugin name")
+eq(found_scope, "input", "FX GUID lookup reports input scope")
+eq(found_index, 0, "FX GUID lookup reports display index")
+
 -- A set result must carry the same stable FX identity. The console cannot
 -- safely restore by an index that may now point at a different plugin.
+_G.reaper.TrackFX_GetFXGUID = function(_, api_index)
+  return "{FX-GUID-" .. tostring(api_index) .. "}"
+end
 _G.reaper.GetTrackGUID = function(track)
   return track == "track-object" and "{TRACK-GUID}" or nil
 end
@@ -870,6 +899,142 @@ eq(B.error_code_from(compile_refusal, "COMMAND_FAILED"), "RELOAD_COMPILE_FAILED"
    "compile refusal parses into a structured error code")
 eq(B.error_code_from(preview_refusal, "COMMAND_FAILED"), "RELOAD_BLOCKED",
    "preview refusal parses into a structured error code")
+
+-- Musical automation phase 1: inclusive boundaries and independent neighbors
+-- are pure, so prove them without creating an envelope in REAPER.
+local auto = B.automation
+local envelope_points = {
+  { time = 9, value = 0.1, shape = 0, tension = 0, selected = false, enumeration_order = 1 },
+  { time = 10, value = 0.2, shape = 0, tension = 0, selected = false, enumeration_order = 2 },
+  { time = 15, value = 0.3, shape = 1, tension = 0, selected = true, enumeration_order = 3 },
+  { time = 20, value = 0.4, shape = 0, tension = 0, selected = false, enumeration_order = 4 },
+  { time = 21, value = 0.5, shape = 0, tension = 0, selected = false, enumeration_order = 5 },
+}
+local in_range, neighbor_before, neighbor_after = auto.select_range(
+  envelope_points, 10, 20, true)
+eq(#in_range, 3, "automation range includes both exact boundaries")
+eq(in_range[1].time, 10, "inclusive automation start is retained")
+eq(in_range[3].time, 20, "inclusive automation end is retained")
+eq(neighbor_before.time, 9, "nearest point before range is reported")
+eq(neighbor_after.time, 21, "nearest point after range is reported")
+
+local drifted_boundary = {
+  { time = 20 + 1.4e-9, value = 0.4, shape = 0, tension = 0,
+    selected = false, enumeration_order = 1 },
+  { time = 20 + 1e-5, value = 0.5, shape = 0, tension = 0,
+    selected = false, enumeration_order = 2 },
+}
+local drifted_inside, _, drifted_after = auto.select_range(
+  drifted_boundary, 10, 20, true)
+eq(#drifted_inside, 1, "nanosecond marker/envelope drift stays on inclusive boundary")
+eq(drifted_after.time, 20 + 1e-5, "a materially later point remains an outside neighbor")
+
+local duplicate_points = {
+  { time = 4, value = 0.2000000001, shape = 0, tension = 0,
+    selected = false, enumeration_order = 7, automation_item_id = "underlying" },
+  { time = 4, value = 0.8, shape = 1, tension = 0.25,
+    selected = true, enumeration_order = 8, automation_item_id = "item:0/pool:2" },
+}
+local canonical_a, hash_a, duplicates_a = auto.canonicalize(duplicate_points,
+  function(time) return time end)
+eq(canonical_a[1].enumeration_order, 7,
+   "duplicate-time response preserves REAPER enumeration order")
+eq(canonical_a[1].qn_tick, 3840, "canonical time is quantized to 1/960 QN")
+eq(canonical_a[1].value_tick, 200000, "canonical value is quantized to 1e-6")
+eq(#duplicates_a, 1, "duplicate-time points are explicitly reported")
+eq(duplicates_a[1].enumeration_order[2], 8,
+   "duplicate report carries REAPER enumeration order")
+local _, hash_b = auto.canonicalize({ duplicate_points[2], duplicate_points[1] },
+  function(time) return time end)
+eq(hash_b, hash_a, "equal-time point reordering leaves canonical hash stable")
+eq(auto.hash_text(""), "fnv1a32:811c9dc5", "empty envelope hash is stable")
+
+-- Handler-level offline proof: GetFXEnvelope's create flag stays false, an
+-- absent envelope is a successful empty read, and an existing envelope merges
+-- base + automation-item points without moving inclusive boundaries.
+_G.reaper.GetMasterTrack = function() return "master-object" end
+_G.reaper.CountTracks = function() return 1 end
+_G.reaper.GetTrack = function() return "automation-track" end
+_G.reaper.GetTrackGUID = function(track)
+  return track == "automation-track" and "{AUTO-TRACK}" or "{MASTER}"
+end
+_G.reaper.GetTrackName = function() return true, "Automation Track" end
+_G.reaper.GetMediaTrackInfo_Value = function(_, key)
+  if key == "I_AUTOMODE" then return 1 end
+  return 0
+end
+_G.reaper.TrackFX_GetCount = function() return 1 end
+_G.reaper.TrackFX_GetRecCount = function() return 0 end
+_G.reaper.TrackFX_GetFXName = function() return true, "VST3: Test FX" end
+_G.reaper.TrackFX_GetFXGUID = function() return "{AUTO-FX}" end
+_G.reaper.TrackFX_GetNumParams = function() return 1 end
+_G.reaper.TrackFX_GetParamName = function() return true, "Cutoff" end
+_G.reaper.TrackFX_GetParamNormalized = function() return 0.5 end
+_G.reaper.TrackFX_GetParam = function() return 0.5, 0, 1 end
+_G.reaper.TrackFX_GetFormattedParamValue = function() return true, "50 %" end
+_G.reaper.TimeMap2_timeToQN = function(_, time) return time end
+local create_flags = {}
+_G.reaper.GetFXEnvelope = function(_, _, _, create)
+  create_flags[#create_flags + 1] = create
+  return nil
+end
+local absent = auto.read_command({ payload = {
+  target_track_guid = "{AUTO-TRACK}", fx_guid = "{AUTO-FX}", param_index = 0,
+} })
+eq(create_flags[1], false, "automation read never creates an absent envelope")
+eq(absent.envelope.exists, false, "absent envelope is reported, not refused")
+eq(absent.point_count, 0, "absent envelope has zero points")
+eq(absent.canonical_hash, "fnv1a32:811c9dc5", "absent envelope has empty hash")
+
+_G.reaper.GetFXEnvelope = function(_, _, _, create)
+  create_flags[#create_flags + 1] = create
+  return "envelope-object"
+end
+_G.reaper.GetEnvelopeName = function() return true, "Cutoff" end
+_G.reaper.GetEnvelopeInfo_Value = function(_, key)
+  local values = { B_ACTIVE = 1, B_VISIBLE = 0, B_ARM = 0, I_TCPH = 48 }
+  return values[key]
+end
+_G.reaper.CountEnvelopePointsEx = function(_, item_index)
+  return item_index == -1 and 3 or 1
+end
+_G.reaper.GetEnvelopePointEx = function(_, item_index, point_index)
+  if item_index == -1 then
+    local points = {
+      { 9, 0.1, 0, 0, false },
+      { 10, 0.2, 0, 0, false },
+      { 21, 0.5, 0, 0, false },
+    }
+    local point = points[point_index + 1]
+    return true, point[1], point[2], point[3], point[4], point[5]
+  end
+  return true, 15, 0.7, 5, 0.25, true
+end
+_G.reaper.CountAutomationItems = function() return 1 end
+_G.reaper.GetSetAutomationItemInfo = function(_, _, key)
+  local values = {
+    D_POOL_ID = 12, D_POSITION = 12, D_LENGTH = 6, D_STARTOFFS = 0,
+    D_PLAYRATE = 1, D_LOOPSRC = 0, D_BASELINE = 0.5, D_AMPLITUDE = 1,
+    D_UISEL = 1, D_MUTE = 0,
+  }
+  return values[key]
+end
+local present = auto.read_command({ payload = {
+  target_track_guid = "{AUTO-TRACK}", fx_guid = "{AUTO-FX}", param_index = 0,
+  start_time = 10, end_time = 20, include_neighbors = true,
+} })
+eq(create_flags[2], false, "automation read never recreates an existing envelope")
+eq(present.envelope.exists, true, "existing envelope is reported")
+eq(present.envelope.visible, false, "read preserves and reports hidden state")
+eq(present.envelope.armed, false, "read preserves and reports unarmed state")
+eq(present.automation_mode, "read", "track automation mode is named")
+eq(present.point_count, 2, "base and automation-item points share one range read")
+eq(present.points[1].time, 10, "handler keeps exact inclusive start")
+eq(present.points[2].automation_item, 0, "handler identifies automation-item point")
+eq(present.neighbor_before.time, 9, "handler reports prior neighbor")
+eq(present.neighbor_after.time, 21, "handler reports following neighbor")
+eq(present.automation_items[1].pool_id, 12, "automation item pool identity is reported")
+eq(present.automation_items[1].muted, false, "automation item mute state is reported")
 
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))

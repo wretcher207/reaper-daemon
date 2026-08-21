@@ -182,6 +182,7 @@ def clamp_capture_seconds(seconds, default, console_mode=None, maximum=None):
 def _track_payload(args):
     """Shared track selector -> bridge payload fields."""
     return {
+        "target_track_guid": args.get("target_track_guid"),
         "target_track_name": args.get("track"),
         "track_name_contains": args.get("track_contains"),
         "use_selected_track": True if args.get("use_selected_track") else None,
@@ -189,6 +190,8 @@ def _track_payload(args):
 
 
 TRACK_PROPS = {
+    "target_track_guid": {"type": "string",
+                          "description": "Stable REAPER track GUID; preferred when available."},
     "track": {"type": "string",
               "description": "Exact track name (case-insensitive)."},
     "track_contains": {"type": "string",
@@ -362,6 +365,14 @@ def tool_write_automation(args):
                      "param_name_contains", "param_index", "points",
                      "clear_existing_in_range"),
                     track=True, timeout_ms=30000, dry_run=True)
+
+
+def tool_get_fx_param_automation(args):
+    return _forward("get_fx_param_automation", args,
+                    ("fx_guid", "fx_name_contains", "fx_index", "fx_scope",
+                     "param_name_contains", "param_index", "start_time",
+                     "end_time", "include_neighbors"),
+                    track=True)
 
 
 _MARKER_ACTIONS = {"add_marker", "add_region", "delete_marker"}
@@ -1232,6 +1243,26 @@ TOOLS = [
             "relative": {"type": "string"},
         }),
         "handler": tool_set_fx_param,
+    },
+    {
+        "name": "get_fx_param_automation",
+        "description": ("Read one existing FX-parameter envelope without creating "
+                        "or arming it. Returns envelope state, inclusive-range "
+                        "points, optional neighbors, automation items, duplicate "
+                        "times, and a canonical content hash."),
+        "inputSchema": _schema({
+            **TRACK_PROPS,
+            "fx_guid": {"type": "string"},
+            "fx_name_contains": {"type": "string"},
+            "fx_index": {"type": "integer"},
+            "fx_scope": {"type": "string", "enum": ["track", "input", "all"]},
+            "param_name_contains": {"type": "string"},
+            "param_index": {"type": "integer"},
+            "start_time": {"type": "number"},
+            "end_time": {"type": "number"},
+            "include_neighbors": {"type": "boolean"},
+        }),
+        "handler": tool_get_fx_param_automation,
     },
     {
         "name": "write_automation",

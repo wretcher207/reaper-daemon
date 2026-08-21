@@ -1,6 +1,6 @@
 # Musical Automation System Plan
 
-Status: proposed (revised 2026-08-21 after review; the original draft's cut
+Status: active, Phase 1 complete / Phase 2 next (revised 2026-08-21 after review; the original draft's cut
 machinery is preserved in "Deferred" at the bottom)
 Scope: `reaper-daemon` bridge, automation evidence + safety layer, verification,
 and live-use procedure
