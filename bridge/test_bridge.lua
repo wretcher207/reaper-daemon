@@ -1084,7 +1084,15 @@ local function bind_write_fakes()
   _G.reaper.GetFXEnvelope = function(track, _, _, create)
     local env = envelopes[reaper.GetTrackGUID(track)]
     if env and env.exists then return env end
-    if create and env then env.exists, env.created = true, true; return env end
+    if create and env then
+      env.exists, env.created = true, true
+      -- REAPER seeds a new envelope with a time-0 point at the parameter's
+      -- current value; modeling this is what caught the live verification
+      -- mismatch on 2026-08-21.
+      env.points[#env.points + 1] = { time = 0, value = 0.5, shape = 0,
+                                      tension = 0, selected = false }
+      return env
+    end
     return nil
   end
   _G.reaper.CountEnvelopePointsEx = function(env, item)
@@ -1118,10 +1126,9 @@ local function bind_write_fakes()
     return true
   end
   _G.reaper.GetEnvelopeInfo_Value = function(env, key) return env.state[key] end
-  _G.reaper.SetEnvelopeInfo_Value = function(env, key, value)
-    env.state[key] = value
-    return true
-  end
+  -- Deliberately NO SetEnvelopeInfo_Value: this REAPER build does not export
+  -- it (verified against the installed API 2026-08-21), so the write path
+  -- must not pretend to set envelope visibility or arm state.
   _G.reaper.CountAutomationItems = function(env) return #env.items end
   _G.reaper.GetSetAutomationItemInfo = function(env, index, key)
     local item = env.items[index + 1]
@@ -1179,8 +1186,8 @@ eq(#envelopes["{L}"].points, 4, "neighbors survive the replacement")
 eq(envelopes["{L}"].points[1].time, 9, "neighbor before range is untouched")
 eq(envelopes["{L}"].points[1].value, 0.1, "neighbor before range keeps its value")
 eq(envelopes["{L}"].points[4].time, 21, "neighbor after range is untouched")
-eq(envelopes["{L}"].state.B_VISIBLE, 1, "successful write shows the envelope")
-eq(replaced.envelope.visible, true, "reply reports envelope shown")
+eq(envelopes["{L}"].state.B_VISIBLE, 0, "write leaves envelope state untouched")
+eq(replaced.envelope.visible, false, "reply reports envelope state as-is")
 eq(replaced.automation_mode, "read", "reply reports track automation mode")
 eq(replaced.final_hash ~= nil, true, "reply carries the live canonical hash")
 
@@ -1274,7 +1281,7 @@ eq(rolled_err:find("restored and reread 1", 1, true) ~= nil, true,
 eq(#envelopes["{L}"].points, 5, "rollback restores every preimage point")
 eq(envelopes["{L}"].points[3].time, 15, "restored points keep their positions")
 eq(envelopes["{L}"].points[3].value, 0.3, "restored points keep their values")
-eq(envelopes["{L}"].state.B_VISIBLE, 0, "rollback restores envelope visibility")
+eq(envelopes["{L}"].state.B_VISIBLE, 0, "rollback leaves envelope state untouched")
 eq(envelopes["{L}"].state.B_ARM, 0, "rollback restores envelope arm state")
 eq(write_track_mode, 1, "rollback leaves the track automation mode alone")
 
@@ -1299,10 +1306,25 @@ local created, created_err = pcall(automation_write, {
   payload = write_payload({ ranges = {}, points = { { time = 12, value = 0.6 } } }),
 })
 eq(created, false, "failed create-and-write refuses")
-eq(created_err:find("emptied and hidden", 1, true) ~= nil, true,
+eq(created_err:find("emptied (ReaScript cannot delete", 1, true) ~= nil, true,
    "created-envelope rollback reports what it could not fully undo")
 eq(#envelopes["{L}"].points, 0, "created envelope is emptied on rollback")
-eq(envelopes["{L}"].state.B_VISIBLE, 0, "created envelope is hidden on rollback")
+eq(envelopes["{L}"].state.B_VISIBLE, 0, "created envelope keeps its default state")
+
+-- A created envelope keeps REAPER's time-0 seed point: it is state REAPER
+-- added, the parameter holds its current value until the first written
+-- point, and verification proves the seed survives alongside the write.
+-- (Found live 2026-08-21: without this, every create-and-write refused as
+-- unconfirmed.)
+envelopes["{L}"] = make_fake_envelope({})
+envelopes["{L}"].exists = false
+local seeded = automation_write({
+  payload = write_payload({ points = { { time = 12, value = 0.75 } } }),
+})
+eq(seeded.verification.confirmed, 1, "created-envelope write confirms its point")
+eq(#envelopes["{L}"].points, 2, "seed point plus written point remain")
+eq(envelopes["{L}"].points[1].time, 0, "REAPER seed point survives the write")
+eq(envelopes["{L}"].points[2].value, 0.75, "written point follows the seed")
 
 -- Multi-envelope transactions: one failing right-channel write restores the
 -- left channel too — the Phase 2 exit gate, offline.

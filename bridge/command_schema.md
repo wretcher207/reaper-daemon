@@ -546,17 +546,24 @@ the restoration before reporting, so the error is
 `AUTOMATION_ROLLED_BACK: <cause>; restored and reread N envelope(s)` (or
 `ROLLBACK_UNCONFIRMED` if the restore itself could not be proven; one REAPER
 undo reverts the whole thing). An envelope the transaction created is restored
-to empty/hidden/unarmed — ReaScript has no envelope-delete call — and the
-error says so; one REAPER undo removes it outright.
+to empty — ReaScript has neither an envelope-delete call nor an envelope-state
+setter in this build — and the error says so; one REAPER undo removes it
+outright. When the transaction creates an envelope, REAPER seeds it with a
+time-0 point at the parameter's current value; that point is kept (the
+parameter holds its current value until the first written point) and counts
+in the verified final state.
 
 The reply carries the legacy `inserted_count`, `points`, and `cleared_range`
 fields, plus the envelope state, track automation mode, `final_hash` (the
 same canonical hash the read command returns), and
 `verification: { requested, replaced, inserted, skipped, confirmed, refused }`
-— `refused` is nonzero only in a refused reply, which never mutates. By
-default a successful write shows and arms the envelope lane (as before);
-`show_envelopes: false` writes data only. The command sits inside one named
-undo block (`undo_label` on the command envelope).
+— `refused` is nonzero only in a refused reply, which never mutates. The
+write touches points only: this REAPER build exports no
+`SetEnvelopeInfo_Value`, so envelope visibility/arm cannot be set (or
+changed) from the bridge — the reply reports that state as-is, and the
+single-write command still calls `SetCursorContext` so REAPER displays the
+envelope it just wrote. The command sits inside one named undo block
+(`undo_label` on the command envelope).
 
 ### apply_automation_transaction
 ```json
@@ -581,7 +588,7 @@ command id), `rolled_back: false`, `touched_envelopes` (exact track/FX/
 parameter identities), and per-write summaries with the same `verification`
 counts and `final_hash` as `write_fx_param_automation`. Same per-write
 semantics (inclusive replacement, idempotent skips, automation-item refusal)
-as that command; `show_envelopes` defaults true.
+as that command.
 
 ### get_fx_param_automation
 

@@ -363,13 +363,13 @@ def tool_write_automation(args):
     return _forward("write_fx_param_automation", args,
                     ("fx_name_contains", "fx_index", "fx_scope",
                      "param_name_contains", "param_index", "points",
-                     "ranges", "clear_existing_in_range", "show_envelopes"),
+                     "ranges", "clear_existing_in_range"),
                     track=True, timeout_ms=30000, dry_run=True)
 
 
 def tool_apply_automation_transaction(args):
     return _forward("apply_automation_transaction", args,
-                    ("writes", "transaction_id", "show_envelopes"),
+                    ("writes", "transaction_id"),
                     timeout_ms=30000, dry_run=True)
 
 
@@ -1288,7 +1288,6 @@ TOOLS = [
             "ranges": {"type": "array", "items": {"type": "object"},
                        "description": "[{start_time, end_time}] inclusive replacement scope"},
             "clear_existing_in_range": {"type": "boolean"},
-            "show_envelopes": {"type": "boolean"},
         }, required=["points"]),
         "handler": tool_write_automation,
     },
@@ -1305,7 +1304,6 @@ TOOLS = [
                                        "target_track_index, fx_guid|fx_name_contains|"
                                        "fx_index, param_index, points, ranges}]")},
             "transaction_id": {"type": "string"},
-            "show_envelopes": {"type": "boolean"},
         }, required=["writes"]),
         "handler": tool_apply_automation_transaction,
     },

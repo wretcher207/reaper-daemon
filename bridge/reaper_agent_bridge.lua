@@ -1798,18 +1798,15 @@ function automation.restore(snap, envelope)
           p.tension or 0, p.selected, true)
       end
       reaper.Envelope_SortPoints(envelope)
-      if snap.state then
-        for key, value in pairs(snap.state) do
-          if value ~= nil then pcall(reaper.SetEnvelopeInfo_Value, envelope, key, value) end
-        end
-      end
+      -- Envelope active/visible/arm state is intentionally not restored: this
+      -- REAPER build has no SetEnvelopeInfo_Value (verified against the
+      -- installed API), and the write path never modifies that state, so
+      -- there is nothing to undo on that axis.
     else
       -- ReaScript has no delete-envelope call, so an envelope this transaction
-      -- created is restored to empty/hidden/unarmed; because creation sits
-      -- inside the transaction's undo block, one REAPER undo removes it.
-      pcall(reaper.SetEnvelopeInfo_Value, envelope, "B_VISIBLE", 0)
-      pcall(reaper.SetEnvelopeInfo_Value, envelope, "B_ARM", 0)
-      note = "envelope created by this transaction was emptied and hidden; one REAPER undo deletes it"
+      -- created is restored to empty; because creation sits inside the
+      -- transaction's undo block, one REAPER undo removes it.
+      note = "envelope created by this transaction was emptied (ReaScript cannot delete an FX envelope); one REAPER undo deletes it"
     end
   end
   pcall(reaper.SetMediaTrackInfo_Value, snap.track, "I_AUTOMODE", snap.automation_mode)
@@ -1963,7 +1960,7 @@ function automation.prepare_write(write)
   }
 end
 
-function automation.apply_prepared(prepared, show)
+function automation.apply_prepared(prepared)
   local envelope = prepared.envelope
   if not envelope then
     envelope = reaper.GetFXEnvelope(prepared.track, prepared.api_index,
@@ -1971,6 +1968,11 @@ function automation.apply_prepared(prepared, show)
     if not envelope then error("NO_ENVELOPE: Could not create FX envelope") end
     prepared.envelope = envelope
     prepared.created = true
+    -- REAPER seeds a new envelope with a time-0 point at the parameter's
+    -- current value. It is envelope state REAPER added, not caller data: keep
+    -- it (the parameter holds its current value until the first written
+    -- point) and count it in the intended state verification proves against.
+    prepared.seed_points = automation.underlying_points(envelope)
   end
   prepared.mutated = true
   local time_to_qn = function(t) return reaper.TimeMap2_timeToQN(0, t) end
@@ -2020,11 +2022,6 @@ function automation.apply_prepared(prepared, show)
   prepared.skip_keys = skip_keys
   prepared.inserted, prepared.skipped = inserted, skipped
   reaper.Envelope_SortPoints(envelope)
-  if show ~= false then
-    pcall(reaper.SetEnvelopeInfo_Value, envelope, "B_VISIBLE", 1)
-    pcall(reaper.SetEnvelopeInfo_Value, envelope, "B_ARM", 1)
-    pcall(reaper.SetEnvelopeInfo_Value, envelope, "I_TCPH", 80)
-  end
 end
 
 -- Reread proof: every submitted point must exist exactly, and the whole
@@ -2053,8 +2050,14 @@ function automation.verify_prepared(prepared)
       .. "] did not reread back from the envelope")
   end
   local intended = {}
-  for _, p in ipairs(prepared.snap.points) do
-    if not prepared.deleted_lookup[p.index] then intended[#intended + 1] = p end
+  if prepared.snap.existed then
+    for _, p in ipairs(prepared.snap.points) do
+      if not prepared.deleted_lookup[p.index] then intended[#intended + 1] = p end
+    end
+  else
+    for _, p in ipairs(prepared.seed_points or {}) do
+      intended[#intended + 1] = p
+    end
   end
   for _, p in ipairs(prepared.points) do
     if not prepared.skip_keys[automation.point_key(p, time_to_qn)] then
@@ -2119,7 +2122,7 @@ function automation.execute(writes, opts)
   end
 
   for _, p in ipairs(prepared) do
-    local ok, err = pcall(automation.apply_prepared, p, opts.show ~= false)
+    local ok, err = pcall(automation.apply_prepared, p)
     if not ok then rollback(err) end
     local ok2, err2 = pcall(automation.verify_prepared, p)
     if not ok2 then rollback(err2) end
@@ -2276,8 +2279,7 @@ end
 -- the write now snapshots, replaces, rereads, and rolls itself back.
 function automation.write_command(command)
   local payload = command.payload or {}
-  local body, prepared = automation.execute({ payload },
-    { show = payload.show_envelopes ~= false })
+  local body, prepared = automation.execute({ payload }, {})
   local summary, p = body.writes[1], prepared[1]
   local echo = {}
   for _, point in ipairs(p.points) do
@@ -2311,7 +2313,7 @@ function automation.transaction_command(command)
   if type(writes) ~= "table" or #writes == 0 then
     error("BAD_PAYLOAD: writes must be a non-empty array of write objects")
   end
-  local body = automation.execute(writes, { show = payload.show_envelopes ~= false })
+  local body = automation.execute(writes, {})
   local touched = {}
   for i, summary in ipairs(body.writes) do
     touched[i] = {
