@@ -644,6 +644,9 @@ def describe_change(name, tool_input, focus=None):
         "track": track,
         "fx_name_contains": fx,
         "fx_index": fx_index,
+        "fx_scope": merged.get("fx_scope"),
+        "param_index": (merged.get("param_index")
+                        if isinstance(merged.get("param_index"), int) else None),
         "bars": _change_bars(merged, focus),
     }
 
@@ -664,6 +667,64 @@ def describe_change(name, tool_input, focus=None):
         record["ab_blocked"] = f"FX {action}: nothing left to toggle"
     else:
         record["ab_blocked"] = "no FX to toggle on this change"
+    return record
+
+
+def add_direct_restore(record, result_text):
+    """Attach exact before/after evidence for a safely reversible FX set.
+
+    The audition strip's A/B toggle can itself add an entry to REAPER's undo
+    history. A later generic Ctrl+Z therefore cannot promise to hit the agent
+    edit. set_fx_param results already carry stable identities and the exact
+    quantized values on both sides, so preserve those facts for a guarded
+    in-process restore. If any field is absent or malformed, leave the record
+    on the ordinary shared-stack undo path.
+    """
+    if not isinstance(record, dict) or record.get("tool") != "set_fx_param":
+        return record
+    if not isinstance(result_text, str):
+        return record
+    try:
+        result = json.loads(result_text.strip())
+    except (TypeError, ValueError):
+        return record
+    data = result.get("data") if isinstance(result, dict) else None
+    if not isinstance(data, dict):
+        return record
+    track = data.get("track")
+    fx = data.get("fx")
+    parameter = data.get("parameter")
+    before = parameter.get("before") if isinstance(parameter, dict) else None
+    after = parameter.get("after") if isinstance(parameter, dict) else None
+    if not all(isinstance(value, dict)
+               for value in (track, fx, parameter, before, after)):
+        return record
+
+    track_guid = track.get("guid")
+    fx_guid = fx.get("guid")
+    api_index = fx.get("api_index")
+    param_index = parameter.get("index", record.get("param_index"))
+    before_value = before.get("normalized_value")
+    after_value = after.get("normalized_value")
+    if (not isinstance(track_guid, str) or not track_guid
+            or not isinstance(fx_guid, str) or not fx_guid
+            or not isinstance(api_index, int)
+            or not isinstance(param_index, int)
+            or not isinstance(before_value, (int, float))
+            or not isinstance(after_value, (int, float))):
+        return record
+
+    record["restore"] = {
+        "kind": "fx_param",
+        "track_guid": track_guid,
+        "fx_guid": fx_guid,
+        "fx_api_index": api_index,
+        "param_index": param_index,
+        "before_normalized": before_value,
+        "after_normalized": after_value,
+        "before_formatted": before.get("formatted_value"),
+        "after_formatted": after.get("formatted_value"),
+    }
     return record
 
 
@@ -1609,6 +1670,7 @@ class ConsoleSidecar:
         # false — error or refused — means nothing happened.
         if event.get("ok") is False:
             return
+        add_direct_restore(record, event.get("text"))
         record["verdict"] = event.get("verdict")
         record["measured"] = event.get("ok") is True and bool(event.get("measurement"))
         self.last_change = record

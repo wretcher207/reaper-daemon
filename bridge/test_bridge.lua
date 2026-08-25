@@ -78,6 +78,22 @@ eq(fxs.parameter_count, 37, "FX summary keeps extra fields")
 eq(fx_guid_calls[1].track, "track-object", "FX GUID receives the real track")
 eq(fx_guid_calls[1].api_index, 0x1000002, "FX GUID receives encoded API index")
 
+-- A set result must carry the same stable FX identity. The console cannot
+-- safely restore by an index that may now point at a different plugin.
+_G.reaper.GetTrackGUID = function(track)
+  return track == "track-object" and "{TRACK-GUID}" or nil
+end
+local set_result = B.set_fx_param_result(
+  "track-object", 2, "Track 2", 1, 1, "track", "VST3: Test",
+  { normalized_value = 0.64 }, { normalized_value = 0.60 })
+eq(set_result.track.guid, "{TRACK-GUID}", "set result carries track GUID")
+eq(set_result.fx.guid, "{FX-GUID-1}", "set result carries FX GUID")
+eq(set_result.fx.api_index, 1, "set result carries FX API index")
+eq(set_result.parameter.before.normalized_value, 0.64,
+   "set result carries exact before value")
+eq(set_result.parameter.after.normalized_value, 0.60,
+   "set result carries exact after value")
+
 -- Live GUID smoke testing exposed a Lua truthiness trap in batch results:
 -- `ok and nil or tostring(data)` always selected tostring(data), so successful
 -- subcommands carried a fake `error: table: ...`. Success and failure fields

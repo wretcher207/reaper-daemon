@@ -386,6 +386,21 @@ do
   ok("a change with no verdict field still explains itself",
      select(2, M.ab_reason({})) ~= nil)
 
+  local restore_change = {
+    restore = { kind = "fx_param", before_normalized = 0.64,
+                after_normalized = 0.5995 }
+  }
+  ok("exact restore evidence survives JSON",
+     json.decode(json.encode(restore_change)).restore.before_normalized == 0.64)
+  eq("the recorded after-value is safe to restore",
+     M.restore_decision(0.5995, 0.64, 0.5995), "restore")
+  eq("a restored value is idempotent",
+     M.restore_decision(0.64, 0.64, 0.5995), "already")
+  eq("a later edit is never overwritten",
+     M.restore_decision(0.72, 0.64, 0.5995), "changed")
+  eq("missing evidence is refused",
+     M.restore_decision(nil, 0.64, 0.5995), "incomplete")
+
   -- Every verdict must be a complete instruction. After a compaction the model
   -- no longer has the change in context, so "too much" alone is unanswerable.
   for _, verdict in ipairs(M.VERDICTS) do

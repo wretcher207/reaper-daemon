@@ -374,6 +374,18 @@ function M.ab_reason(change)
   return nil, change.ab_blocked or "nothing to toggle on this change"
 end
 
+-- Pure guard for an evidence-backed parameter restore. `restore` means the
+-- value is still exactly the agent's result; `already` is idempotent; `changed`
+-- refuses to overwrite a later human or agent edit.
+function M.restore_decision(current, before, after, epsilon)
+  current, before, after = tonumber(current), tonumber(before), tonumber(after)
+  if not current or not before or not after then return "incomplete" end
+  epsilon = tonumber(epsilon) or 0.000001
+  if math.abs(current - before) <= epsilon then return "already" end
+  if math.abs(current - after) <= epsilon then return "restore" end
+  return "changed"
+end
+
 if _G.REAPER_CONSOLE_SELFTEST then return M end
 
 -- ---------------------------------------------------------------------------
@@ -643,7 +655,7 @@ end
 -- ---------------------------------------------------------------------------
 --
 -- Every one of these runs in-process. The panel IS inside REAPER, so Locate,
--- A/B and Undo need no bridge round trip, no render and no paid turn: they are
+-- A/B and Restore/Undo need no bridge round trip, no render and no paid turn: they are
 -- ordinary API calls on the UI thread and they land in the same frame.
 
 local function track_by_name(name, exact)
@@ -674,6 +686,20 @@ local function resolve_track(selector)
     return track, track and nil or "no track is selected"
   end
   return track_by_name(selector.value, selector.kind == "track")
+end
+
+local function track_by_guid(guid)
+  if not guid or guid == "" then return nil end
+  local wanted = guid:upper()
+  local master = reaper.GetMasterTrack(0)
+  if master and (reaper.GetTrackGUID(master) or ""):upper() == wanted then
+    return master
+  end
+  for i = 0, reaper.CountTracks(0) - 1 do
+    local track = reaper.GetTrack(0, i)
+    if (reaper.GetTrackGUID(track) or ""):upper() == wanted then return track end
+  end
+  return nil
 end
 
 local function resolve_fx(track, change)
@@ -751,6 +777,59 @@ end
 local function undo_last()
   reaper.Main_OnCommand(40029, 0)
   note("Ctrl+Z sent. The stack is shared with your own edits.", 6)
+end
+
+-- A/B bypass toggles can add their own undo history after the agent edit. For
+-- set_fx_param the bridge result gives us a stronger path: stable identities
+-- plus exact before/after normalized values. Restore only while the parameter
+-- still equals the recorded after-value, so this can never overwrite a later
+-- human or agent adjustment.
+local function restore_or_undo(change)
+  local restore = type(change) == "table" and change.restore or nil
+  if type(restore) ~= "table" or restore.kind ~= "fx_param" then
+    undo_last()
+    return
+  end
+
+  local track = track_by_guid(restore.track_guid)
+  if not track then note("Cannot restore: the target track is gone.", 8); return end
+  local fx = tonumber(restore.fx_api_index)
+  local param = tonumber(restore.param_index)
+  if not fx or not param then note("Cannot restore: incomplete parameter identity.", 8); return end
+  if (reaper.TrackFX_GetFXGUID(track, fx) or ""):upper()
+       ~= tostring(restore.fx_guid or ""):upper() then
+    note("Cannot restore: the target FX moved or was replaced.", 8)
+    return
+  end
+
+  local current = reaper.TrackFX_GetParamNormalized(track, fx, param)
+  local before = tonumber(restore.before_normalized)
+  local after = tonumber(restore.after_normalized)
+  if not current or not before or not after then
+    note("Cannot restore: the recorded values are incomplete.", 8)
+    return
+  end
+  local decision = M.restore_decision(current, before, after)
+  if decision == "already" then
+    note("Already restored to " .. tostring(restore.before_formatted or "the prior value") .. ".", 5)
+    return
+  end
+  if decision == "changed" then
+    note("Cannot restore: this parameter changed again after the agent edit.", 8)
+    return
+  end
+  if decision ~= "restore" then
+    note("Cannot restore: the recorded values are incomplete.", 8)
+    return
+  end
+
+  reaper.Undo_BeginBlock2(0)
+  reaper.TrackFX_SetParamNormalized(track, fx, param, before)
+  reaper.TrackFX_EndParamEdit(track, fx, param)
+  reaper.Undo_EndBlock2(0, "Daemon Console: restore FX parameter", -1)
+  S.change_dismissed = change.id
+  S.ab_enabled = nil
+  note("Restored " .. tostring(restore.before_formatted or "the prior value") .. ".", 5)
 end
 
 -- ---------------------------------------------------------------------------
@@ -934,7 +1013,8 @@ local function draw_audition()
     if ImGui.Button(S.ctx, "\u{25B6} Loop") then loop_play() end
   end
   ImGui.SameLine(S.ctx)
-  if ImGui.Button(S.ctx, "\u{21BA} Undo") then undo_last() end
+  local undo_label = type(change.restore) == "table" and "\u{21BA} Restore" or "\u{21BA} Undo"
+  if ImGui.Button(S.ctx, undo_label) then restore_or_undo(change) end
 
   -- The verdicts. Each sends a complete instruction naming the target, so a
   -- compacted session cannot turn "too much" into "too much of what".
