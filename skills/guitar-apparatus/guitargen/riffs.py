@@ -58,6 +58,16 @@ _TOKENS = {
 }
 _RING_ARTS = {"let_ring", "sustain", "mute_ring"}
 
+# Two cells that are NOT notes — they shape how a note connects to what follows.
+#   _   TIE: hold the previous note through this step instead of resting. This is
+#       how a riff gets note VALUES (dotted 8ths, held-over-the-barline halves)
+#       instead of a machine-gun row of equal 16ths.
+#   ~   SLIDE INTO the next note: fires Argent's Slide keyswitch and forces the
+#       previous note to overlap the next attack, so the engine slurs rather than
+#       re-picks. Put it in the cell immediately BEFORE the note it leads into.
+TIE = "_"
+SLIDE = "~"
+
 
 def parse_bars(bars, steps_per_bar=16):
     """Turn a list of bar strings into hit dicts on an absolute step grid.
@@ -66,6 +76,7 @@ def parse_bars(bars, steps_per_bar=16):
     drum DSL), so `"Xxx. mx.x Xx.v Xxk."` is the same as `"Xxx.mx.xXx.vXxk."`.
     """
     raw = []
+    pending_slide = False
     for bi, bar in enumerate(bars):
         cells = [c for c in bar if not c.isspace()]
         if len(cells) != steps_per_bar:
@@ -75,17 +86,36 @@ def parse_bars(bars, steps_per_bar=16):
         for si, ch in enumerate(cells):
             if ch == ".":
                 continue
+            if ch == SLIDE:
+                if not raw:
+                    raise ValueError(
+                        f"bar {bi+1} cell {si+1}: {SLIDE!r} slides INTO the next "
+                        f"note, so it needs a note before it to slide from")
+                pending_slide = True
+                continue
+            if ch == TIE:
+                if not raw:
+                    raise ValueError(
+                        f"bar {bi+1} cell {si+1}: {TIE!r} holds the PREVIOUS note, "
+                        f"but no note has been played yet")
+                raw[-1]["ties"] = raw[-1].get("ties", 0) + 1
+                continue
             if ch not in _TOKENS:
                 raise ValueError(
                     f"bar {bi+1} cell {si+1}: unknown token {ch!r} — "
-                    f"valid: {' '.join(sorted(_TOKENS))} .")
+                    f"valid: {' '.join(sorted(_TOKENS))} {TIE} {SLIDE} .")
             tok = _TOKENS[ch]
             hit = {"step": bi * steps_per_bar + si,
                    "interval": tok[0], "art": tok[1]}
             if len(tok) > 2:
                 hit["dyad"] = tok[2]
+            if pending_slide:
+                hit["slide"] = True
+                pending_slide = False
             raw.append(hit)
-    # length: ring notes hold until the next onset; others are short (1 step).
+    # length: ring notes hold until the next onset; others are short (1 step) —
+    # unless tied, in which case the tie count is the floor and the note is held
+    # for its full written value (a chug that rings out, a half note over a bar).
     steps = [h["step"] for h in raw]
     for i, h in enumerate(raw):
         if h["art"] in _RING_ARTS:
@@ -94,6 +124,10 @@ def parse_bars(bars, steps_per_bar=16):
             h["len_steps"] = max(2, nxt - h["step"])
         else:
             h["len_steps"] = 1
+        ties = h.get("ties", 0)
+        if ties:
+            h["len_steps"] = max(h["len_steps"], ties + 1)
+            h["hold"] = True
     return raw
 
 
@@ -117,7 +151,8 @@ def bass_from_guitar(spec):
     for h in spec["hits"]:
         hits.append({"step": h["step"], "interval": 0,
                      "art": art_map.get(h["art"], "mute"),
-                     "len_steps": h.get("len_steps", 1)})
+                     "len_steps": h.get("len_steps", 1),
+                     "hold": h.get("hold", False)})
     return {"ppq": spec["ppq"], "steps_per_bar": spec["steps_per_bar"],
             "bars": spec["bars"], "map": "nolly_e", "hits": hits,
             "timing_bias": 0.05, "timing_sigma": 0.05}
@@ -131,17 +166,18 @@ def bass_from_guitar(spec):
 # redirect.
 # ---------------------------------------------------------------------------
 DEMO_BARS = [
-    # bars 1-2: OPEN ringing dissonant intro — big let-ring E power chords with
-    # ringing melodic notes (b7/tritone/5/b2). Rings and sings; the opposite of a
-    # muted chug. Then the heavy muted riff kicks in at bar 3 for contrast.
-    "o...7...b...5...",   # 1  E5 (rings) + D(b7) + Bb(tritone) + B(5), all open
-    "o...b...M...5...",   # 2  E5 + Bb + F(b2) + B, ringing
-    "Xxx.mx.xXx.vXxk.",   # 3  HEAVY muted riff kicks in: line walks F/Bb/D
-    "Xxx.kx.xXx.x2...",   # 4  answer: D move, hangs an E+b2 cluster (palm-muted)
-    "2...t...j...9...",   # 5  lift: palm-muted dissonant CLUSTERS over the E pedal
-    "2...t...j...r...",   # 6  lift answer, settles back onto the root ring
-    "Xxx.mx.xXx.vXxk.",   # 7  heavy riff returns
-    "XxxXxfXxvXxkXX.r",   # 8  build: gallop climbing 5/b5/b7 into a root-ring stab
+    # Written as two four-bar PHRASES, not eight one-bar loops. Every bar either
+    # ties over the barline or slides into the next one, so the part is carried
+    # forward instead of restarting; `_` gives real note values instead of a row
+    # of equal 16ths, and `~` slurs rather than re-picks.
+    "o_______~7___b__",   # 1  E5 rings a half, slides into D(b7), then Bb
+    "5___~b___M___7__",   # 2  B slides to Bb, F(b2), D — one connected line
+    "Xx_.mx.xXx.v_k_.",   # 3  HEAVY riff kicks in; chugs hold, line walks F/Bb/D
+    "Xx_.kx.xXx.x2___",   # 4  answer hangs an E+b2 cluster ACROSS the barline
+    "2___~t___j___9__",   # 5  lift: dissonant clusters, each sliding to the next
+    "2___~t___j___~r_",   # 6  lift answer slides home to the root ring
+    "Xx_.mx.xXx.n_v~f",   # 7  riff returns VARIED, with a 5th pickup into bar 8
+    "XxxXxfXxvXxk~o__",   # 8  gallop builds and RESOLVES on a ringing E5
 ]
 
 

@@ -184,3 +184,65 @@ def test_low_string_override_transposes_whole_riff():
     pitches = sorted(e["pitch"] for e in _played(events))
     # root at 45, fifth at 45+7=52
     assert pitches == [45, 52]
+
+
+# ---- connection: legato, ties, slides --------------------------------------
+# The riff-sounds-stabby class of bug. A ring note whose note-off lands exactly
+# on the next note-on makes Shreddage re-pick every note, so no phrase ever leads
+# into the next one. These lock the fix in.
+
+def test_ring_to_ring_overlaps_so_the_engine_slurs():
+    spec = riffs.make_spec(["o...5...b...7..."], "argent_e", timing_sigma=0.0)
+    played = sorted(_played(perform(spec, "argent_e", seed=7)[0]),
+                    key=lambda e: e["tick"])
+    assert len(played) == 4
+    for a, b in zip(played, played[1:]):
+        assert a["tick"] + a["dur"] > b["tick"], "ring note must hold past the next attack"
+
+
+def test_bass_is_never_slurred():
+    spec = riffs.bass_from_guitar(riffs.make_spec(["o...5...b...7..."], "argent_e"))
+    played = sorted(_played(perform(spec, "nolly_e", seed=7, is_bass=True)[0]),
+                    key=lambda e: e["tick"])
+    for a, b in zip(played, played[1:]):
+        assert a["tick"] + a["dur"] <= b["tick"], "the Nolly has no legato/slides"
+
+
+def test_tie_holds_a_muted_chug_for_its_written_value():
+    short = riffs.parse_bars(["x..............."])[0]
+    tied = riffs.parse_bars(["x___............"])[0]
+    assert short["len_steps"] == 1 and not short.get("hold")
+    assert tied["len_steps"] == 4 and tied["hold"]
+    a = _played(perform(riffs.make_spec(["x..............."], "argent_e",
+                                        timing_sigma=0.0), "argent_e", seed=1)[0])[0]
+    b = _played(perform(riffs.make_spec(["x___............"], "argent_e",
+                                        timing_sigma=0.0), "argent_e", seed=1)[0])[0]
+    assert b["dur"] > a["dur"] * 3
+
+
+def test_slide_token_fires_the_slide_keyswitch_and_forces_an_overlap():
+    spec = riffs.make_spec(["x......~f......."], "argent_e", timing_sigma=0.0)
+    events, _ = perform(spec, "argent_e", seed=1)
+    slide_pitch = KS_NOTES["slide"][0]
+    assert any(e["pitch"] == slide_pitch for e in events if e["type"] == "note")
+    a, b = sorted(_played(events), key=lambda e: e["tick"])
+    assert a["tick"] + a["dur"] > b["tick"], "a slide must be slurred, not re-picked"
+
+
+def test_slide_with_no_preceding_note_is_rejected():
+    with pytest.raises(ValueError, match="slide"):
+        riffs.parse_bars(["~x.............."])
+
+
+def test_tie_with_no_preceding_note_is_rejected():
+    with pytest.raises(ValueError, match="PREVIOUS"):
+        riffs.parse_bars(["_x.............."])
+
+
+def test_demo_riff_actually_connects_across_barlines():
+    spec = riffs.demo_guitar_spec()
+    played = sorted(_played(perform(spec, "argent_e", seed=101)[0]),
+                    key=lambda e: e["tick"])
+    slurs = sum(1 for a, b in zip(played, played[1:])
+                if a["tick"] + a["dur"] - b["tick"] >= 20)
+    assert slurs >= 15, f"demo riff only slurs {slurs} times — it will sound stabby"

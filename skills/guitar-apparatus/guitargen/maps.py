@@ -44,6 +44,10 @@ KS_NOTES = {
     "sustain": (0, 64), "mute": (1, 64), "staccato": (2, 64),
     "pwr_sustain": (3, 64), "pwr_mute": (4, 64),
     "pinch_harmonic": (0, 127), "rake": (0, 120),
+    # FX/utility slot: the Slide keyswitch (A-1 = 21) makes the engine slide INTO
+    # the next note instead of picking it. Paired with an overlapping note-off
+    # (see perform.py's legato pass) this is what carries one note to the next.
+    "slide": (21, 100),
 }
 
 MODWHEEL = 1  # CC1. This Hydra mutes via the Mute keyswitch, not the mod wheel,
@@ -75,6 +79,7 @@ GUITAR_MAPS = {
         "low_string": 28,                 # riff root E; physical low string = 25
         "modwheel_mute": False,           # Argent mutes via keyswitch + velocity
         "power_chords": True,             # root hits can voice power chords
+        "legato": True,                   # overlapping notes slur (HO/PO), not re-pick
     },
 }
 

@@ -36,6 +36,8 @@ class _Planned:
     depth: object      # int mod-wheel value, or None
     dur: int
     ks_slot: object    # articulation-slot name, or None (bass)
+    slide: bool = False   # authored `~`: slide INTO this note
+    slurred: bool = False  # the previous note is held through this attack
 
 # articulation -> (velocity center, lo, hi). Chugs live loud but with headroom so
 # the contour + jitter spread them across a band instead of piling at the top
@@ -84,6 +86,19 @@ NO_REPEAT_GAP = 4        # successive same-pitch chugs differ by at least this
 KS_TICKS = 16            # keyswitch note length
 KS_LEAD = 8              # place a keyswitch/CC this many ticks before its note
 
+# --- legato: the difference between a LINE and a row of stabs ---------------
+# A ringing note's written length ends exactly ON the next onset, and the SMF
+# writer emits note-off before note-on at the same tick. So Shreddage sees two
+# separate notes and PICKS both — every note in the part gets a fresh attack, no
+# matter how good the dynamics are. That is the "stabby, nothing leads into the
+# next" sound. Holding the note past the next attack instead makes the engine
+# slur (hammer-on / pull-off), which is how a phrase actually connects.
+LEGATO_OVERLAP = 30      # ticks the outgoing note hangs past the next attack
+LEGATO_MAX_GAP = 8       # steps: further apart than this and it is a new phrase
+_LEGATO_ARTS = {"sustain", "let_ring", "mute_ring"}
+# a slurred note is not re-picked, so it should not land at full pick velocity
+SLUR_VEL_DROP = 8
+
 
 def _clamp(v, lo, hi):
     return int(round(max(lo, min(hi, v))))
@@ -121,6 +136,7 @@ def perform(spec, map_name, *, seed=0x5152, is_bass=False):
     power_chords = bool(gm.get("power_chords"))
 
     # ---- pass 1: per-hit velocity from the deterministic contour -------------
+    phrase_steps = steps_per_bar * max(1, int(spec.get("phrase_bars", 4)))
     planned = []
     for h in hits:
         step = int(h["step"])
@@ -152,6 +168,14 @@ def perform(spec, map_name, *, seed=0x5152, is_bass=False):
         if art == "ghost":
             v -= 4
 
+        # phrase arc: a player builds ACROSS bars, not inside each one. Without
+        # this the contour resets every bar and eight bars read as eight
+        # unrelated loops instead of one four-bar phrase going somewhere.
+        ppos = (step % phrase_steps) / phrase_steps
+        v += 6.0 * ppos - 2.0
+        if step % phrase_steps == 0:
+            v += 4                       # top of the phrase lands hardest
+
         v += vrng.gauss(0, 5.0)          # garnish only
         vel = _clamp(v, lo, hi)
 
@@ -163,9 +187,12 @@ def perform(spec, map_name, *, seed=0x5152, is_bass=False):
 
         ks_slot = None if is_bass else ks_slot_for(art, interval == 0, power_chords)
 
-        dur = max(1, int(round(int(h.get("len_steps", 1)) * step_ticks
-                               * ART_LEN.get(art, 0.55))))
-        planned.append(_Planned(h, base_tick, pitch, vel, art, depth, dur, ks_slot))
+        # a TIED note is held for its full written value even when it is a mute —
+        # a chug that rings out for a dotted 8th is a note value, not a blip.
+        frac = 1.0 if h.get("hold") else ART_LEN.get(art, 0.55)
+        dur = max(1, int(round(int(h.get("len_steps", 1)) * step_ticks * frac)))
+        planned.append(_Planned(h, base_tick, pitch, vel, art, depth, dur,
+                                ks_slot, slide=bool(h.get("slide"))))
 
     # ---- golden no-repeat: never the same velocity twice in a row on one pitch
     by_pitch = {}
@@ -196,11 +223,47 @@ def perform(spec, map_name, *, seed=0x5152, is_bass=False):
             toff[t] = max(-tcap, min(tcap, o))
         return toff[t]
 
+    # Resolve every final tick BEFORE deciding durations: whether one note reaches
+    # the next depends on where the next one actually lands after micro-timing,
+    # not where it was written. Doing this in one pass used to leave the overlap
+    # up to the RNG, so legato happened by accident or not at all.
+    for p in planned:
+        p.tick = max(0, p.tick + int(round(tick_offset(p.tick) + tbias)))
+
+    # ---- legato pass: hold ringing notes THROUGH the next attack ------------
+    legato = bool(gm.get("legato")) and not is_bass
+    for i, p in enumerate(planned):
+        nxt = planned[i + 1] if i + 1 < len(planned) else None
+        if nxt is None:
+            continue
+        slur = nxt.pitch != p.pitch and (nxt.slide or (
+            legato and p.art in _LEGATO_ARTS and nxt.art in _LEGATO_ARTS
+            and (nxt.tick - p.tick) <= LEGATO_MAX_GAP * step_ticks))
+        if slur:
+            p.dur = max(1, nxt.tick - p.tick + LEGATO_OVERLAP)
+            nxt.slurred = True
+            # a slurred note is fretted, not picked — it must not land like an attack
+            nxt.vel = _clamp(nxt.vel - SLUR_VEL_DROP, 1, 127)
+        else:
+            # Anything NOT deliberately slurred must clear the next attack. A ring
+            # note's written length lands exactly on the next onset, so micro-timing
+            # alone used to leave a stray few-tick overlap — enough to make the
+            # engine flam or steal a voice, and never enough to actually slur.
+            p.dur = max(1, min(p.dur, nxt.tick - p.tick - 1))
+
     last_slot = None
     last_depth = None
     for p in planned:
-        off = int(round(tick_offset(p.tick) + tbias))
-        tick = max(0, p.tick + off)
+        tick = p.tick
+
+        # slide INTO this note: Argent's Slide keyswitch, fired just ahead of the
+        # attack it governs. Paired with the overlap above, the engine glides from
+        # the previous pitch instead of picking a fresh one.
+        if p.slide and "slide" in ks_notes and not is_bass:
+            sl_pitch, sl_vel = ks_notes["slide"]
+            events.append({"type": "note", "tick": max(0, tick - KS_LEAD - 2),
+                           "pitch": sl_pitch, "vel": sl_vel,
+                           "dur": KS_TICKS, "chan": 0})
 
         # articulation keyswitch: fire only when the slot changes (Mute <-> Sustain
         # as the riff moves between chugs and let-rings). A KS note sits a few

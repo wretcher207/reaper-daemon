@@ -27,6 +27,10 @@ David's live UI (see `docs/instruments.md`).
   `.`=rest `x`=muted chug `X`=accented (power chord) `o`=let-ring root (power
   chord) `g`=ghost `4`=fourth `5`=fifth `b`=tritone `7`=min7 `h`=octave (let-ring).
   Let-ring notes hold until the next onset; mutes are short.
+  **Connection cells** — what stops a riff sounding stabby: `_` TIES the previous
+  note through this step (real note values, held over the barline, instead of a
+  row of equal 16ths), and `~` SLIDES into the next note (fires Argent's Slide
+  keyswitch and forces the overlap). Write phrases, not bars.
 - **Performance engine** (`guitargen/perform.py`) — deterministic musical contour
   drives dynamics (downbeats / pushes accent, ghosts sit back), RNG is only
   garnish, and a golden no-repeat rule keeps consecutive chugs off one velocity —
@@ -35,6 +39,12 @@ David's live UI (see `docs/instruments.md`).
   chord** (Argent auto-voices it), and melodic non-root notes stay single so a
   lead line reads as a line. **Double-tracking** is two *performances*, not a copy:
   same riff, different `--seed` on argent-l vs argent-r (live-proven width).
+  **Legato** is deliberate, not accidental: a ringing note is held ~30 ticks PAST
+  the next attack so Shreddage slurs (hammer-on/pull-off) instead of re-picking,
+  the slurred note lands softer because it was fretted rather than struck, and
+  anything not meant to slur is clamped to clear the next onset so micro-timing
+  can never leave a flam. Dynamics also arc across a 4-bar phrase (`phrase_bars`),
+  not just within each bar.
 - **CC-aware SMF writer** (`guitargen/smf.py`) — notes + control change (CC is
   ready for mod-wheel maps; Argent does not need it).
 
