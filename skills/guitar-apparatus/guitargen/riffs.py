@@ -10,9 +10,10 @@ keeps a part editable by eye the way the drum DSL's step grid is:
     b   tritone (root+6),  let ring      7   min7th  (root+10), let ring
     h   octave  (root+12), let ring
 
-  dissonant palm-muted RINGS (Mute keyswitch, high vel so it half-mutes & sings):
-    r   root,   ring        2   b2 (root+1)     t   tritone (root+6)
-    6   b6 (root+8)         9   b9 (root+13)
+  dissonant palm-muted RING CLUSTERS (Mute keyswitch, top vel; root struck with
+  the clashing note so you hear it crunch):
+    r   root ring (single)  2   E+b2            t   E+tritone
+    9   E+b9                j   E+maj7
 
 Let-ring / sustained / palm-muted-ring notes hold until the next onset (min two
 16ths); muted and accented notes are short and tight. Intervals are semitones
@@ -22,19 +23,25 @@ root chug stays single-note; melodic (non-root) notes and every mute_ring stay
 single. See perform.py.
 """
 
-# token -> (interval semitones above low string, articulation)
+# token -> (interval semitones above low string, articulation[, dyad]).
+# `dyad` (optional 3rd field) adds a SECOND note that many semitones above the
+# first, struck together — a real cluster you hear clash, not a single note.
 #
-# Lowercase let-ring/power-chord tokens (o 4 5 b 7 h) and the dissonant
-# palm-muted-RING tokens (r 2 t 6 9) are the two ways to hold a note: `o/5/b/7/h`
-# ring open (Sustain / power chord); `r/2/t/6/9` ring PALM-MUTED and dissonant
-# (Mute keyswitch, high velocity so it half-mutes and sings) over the low pedal.
+# Lowercase let-ring/power-chord tokens (o 4 5 b 7 h) ring OPEN (Sustain / power
+# chord). The dissonant palm-muted-RING tokens (r 2 t 9 j) fire the Mute
+# keyswitch at top velocity (half-muted so it sings) and hang; the numbered/lettered
+# ones strike the low-E ROOT together with a clashing interval — b2, tritone, b9,
+# maj7 — so the dissonance actually bites.
 _TOKENS = {
     "x": (0, "mute"), "X": (0, "accent"), "o": (0, "let_ring"), "g": (0, "ghost"),
     "4": (5, "mute"), "5": (7, "let_ring"), "b": (6, "let_ring"),
     "7": (10, "let_ring"), "h": (12, "let_ring"),
-    # dissonant palm-muted rings (intervals against the low pedal):
-    "r": (0, "mute_ring"), "2": (1, "mute_ring"), "t": (6, "mute_ring"),
-    "6": (8, "mute_ring"), "9": (13, "mute_ring"),
+    # dissonant palm-muted RING CLUSTERS: root + the clashing interval, together
+    "r": (0, "mute_ring"),          # root ring, single note
+    "2": (0, "mute_ring", 1),       # E + b2  (minor-2nd crunch)
+    "t": (0, "mute_ring", 6),       # E + tritone
+    "9": (0, "mute_ring", 13),      # E + b9  (minor-2nd, octave up)
+    "j": (0, "mute_ring", 11),      # E + maj7
 }
 _RING_ARTS = {"let_ring", "sustain", "mute_ring"}
 
@@ -51,9 +58,12 @@ def parse_bars(bars, steps_per_bar=16):
                 continue
             if ch not in _TOKENS:
                 raise ValueError(f"bar {bi} step {si}: unknown token {ch!r}")
-            interval, art = _TOKENS[ch]
-            raw.append({"step": bi * steps_per_bar + si,
-                        "interval": interval, "art": art})
+            tok = _TOKENS[ch]
+            hit = {"step": bi * steps_per_bar + si,
+                   "interval": tok[0], "art": tok[1]}
+            if len(tok) > 2:
+                hit["dyad"] = tok[2]
+            raw.append(hit)
     # length: ring notes hold until the next onset; others are short (1 step).
     steps = [h["step"] for h in raw]
     for i, h in enumerate(raw):
@@ -103,8 +113,8 @@ DEMO_BARS = [
     "Xx.xXx.xXx.x2...",   # 2  answer: hangs a dissonant b2, palm-muted, ringing
     "Xxx.Xx.xXx.xXxx.",   # 3  riff A again
     "Xx.xXx.xXx.xt...",   # 4  answer: hangs a tritone, palm-muted, ringing
-    "2...t...6...9...",   # 5  lift: dissonant palm-muted rings over the E pedal
-    "2...t...6...r...",   # 6  lift answer, settles back onto the root (still muted)
+    "2...t...j...9...",   # 5  lift: palm-muted dissonant CLUSTERS over the E pedal
+    "2...t...j...r...",   # 6  lift answer, settles back onto the root ring
     "Xxx.Xx.xXx.xXxx.",   # 7  riff A returns
     "XxxXxxXxxXxxXX.r",   # 8  build: 3+3+3+3 gallop into a palm-muted root ring
 ]
