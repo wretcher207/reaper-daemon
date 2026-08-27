@@ -57,6 +57,13 @@ _TOKENS = {
     "j": (0, "mute_ring", 11),      # E + maj7
 }
 _RING_ARTS = {"let_ring", "sustain", "mute_ring"}
+# A ghost is a dead click, not a note — it never carries.
+_SHORT_ARTS = {"ghost"}
+# How far a palm-muted chug carries when there is room. Two 16ths = an 8th of
+# body under the palm, which is the honest value of a chug sitting before a rest.
+# Going further makes a chug before a real gap ring like a sustain and eats the
+# space the riff breathes in.
+MUTE_CARRY = 2
 
 # Two cells that are NOT notes — they shape how a note connects to what follows.
 #   _   TIE: hold the previous note through this step instead of resting. This is
@@ -113,17 +120,23 @@ def parse_bars(bars, steps_per_bar=16):
                 hit["slide"] = True
                 pending_slide = False
             raw.append(hit)
-    # length: ring notes hold until the next onset; others are short (1 step) —
-    # unless tied, in which case the tie count is the floor and the note is held
-    # for its full written value (a chug that rings out, a half note over a bar).
+    # length: ring notes hold until the next onset. A palm-muted CHUG carries to
+    # the next onset too, capped at MUTE_CARRY (David, 2026-08-27: "really stabby
+    # again, really pick-scrapey ... a palm mute to carry each chug into the
+    # next"). A chug pinned to one 16th is a 44ms blip at 188 with silence behind
+    # it — all pick attack, no body under the palm. Ghosts stay short: a ghost IS
+    # a dead click. Ties still win, so a written value holds for its full length.
     steps = [h["step"] for h in raw]
     for i, h in enumerate(raw):
+        nxt = steps[i + 1] if i + 1 < len(steps) else (
+            (max(steps) // steps_per_bar + 1) * steps_per_bar)
+        gap = nxt - h["step"]
         if h["art"] in _RING_ARTS:
-            nxt = steps[i + 1] if i + 1 < len(steps) else (
-                (max(steps) // steps_per_bar + 1) * steps_per_bar)
-            h["len_steps"] = max(2, nxt - h["step"])
-        else:
+            h["len_steps"] = max(2, gap)
+        elif h["art"] in _SHORT_ARTS:
             h["len_steps"] = 1
+        else:
+            h["len_steps"] = max(1, min(gap, MUTE_CARRY))
         ties = h.get("ties", 0)
         if ties:
             h["len_steps"] = max(h["len_steps"], ties + 1)

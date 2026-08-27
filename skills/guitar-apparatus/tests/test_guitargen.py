@@ -74,7 +74,10 @@ def test_parse_bars_intervals_and_ring_length():
     assert hits[0]["interval"] == 0 and hits[0]["art"] == "let_ring"
     # the let-ring holds until the next onset at step 4
     assert hits[0]["len_steps"] == 4
-    assert hits[1]["len_steps"] == 1  # the mute is short
+    # the chug carries under the palm too, but only as far as MUTE_CARRY — a ring
+    # still holds strictly longer
+    assert hits[1]["len_steps"] == riffs.MUTE_CARRY
+    assert hits[0]["len_steps"] > hits[1]["len_steps"]
 
 
 def test_bass_collapses_intervals_to_root():
@@ -211,13 +214,31 @@ def test_bass_is_never_slurred():
 def test_tie_holds_a_muted_chug_for_its_written_value():
     short = riffs.parse_bars(["x..............."])[0]
     tied = riffs.parse_bars(["x___............"])[0]
-    assert short["len_steps"] == 1 and not short.get("hold")
+    assert short["len_steps"] == riffs.MUTE_CARRY and not short.get("hold")
     assert tied["len_steps"] == 4 and tied["hold"]
     a = _played(perform(riffs.make_spec(["x..............."], "argent_e",
                                         timing_sigma=0.0), "argent_e", seed=1)[0])[0]
     b = _played(perform(riffs.make_spec(["x___............"], "argent_e",
                                         timing_sigma=0.0), "argent_e", seed=1)[0])[0]
-    assert b["dur"] > a["dur"] * 3
+    assert b["dur"] > a["dur"] * 1.9
+
+
+def test_chugs_carry_into_each_other_instead_of_stabbing():
+    """David, 2026-08-27: "really stabby again, really pick-scrapey ... a palm
+    mute to carry each chug into the next." Every chug in a gallop must still be
+    sounding when the next one is picked — but stop just short of it, so a
+    same-pitch chug re-picks cleanly instead of flamming or stealing its voice.
+    """
+    spec = riffs.make_spec(["x.xxx.xxx.xxx.xx"], "argent_e", timing_sigma=0.0)
+    played = sorted(_played(perform(spec, "argent_e", seed=7)[0]),
+                    key=lambda e: e["tick"])
+    step_ticks = 120                       # 480 ppq / 16ths
+    assert len(played) == 12               # four gallops, three notes each
+    for a, b in zip(played, played[1:]):
+        gap = b["tick"] - (a["tick"] + a["dur"])
+        assert gap > 0, "a chug must clear the next attack, not flam into it"
+        assert gap <= 0.15 * step_ticks, (
+            f"silent gap of {gap} ticks between chugs — that is the stab")
 
 
 def test_slide_token_fires_the_slide_keyswitch_and_forces_an_overlap():

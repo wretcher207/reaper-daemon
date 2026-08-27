@@ -43,7 +43,12 @@ class _Planned:
 # the contour + jitter spread them across a band instead of piling at the top
 # (a pile at the ceiling reads as machine-flat — the same lesson as the drums).
 ART_VEL = {
-    "mute":     (98, 82, 116),
+    # On Argent the Mute keyswitch's VELOCITY is the mute depth, and low is the
+    # very-muted, scrape-like end of it. The old floor of 82 put a slice of every
+    # riff down in that scrape zone, which is half of what "pick-scrapey" was.
+    # Floor lifted out of it; the band is still 22 wide so the contour and the
+    # no-repeat rule have room to move.
+    "mute":     (104, 96, 118),
     "accent":   (116, 104, 127),
     "sustain":  (104, 90, 122),
     "let_ring": (108, 94, 124),
@@ -75,10 +80,16 @@ ART_MUTE = {
     "mute": 116, "accent": 96, "sustain": 10, "let_ring": 4, "ghost": 122,
 }
 
-# articulation -> note length as a fraction of its authored step length. Mutes are
-# short and tight; sustains ring for their written value.
+# articulation -> note length as a fraction of its authored step length. A chug
+# holds almost all the way to the next attack: under the palm the string keeps
+# sounding between picks, and that continuous body is what carries one chug into
+# the next. 0.55 (the old value) cut every chug to ~44ms at 188 and left silence
+# behind it — all attack, no note, which is the "stabby / pick-scrapey" sound
+# David called out (2026-08-27). The legato pass still trims to one tick before
+# the next attack, so a same-pitch chug re-picks cleanly instead of flamming.
+# A ghost stays a dead click.
 ART_LEN = {
-    "mute": 0.55, "accent": 0.7, "sustain": 1.0, "let_ring": 1.0, "ghost": 0.4,
+    "mute": 0.95, "accent": 0.95, "sustain": 1.0, "let_ring": 1.0, "ghost": 0.4,
     "mute_ring": 1.0,
 }
 
