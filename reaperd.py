@@ -1104,6 +1104,89 @@ def cmd_jam(args):
     return rc
 
 
+def cmd_shred(args):
+    """Render a humanized guitar/bass riff and insert it onto a named track.
+
+    The guitar-side counterpart to `groove`: shells out to the guitar-apparatus
+    renderer (notes + mod-wheel palm-mute CC + keyswitch), then inserts the .mid
+    through the bridge's `insert_midi_file`, the same write path the drum groove
+    uses. One part per call; drive a double-tracked pair by calling twice with two
+    seeds onto argent-l / argent-r, and once more with --part bass.
+    """
+    br = args.bridge_root
+    if not status_ok(br, quiet=True):
+        print("[shred] REAPER is DOWN — relaunch it, nothing inserted.", file=sys.stderr)
+        return 1
+    shredgen = os.path.join(br, "skills", "guitar-apparatus", "shredgen.py")
+    if not os.path.isfile(shredgen):
+        print(f"[shred] ERROR: guitar engine not found at {shredgen}", file=sys.stderr)
+        return 1
+
+    if args.position is not None:
+        pos = {"type": "time", "seconds": float(args.position)}
+    else:
+        pos = {"type": "cursor"}
+
+    # REAPER imports a .mid by REFERENCE (not copied in-project) on this build,
+    # so the file must OUTLIVE the item — a deleted temp file leaves an empty
+    # take (proven live). Render to a persistent, project-referable folder and
+    # keep it; the .mid is the take's source of truth.
+    render_dir = os.path.join(br, "rendered-midi")
+    os.makedirs(render_dir, exist_ok=True)
+    safe_track = re.sub(r"[^A-Za-z0-9._-]", "_", args.track)
+    uid = secrets.token_hex(3)
+    midi = os.path.join(render_dir,
+                        f"shred-{args.part}-{safe_track}-{args.seed}-{uid}.mid")
+    gen = [sys.executable, shredgen, "--part", args.part, "--map", args.map,
+           "--seed", str(args.seed), "--tempo", str(args.tempo or 120),
+           "--out", midi]
+    if args.bars_file:
+        gen += ["--bars-file", args.bars_file]
+    else:
+        gen += ["--riff", args.riff]
+    if args.low_string is not None:
+        gen += ["--low-string", str(args.low_string)]
+
+    print(f"[shred] Rendering {args.part}: {args.bars_file or args.riff}")
+    try:
+        r = subprocess.run(gen, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        print("[shred] ERROR: guitar engine did not finish in 120s", file=sys.stderr)
+        try:
+            os.unlink(midi)
+        except OSError:
+            pass
+        return 1
+    if r.returncode != 0:
+        print(r.stderr or r.stdout, file=sys.stderr)
+        try:
+            os.unlink(midi)
+        except OSError:
+            pass
+        return 1
+    if r.stdout:
+        print(r.stdout.rstrip())
+
+    payload = {"target_track_name": args.track, "midi_path": midi, "position": pos}
+    if args.tempo is not None:
+        payload["project_tempo"] = args.tempo
+    res = send_type("insert_midi_file", payload, bridge_root=br,
+                    timeout_ms=20000, resolve=False, repair=False)
+    if not res.get("ok"):
+        # the item was never created; the orphaned render is just clutter.
+        try:
+            os.unlink(midi)
+        except OSError:
+            pass
+        print(f"[shred] FAILED: {res.get('error')}", file=sys.stderr)
+        return 1
+    tname = res.get("data", {}).get("track", {}).get("name", "track")
+    print(f"[shred] OK: inserted {args.part} on {tname} at "
+          f"{args.position if args.position is not None else 'cursor'}s "
+          f"(source: {midi})")
+    return 0
+
+
 def cmd_riff(args):
     """Read a guitar stem's transients into a proposed kick grid (David's step 1).
 
@@ -1546,6 +1629,23 @@ def build_parser():
 
     s = sub.add_parser("jam", help="render a DSL beat from stdin onto the selected track")
     s.set_defaults(func=cmd_jam)
+
+    s = sub.add_parser("shred",
+                       help="render a humanized guitar/bass riff and insert it")
+    s.add_argument("--track", required=True, help="target track name")
+    s.add_argument("--part", choices=["guitar", "bass"], default="guitar")
+    s.add_argument("--riff", default="demo",
+                   help="built-in riff: demo | probe (ignored with --bars-file)")
+    s.add_argument("--bars-file", default=None,
+                   help="custom riff: text file, one 16-char bar per line")
+    s.add_argument("--map", default="hydra_drop_a", help="tuning map (guitar part)")
+    s.add_argument("--seed", type=int, default=0x5152, help="RNG seed")
+    s.add_argument("--low-string", type=int, default=None,
+                   help="override the map's low-string MIDI note (probe result)")
+    s.add_argument("--position", type=float, default=None,
+                   help="time in seconds (default: edit cursor)")
+    s.add_argument("--tempo", type=int, default=None, help="project tempo override")
+    s.set_defaults(func=cmd_shred)
 
     s = sub.add_parser("riff",
                        help="read a guitar stem's transients into a proposed kick grid")
