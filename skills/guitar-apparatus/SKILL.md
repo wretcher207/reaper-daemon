@@ -26,7 +26,9 @@ David's live UI (see `docs/instruments.md`).
 - **Riff notation** (`guitargen/riffs.py`) — one 16-char bar per line:
   `.`=rest `x`=muted chug `X`=accented (power chord) `o`=let-ring root (power
   chord) `g`=ghost `4`=fourth `5`=fifth `b`=tritone `7`=min7 `h`=octave (let-ring).
-  Let-ring notes hold until the next onset; mutes are short.
+  Let-ring notes hold until the next onset. **So do chugs**, capped at
+  `MUTE_CARRY` (2 steps): under the palm the string keeps sounding between picks,
+  and that body is what carries one chug into the next. Only a ghost is short.
   **Connection cells** — what stops a riff sounding stabby: `_` TIES the previous
   note through this step (real note values, held over the barline, instead of a
   row of equal 16ths), and `~` SLIDES into the next note (fires Argent's Slide
@@ -112,3 +114,16 @@ A distorted high-gain tone flattens dynamics (the RMS envelope pins near max
 whether a note is muted or open), and it masks pitch movement to the ear. If a
 riff "sounds the same," the fix is usually musical — move the notes (pitch),
 not just the velocity/articulation.
+
+**"Stabby" / "pick-scrapey" is a note-LENGTH problem, not a velocity one**
+(David, 2026-08-27). Do the arithmetic in milliseconds before reaching for
+dynamics: at 188 BPM a 16th is 80ms, so a chug written as one step at the old
+`ART_LEN` 0.55 was a 44ms note — a pick transient with silence behind it and no
+note under it. A palm mute has to still be sounding when the next one is picked;
+that continuous body IS what "carries each chug into the next." Chugs now carry
+to the next onset at 0.95, and the legato clamp keeps them one tick short so a
+same-pitch chug re-picks instead of flamming. The second half of "scrapey" is
+that on Argent the Mute keyswitch's velocity is the mute DEPTH and **low is the
+scrape-like end** — a low velocity floor puts part of every riff in the scrape
+zone. Raising velocity makes a chug *less* muted, so it is never the fix for
+"give me more palm mute"; length is.
