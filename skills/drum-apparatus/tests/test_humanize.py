@@ -202,14 +202,28 @@ def test_fill_velocity_ramps_up():
                         kit_map=load_maps()["RS Monarch"], amount=25)
     vel = [e["velocity"] for e in sorted(out["edits"], key=lambda e: e["index"])]
     assert out["summary"]["fills"] == 1
-    # last hit is the hardest; first is among the softest
+    # a fill BUILDS: non-decreasing, and the resolving hit is the loudest
+    assert all(vel[i] >= vel[i - 1] for i in range(1, len(vel)))
     assert vel[-1] == max(vel)
-    assert vel[0] <= min(vel) + 4
-    # net trend is strongly upward: compare first third to last third means
+    # net trend is clearly upward
     third = len(vel) // 3
     assert sum(vel[-third:]) / third - sum(vel[:third]) / third >= 8
-    # still no two-in-a-row identical
+    # and it builds, it does not leap on the last hit
+    assert vel[-1] - vel[-2] <= 6
+    # still no same drum at the same velocity twice in a row
     assert all(vel[i] != vel[i - 1] for i in range(1, len(vel)))
+
+
+def test_long_fill_does_not_pile_at_the_ceiling():
+    """A long roll must keep building, not slam the band ceiling and plateau."""
+    notes = _tom_fill(0, 0, hits=20)
+    out = plan_humanize(notes, PPQ, map_name="RS Monarch",
+                        kit_map=load_maps()["RS Monarch"], amount=25)
+    vel = [e["velocity"] for e in sorted(out["edits"], key=lambda e: e["index"])]
+    assert all(vel[i] >= vel[i - 1] for i in range(1, len(vel)))   # still builds
+    hi = FAMILY_BAND["tom"][2]
+    assert sum(1 for v in vel if v >= hi) <= 2                     # no ceiling plateau
+    assert vel[-1] == max(vel)
 
 
 def test_every_family_has_a_band():

@@ -161,22 +161,24 @@ def detect_fills(ordered, fam, sixteenth, min_hits=3, min_toms=1):
     return runs
 
 
-def _fill_ramp(runs):
-    """Map each fill note's index -> a velocity offset shaping a crescendo.
+# Fill crescendo shape: a gentle linear rise from a touch under the groove to a
+# moderate lift at the resolve. Kept gentle on purpose -- a fill builds, it does
+# not leap on the last hit (David: the final step should be subtle). The
+# monotonic guarantee in plan_humanize is what actually holds the shape; this
+# just sets the contour and the start/end levels.
+FILL_RAMP_LO = -6.0
+FILL_RAMP_HI = 9.0
 
-    A drummer digs INTO a fill: it starts a touch under the groove and ramps up
-    into the downbeat/crash that resolves it. The curve eases in (p**1.3) so it
-    accelerates toward the peak rather than rising flatly, and the final hit
-    gets an extra push -- that is the one feeding the crash.
-    """
+
+def _fill_ramp(runs):
+    """Map each fill note's index -> a velocity offset shaping a crescendo."""
     ramp, in_fill = {}, set()
     for run in runs:
         L = len(run)
         for i, n in enumerate(run):
             p = (i / (L - 1)) if L > 1 else 1.0
-            ramp[n["index"]] = -8.0 + 20.0 * (p ** 1.3)
+            ramp[n["index"]] = FILL_RAMP_LO + (FILL_RAMP_HI - FILL_RAMP_LO) * p
             in_fill.add(n["index"])
-        ramp[run[-1]["index"]] += 3.0
     return ramp, in_fill
 
 
@@ -298,9 +300,40 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
                 v += 3   # additive, not x1.12 -- the multiply overshot the ceiling
         this_jit = jit * (1.5 if f in CYMBAL_FAMILIES else 1.0)
         if in_fill:
-            this_jit *= 0.35        # let the crescendo read; a little life on top
-        v += vrng.gauss(0, this_jit)
+            # Only a whisper inside a fill, and capped, so the random garnish can
+            # never swamp the ramp and leave the peak softer than its neighbour.
+            this_jit *= 0.2
+            g = vrng.gauss(0, this_jit)
+            v += max(-1.5, min(1.5, g))
+        else:
+            v += vrng.gauss(0, this_jit)
         new_vel[n["index"]] = _clamp(v, lo, hi)
+
+    # ---- fill crescendo guarantee. A fill builds: velocity climbs to its peak
+    # at the resolving hit, which must never read softer than the ones before it
+    # (the "backwards fill" bug). The crescendo is a RUN-order property across
+    # every voice in the fill, so it is enforced here in one run-aware pass --
+    # and fill notes are then held OUT of the per-pitch golden rule below, which
+    # would otherwise scramble the shape by nudging individual drums up to
+    # separate their own repeats. This pass does that separation itself: no hit
+    # dips below the running peak (crescendo), and successive hits on the SAME
+    # drum keep a >=2 gap (no repeat), pushing up so the build is preserved.
+    for run in fills:
+        peak = None
+        last_by_pitch = {}
+        for n in run:
+            f = family_of(n)
+            _, lo, hi = band.get(f, band["other"])
+            v = new_vel[n["index"]]
+            if peak is not None and v < peak:
+                v = peak                       # non-decreasing: the crescendo
+            lp = last_by_pitch.get(n["pitch"])
+            if lp is not None and v - lp < 2:
+                v = lp + 2                     # same drum: not the same value twice
+            v = _clamp(v, lo, hi)
+            new_vel[n["index"]] = v
+            peak = max(peak, v) if peak is not None else v
+            last_by_pitch[n["pitch"]] = v
 
     # ---- golden rule: no drummer hits the same drum at the same velocity twice
     # in a row. Enforce a real gap between consecutive hits on the SAME pitch,
@@ -319,6 +352,12 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
         prev = None
         for n in lst:
             v = new_vel[n["index"]]
+            # Fill notes are shaped by the crescendo pass above; leave them be,
+            # but carry the value forward as `prev` so a groove hit right after a
+            # fill is still separated from the fill's last hit on this drum.
+            if n["index"] in fill_notes:
+                prev = v
+                continue
             if prev is not None and abs(v - prev) < MIN_GAP:
                 # a varied (deterministic) magnitude, so forced separations do
                 # not settle into a mechanical two-value sawtooth.
@@ -329,6 +368,23 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
                     # other way, still inside the band. This is the step the
                     # first cut was missing, which left crashes stacked at 125.
                     v = _clamp(prev - mag if prev >= hi - MIN_GAP else prev + mag, lo, hi)
+                new_vel[n["index"]] = v
+            prev = v
+
+    # ---- final no-repeat guarantee. The golden rule holds grooves to a >=3 gap
+    # but leaves fill notes to the crescendo pass; that can leave a single exact
+    # same-drum repeat where two fills meet on one drum across a run boundary. A
+    # 1-unit nudge toward the band interior kills it -- inaudible, and it cannot
+    # invert a crescendo. This is the hard floor under "never the same velocity
+    # twice in a row on one drum."
+    for pitch, lst in by_pitch.items():
+        f = family_of(lst[0])
+        _, lo, hi = band.get(f, band["other"])
+        prev = None
+        for n in lst:                       # already ppq-sorted by the golden pass
+            v = new_vel[n["index"]]
+            if prev is not None and v == prev:
+                v = _clamp(v + 1 if v < hi else v - 1, lo, hi)
                 new_vel[n["index"]] = v
             prev = v
 
