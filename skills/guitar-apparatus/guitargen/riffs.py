@@ -10,20 +10,33 @@ keeps a part editable by eye the way the drum DSL's step grid is:
     b   tritone (root+6),  let ring      7   min7th  (root+10), let ring
     h   octave  (root+12), let ring
 
-Let-ring / sustained notes ring until the next onset (min two 16ths); muted and
-accented notes are short and tight. Intervals are semitones above the low string
-root, so the whole part follows one `low_string` value. On a map with power
-chords (Argent), a ROOT accent/hold voices a power chord and a fast root chug
-stays single-note; melodic (non-root) notes always stay single. See perform.py.
+  dissonant palm-muted RINGS (Mute keyswitch, high vel so it half-mutes & sings):
+    r   root,   ring        2   b2 (root+1)     t   tritone (root+6)
+    6   b6 (root+8)         9   b9 (root+13)
+
+Let-ring / sustained / palm-muted-ring notes hold until the next onset (min two
+16ths); muted and accented notes are short and tight. Intervals are semitones
+above the low string root, so the whole part follows one `low_string` value. On a
+map with power chords (Argent), a ROOT accent/hold voices a power chord and a fast
+root chug stays single-note; melodic (non-root) notes and every mute_ring stay
+single. See perform.py.
 """
 
 # token -> (interval semitones above low string, articulation)
+#
+# Lowercase let-ring/power-chord tokens (o 4 5 b 7 h) and the dissonant
+# palm-muted-RING tokens (r 2 t 6 9) are the two ways to hold a note: `o/5/b/7/h`
+# ring open (Sustain / power chord); `r/2/t/6/9` ring PALM-MUTED and dissonant
+# (Mute keyswitch, high velocity so it half-mutes and sings) over the low pedal.
 _TOKENS = {
     "x": (0, "mute"), "X": (0, "accent"), "o": (0, "let_ring"), "g": (0, "ghost"),
     "4": (5, "mute"), "5": (7, "let_ring"), "b": (6, "let_ring"),
     "7": (10, "let_ring"), "h": (12, "let_ring"),
+    # dissonant palm-muted rings (intervals against the low pedal):
+    "r": (0, "mute_ring"), "2": (1, "mute_ring"), "t": (6, "mute_ring"),
+    "6": (8, "mute_ring"), "9": (13, "mute_ring"),
 }
-_RING_ARTS = {"let_ring", "sustain"}
+_RING_ARTS = {"let_ring", "sustain", "mute_ring"}
 
 
 def parse_bars(bars, steps_per_bar=16):
@@ -68,7 +81,7 @@ def bass_from_guitar(spec):
     guitar. A little behind-the-beat bias gives it finger-style feel.
     """
     art_map = {"accent": "accent", "let_ring": "sustain", "ghost": "ghost",
-               "mute": "mute", "sustain": "sustain"}
+               "mute": "mute", "sustain": "sustain", "mute_ring": "sustain"}
     hits = []
     for h in spec["hits"]:
         hits.append({"step": h["step"], "interval": 0,
@@ -87,13 +100,13 @@ def bass_from_guitar(spec):
 # ---------------------------------------------------------------------------
 DEMO_BARS = [
     "Xxx.Xx.xXx.xXxx.",   # 1  riff A: accents on the quarters, gaps breathe
-    "Xx.xXx.xXx.xb...",   # 2  riff A answer: opens to a ringing tritone on 4
+    "Xx.xXx.xXx.x2...",   # 2  answer: hangs a dissonant b2, palm-muted, ringing
     "Xxx.Xx.xXx.xXxx.",   # 3  riff A again
-    "Xx.xXx.xXx.xh...",   # 4  answer, resolves up to a ringing octave
-    "5...b...7...h...",   # 5  lift: fifth / tritone / b7 / octave, let ring
-    "5...b...7...o...",   # 6  lift answer, settles back onto the root
+    "Xx.xXx.xXx.xt...",   # 4  answer: hangs a tritone, palm-muted, ringing
+    "2...t...6...9...",   # 5  lift: dissonant palm-muted rings over the E pedal
+    "2...t...6...r...",   # 6  lift answer, settles back onto the root (still muted)
     "Xxx.Xx.xXx.xXxx.",   # 7  riff A returns
-    "XxxXxxXxxXxxXX.o",   # 8  build: 3+3+3+3 gallop into a ringing root resolve
+    "XxxXxxXxxXxxXX.r",   # 8  build: 3+3+3+3 gallop into a palm-muted root ring
 ]
 
 

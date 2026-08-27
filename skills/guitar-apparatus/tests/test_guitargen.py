@@ -99,16 +99,40 @@ def test_double_track_seeds_differ():
 
 
 def test_guitar_articulation_via_keyswitches():
-    # chugs fire the Mute keyswitch, let-rings the Sustain keyswitch; Argent
-    # does not mute via the mod wheel, so no CC is emitted.
+    # the demo's chugs and dissonant palm-muted rings fire the Mute keyswitch,
+    # root accents fire Power Chord Mute; Argent does not mute via the mod wheel.
     spec = riffs.demo_guitar_spec()
     events, _ = perform(spec, "argent_e", seed=1)
-    ks_notes = [e for e in events
-                if e["type"] == "note" and e["pitch"] in KS_PITCHES]
-    pitches = {e["pitch"] for e in ks_notes}
-    assert SHREDDAGE3_KS["mute"] in pitches      # chugs
-    assert SHREDDAGE3_KS["sustain"] in pitches   # let-rings
+    pitches = {e["pitch"] for e in events
+               if e["type"] == "note" and e["pitch"] in KS_PITCHES}
+    assert SHREDDAGE3_KS["mute"] in pitches       # chugs + palm-muted rings
+    assert SHREDDAGE3_KS["pwr_mute"] in pitches    # root accents -> power chords
     assert not any(e["type"] == "cc" for e in events)
+
+
+def test_letring_and_powerchord_keyswitches():
+    # a melodic let-ring selects Sustain; a ROOT let-ring selects Power Chord
+    # Sustain (Argent voices the power chord).
+    ev1, _ = perform(riffs.make_spec(["5..............."], "argent_e"),
+                     "argent_e", seed=1)
+    assert any(e["pitch"] == SHREDDAGE3_KS["sustain"]
+               for e in ev1 if e["type"] == "note")
+    ev2, _ = perform(riffs.make_spec(["o..............."], "argent_e"),
+                     "argent_e", seed=1)
+    assert any(e["pitch"] == SHREDDAGE3_KS["pwr_sustain"]
+               for e in ev2 if e["type"] == "note")
+
+
+def test_mute_ring_is_palm_muted_and_rings():
+    # a mute_ring note fires the Mute keyswitch (palm mute) and holds far longer
+    # than a fast chug next to it.
+    ev, _ = perform(riffs.make_spec(["r...x..........."], "argent_e"),
+                    "argent_e", seed=1)
+    assert any(e["pitch"] == SHREDDAGE3_KS["mute"]
+               for e in ev if e["type"] == "note")
+    played = sorted((e for e in _played(ev)), key=lambda e: e["tick"])
+    ring, chug = played[0], played[1]
+    assert ring["dur"] > chug["dur"] * 2
 
 
 def test_keyswitch_precedes_the_note_it_governs():

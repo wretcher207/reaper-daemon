@@ -29,6 +29,10 @@ ART_VEL = {
     "sustain":  (104, 90, 122),
     "let_ring": (108, 94, 124),
     "ghost":    (64, 44, 84),
+    # a palm-muted note that RINGS: on Argent the Mute articulation's velocity is
+    # the mute depth (low = very muted, high = half-muted), so a high velocity
+    # here keeps the palm mute but lets it sing — a dissonant note that hangs.
+    "mute_ring": (112, 100, 126),
 }
 
 # Which keyswitch SLOT the instrument should be in for a given hit. Argent mutes
@@ -57,6 +61,7 @@ ART_MUTE = {
 # short and tight; sustains ring for their written value.
 ART_LEN = {
     "mute": 0.55, "accent": 0.7, "sustain": 1.0, "let_ring": 1.0, "ghost": 0.4,
+    "mute_ring": 1.0,
 }
 
 NO_REPEAT_GAP = 4        # successive same-pitch chugs differ by at least this
