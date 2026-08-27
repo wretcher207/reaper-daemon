@@ -126,6 +126,54 @@ def test_pitch_families_map_then_name_fallback():
     assert fam2[70] == "china"
 
 
+def _consecutive_equal_runs(notes, edits):
+    """Count consecutive same-pitch hits (time order) at an identical velocity."""
+    vel = {e["index"]: e["velocity"] for e in edits}
+    by_pitch = {}
+    for n in notes:
+        by_pitch.setdefault(n["pitch"], []).append(n)
+    bad = 0
+    for pitch, lst in by_pitch.items():
+        lst.sort(key=lambda n: n["ppq"])
+        prev = None
+        for n in lst:
+            v = vel[n["index"]]
+            if prev is not None and v == prev:
+                bad += 1
+            prev = v
+    return bad
+
+
+def test_golden_rule_no_consecutive_equal_on_same_drum():
+    """The rule the whole system is built on: never the same drum at the same
+    velocity twice in a row. Stress it with many hits per pitch clamped to a
+    narrow, ceiling-hugging band (the crash case that broke the first cut)."""
+    notes, i = [], 0
+    for step in range(64):                     # 64 crashes back to back
+        notes.append(_note(i, step * (PPQ // 4), 49)); i += 1
+    for beat in range(32):                     # 32 four-on-floor kicks
+        notes.append(_note(i, beat * PPQ, 24)); i += 1
+    out = plan_humanize(notes, PPQ, map_name="RS Monarch",
+                        kit_map=load_maps()["RS Monarch"], amount=25)
+    assert _consecutive_equal_runs(notes, out["edits"]) == 0
+    # and it holds at every amount, including 0 (the backstop is not random)
+    for amt in (0, 10, 50, 100):
+        o = plan_humanize(notes, PPQ, map_name="RS Monarch",
+                          kit_map=load_maps()["RS Monarch"], amount=amt)
+        assert _consecutive_equal_runs(notes, o["edits"]) == 0, f"amount={amt}"
+
+
+def test_cymbals_do_not_all_pile_at_the_ceiling():
+    notes = [_note(i, i * (PPQ // 2), 49) for i in range(40)]
+    out = plan_humanize(notes, PPQ, map_name="RS Monarch",
+                        kit_map=load_maps()["RS Monarch"], amount=25)
+    vels = [e["velocity"] for e in out["edits"]]
+    ceiling = FAMILY_BAND["crash"][2]
+    at_ceiling = sum(1 for v in vels if v >= ceiling)
+    assert at_ceiling <= len(vels) * 0.1        # not a pile
+    assert len(set(vels)) >= 8                    # real spread
+
+
 def test_every_family_has_a_band():
     for fam in set(FAMILY_BAND):
         c, lo, hi = FAMILY_BAND[fam]

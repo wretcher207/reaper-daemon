@@ -53,22 +53,25 @@ ROLE_FAMILY = {
 # Monarch pass: kick under his ceiling, rimshot in its band, closed hats pulled
 # under the open ones, cymbals loud. `kick` and `snare_rim` hi are overridden
 # per-kit from VOICE_PROFILE where present.
+# Centers sit with headroom below the ceiling so the jitter + metric lift spread
+# hits ACROSS the band instead of piling them against the top (a pile at the
+# ceiling reads as "flat" -- consecutive hits clamp to the same value).
 FAMILY_BAND = {
-    "kick":         (104, 1, KICK_VEL_MAX),
-    "snare_center": (102, 88, 116),
+    "kick":         (102, 1, KICK_VEL_MAX),   # 114
+    "snare_center": (100, 86, 116),
     "snare_rim":    (100, 90, 110),
     "snare_flam":   (100, 90, 112),
     "snare_ghost":  (48, 30, 70),
-    "tom":          (104, 70, 120),
+    "tom":          (102, 70, 120),
     "hat_pedal":    (66, 45, 90),
-    "hat_closed":   (100, 55, 112),   # HAT_CURVE x0.8 applied on top
-    "hat_open":     (108, 80, 122),
-    "crash":        (114, 100, 125),
-    "china":        (114, 100, 125),
-    "splash":       (104, 90, 120),
-    "stack":        (108, 90, 122),
-    "bell":         (110, 95, 122),
-    "ride":         (92, 70, 112),
+    "hat_closed":   (98, 55, 112),    # HAT_CURVE x0.8 applied on top
+    "hat_open":     (106, 80, 122),
+    "crash":        (112, 96, 126),
+    "china":        (112, 96, 126),
+    "splash":       (104, 86, 122),
+    "stack":        (106, 86, 122),
+    "bell":         (108, 90, 124),
+    "ride":         (92, 66, 114),
     "other":        (100, 60, 120),
 }
 
@@ -178,7 +181,9 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
         i = j + 1
 
     # ---- velocity pass -----
-    jit = amount / 100.0 * 14.0
+    # Base spread scales with amount. Cymbals get more of it: a drummer varies
+    # crash/china force far more than a kick, and they are the exposed hits.
+    jit = amount / 100.0 * 20.0
     new_vel = {}
     for n in ordered:
         f = family_of(n)
@@ -190,20 +195,29 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
         onbeat = (step % steps_per_beat == 0)
         backbeat = step in (steps_per_beat, steps_per_beat * 3)  # beats 2 & 4
 
+        # Metric contour. Cymbals are ACCENTS in their own right -- stacking a
+        # downbeat lift on top only drove them into the ceiling and flattened
+        # them there, so they take no metric lift.
         if f in ("snare_rim", "snare_center", "snare_flam"):
             if backbeat:
                 v += 8
             elif onbeat:
                 v += 3
-        elif f == "snare_ghost":
-            pass  # ghosts stay quiet, no metric lift
-        else:
+        elif f == "kick":
             if downbeat:
-                v += 8
-            elif onbeat:
                 v += 5
-        if f == "tom" and downbeat:
-            v += 4
+            elif onbeat:
+                v += 3
+        elif f == "tom":
+            if downbeat:
+                v += 4
+        elif f in ("hat_closed", "hat_open", "hat_pedal", "ride"):
+            if downbeat:
+                v += 6
+            elif onbeat:
+                v += 4
+        # snare_ghost and the cymbal families: no metric lift
+
         if n["index"] in weakfoot:
             v -= vrng.randint(7, 9)
         if f == "hat_closed":
@@ -213,23 +227,38 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
         if f in CYMBAL_FAMILIES:
             shelled = any(family_of(m) in SHELL_FAMILIES for m in tick_index.get(n["ppq"], []))
             if shelled:
-                v *= CYMBAL_SHELL_BOOST
-        v += vrng.gauss(0, jit)
+                v += 3   # additive, not x1.12 -- the multiply overshot the ceiling
+        this_jit = jit * (1.6 if f in CYMBAL_FAMILIES else 1.0)
+        v += vrng.gauss(0, this_jit)
         new_vel[n["index"]] = _clamp(v, lo, hi)
 
-    # ---- golden rule: no hit within 4 of the previous hit on the same pitch --
+    # ---- golden rule: no drummer hits the same drum at the same velocity twice
+    # in a row. Enforce a real gap between consecutive hits on the SAME pitch,
+    # in time order. This is the rule the whole system is built on, so it is a
+    # hard backstop that runs at every amount, not a random flourish.
     by_pitch = {}
     for n in ordered:
         by_pitch.setdefault(n["pitch"], []).append(n)
+    MIN_GAP = 3
     for pitch, lst in by_pitch.items():
         lst.sort(key=lambda n: n["ppq"])
         f = family_of(lst[0])
         _, lo, hi = band.get(f, band["other"])
+        if hi - lo < MIN_GAP:
+            continue   # band too narrow to separate; leave as-is
         prev = None
         for n in lst:
             v = new_vel[n["index"]]
-            if prev is not None and abs(v - prev) < 4:
-                v = _clamp(v + 4 if v >= prev else v - 4, lo, hi)
+            if prev is not None and abs(v - prev) < MIN_GAP:
+                # a varied (deterministic) magnitude, so forced separations do
+                # not settle into a mechanical two-value sawtooth.
+                mag = MIN_GAP + (n["index"] * 2654435761 + pitch) % 5   # 3..7
+                v = _clamp(prev + mag if v >= prev else prev - mag, lo, hi)
+                if abs(v - prev) < MIN_GAP:
+                    # clamping collapsed the gap (both at a bound) -> push the
+                    # other way, still inside the band. This is the step the
+                    # first cut was missing, which left crashes stacked at 125.
+                    v = _clamp(prev - mag if prev >= hi - MIN_GAP else prev + mag, lo, hi)
                 new_vel[n["index"]] = v
             prev = v
 
