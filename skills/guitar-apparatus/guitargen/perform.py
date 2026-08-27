@@ -31,14 +31,21 @@ ART_VEL = {
     "ghost":    (64, 44, 84),
 }
 
-# articulation -> which keyswitch SLOT the instrument should be in. On the Hydra,
-# a palm-muted chug is the Mute keyswitch and a ring is Sustain — the keyswitch,
-# not the mod wheel, is what mutes. Accents stay muted (a djent accent is a harder
-# palm mute, not an open note).
-ART_TO_KS = {
-    "mute": "mute", "ghost": "mute", "accent": "mute",
-    "sustain": "sustain", "let_ring": "sustain",
-}
+# Which keyswitch SLOT the instrument should be in for a given hit. Argent mutes
+# via keyswitch (not mod wheel): a chug is the Mute keyswitch, a ring is Sustain.
+# When the map allows power chords, a ROOT accent becomes a palm-muted power chord
+# and a ROOT hold a ringing power chord (Argent auto-voices root+5th+octave from
+# the single root note); fast root chugs stay single-note, and melodic notes
+# (non-root) always stay single so a lead line reads as a line, not chords.
+def ks_slot_for(art, is_root, power_chords):
+    if power_chords and is_root:
+        if art == "accent":
+            return "pwr_mute"
+        if art in ("sustain", "let_ring"):
+            return "pwr_sustain"
+    if art in ("sustain", "let_ring"):
+        return "sustain"
+    return "mute"          # mute, ghost, and melodic/accented single chugs
 
 # articulation -> mod-wheel palm-mute depth center, used ONLY on maps that mute
 # via the mod wheel (map flag modwheel_mute). Off for the Hydra.
@@ -90,6 +97,7 @@ def perform(spec, map_name, *, seed=0x5152, is_bass=False):
     events = []
     ks_notes = gm.get("ks_notes") or {}
     modwheel_mute = bool(gm.get("modwheel_mute"))
+    power_chords = bool(gm.get("power_chords"))
 
     # ---- pass 1: per-hit velocity from the deterministic contour -------------
     planned = []           # [hit, tick, pitch, vel, art, mute_depth, dur, ks_slot]
@@ -132,7 +140,7 @@ def perform(spec, map_name, *, seed=0x5152, is_bass=False):
         else:
             depth = _clamp(ART_MUTE.get(art, 100) + mrng.randint(-4, 4), 0, 127)
 
-        ks_slot = None if is_bass else ART_TO_KS.get(art, "mute")
+        ks_slot = None if is_bass else ks_slot_for(art, interval == 0, power_chords)
 
         dur = max(1, int(round(int(h.get("len_steps", 1)) * step_ticks
                                * ART_LEN.get(art, 0.55))))

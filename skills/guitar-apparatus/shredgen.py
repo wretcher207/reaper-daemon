@@ -45,7 +45,7 @@ def main(argv=None):
                     help="built-in riff: demo | probe (ignored if --bars-file)")
     ap.add_argument("--bars-file", help="text file, one 16-char bar per line")
     ap.add_argument("--part", choices=["guitar", "bass"], default="guitar")
-    ap.add_argument("--map", default="hydra_drop_a", help="guitar tuning map")
+    ap.add_argument("--map", default="argent_e", help="guitar tuning map")
     ap.add_argument("--seed", type=int, default=0x5152)
     ap.add_argument("--low-string", type=int, default=None,
                     help="override the map's low-string MIDI note (probe result)")

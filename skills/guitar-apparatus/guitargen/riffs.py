@@ -4,15 +4,17 @@ A riff is authored as one 16-character string per bar over this alphabet, which
 keeps a part editable by eye the way the drum DSL's step grid is:
 
     .   rest
-    x   root chug, palm-muted            X   root chug, accented (muted, harder)
-    o   root, let ring (mod wheel down)  g   root, ghost (very muted, soft)
+    x   root chug, palm-muted            X   root chug, accented (power chord)
+    o   root, let ring (power chord)     g   root, ghost (very muted, soft)
     4   fourth  (root+5),  muted         5   fifth   (root+7),  let ring
     b   tritone (root+6),  let ring      7   min7th  (root+10), let ring
     h   octave  (root+12), let ring
 
 Let-ring / sustained notes ring until the next onset (min two 16ths); muted and
-accented notes are short and tight. Intervals are semitones above the low string,
-so the whole part follows one `low_string` value — the knob the probe confirms.
+accented notes are short and tight. Intervals are semitones above the low string
+root, so the whole part follows one `low_string` value. On a map with power
+chords (Argent), a ROOT accent/hold voices a power chord and a fast root chug
+stays single-note; melodic (non-root) notes always stay single. See perform.py.
 """
 
 # token -> (interval semitones above low string, articulation)
@@ -73,12 +75,12 @@ def bass_from_guitar(spec):
                      "art": art_map.get(h["art"], "mute"),
                      "len_steps": h.get("len_steps", 1)})
     return {"ppq": spec["ppq"], "steps_per_bar": spec["steps_per_bar"],
-            "bars": spec["bars"], "map": "nolly_drop_a", "hits": hits,
+            "bars": spec["bars"], "map": "nolly_e", "hits": hits,
             "timing_bias": 0.05, "timing_sigma": 0.05}
 
 
 # ---------------------------------------------------------------------------
-# The demo: 8 bars, Drop A, 120 BPM. Riff A (driving syncopated chug) x2, a
+# The demo: 8 bars, key of E, 120 BPM. Riff A (driving syncopated chug) x2, a
 # more open melodic lift (riff B), then riff A returns and builds to a ringing
 # resolve. Content is a jam starting point — the point of the first pass is the
 # feel and the pipeline; the notes are David's to redirect.
@@ -96,20 +98,16 @@ DEMO_BARS = [
 
 
 def demo_guitar_spec():
-    return make_spec(DEMO_BARS, "hydra_drop_a", timing_sigma=0.06)
+    return make_spec(DEMO_BARS, "argent_e", timing_sigma=0.06)
 
 
-def range_probe_spec():
-    """Four sustained single notes, well apart in time, at candidate low-string
-    MIDI values, so David can say which sounds and at what pitch. This locks
-    `low_string` before a full riff is written. Notes as absolute-ish anchors:
-    33 (A1 concert, on the "Lowest note" keyswitch), 40 (E2), 45 (A2), 52 (E3).
+def range_probe_spec(candidates=(25, 28, 33, 40)):
+    """A general low-string probe: sustained single notes, one per bar, at the
+    candidate MIDI values, so a new/unknown instrument's lowest sounding note can
+    be found by ear. `low_string_override=0` makes each hit's interval an absolute
+    MIDI note. Defaults probe Argent's low C# (25), E (28), A (33), and E2 (40).
     """
-    # authored directly as absolute pitches via interval-from-0 with low=0 trick:
-    # we set low_string_override=0 so interval == absolute MIDI note.
-    hits = []
-    for i, midi in enumerate([33, 40, 45, 52]):
-        hits.append({"step": i * 16, "interval": midi, "art": "sustain",
-                     "len_steps": 12})
-    return {"ppq": 480, "steps_per_bar": 16, "bars": 4, "map": "hydra_drop_a",
+    hits = [{"step": i * 16, "interval": midi, "art": "sustain", "len_steps": 12}
+            for i, midi in enumerate(candidates)]
+    return {"ppq": 480, "steps_per_bar": 16, "bars": len(hits), "map": "argent_e",
             "hits": hits, "low_string_override": 0, "timing_sigma": 0.0}

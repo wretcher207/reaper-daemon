@@ -58,40 +58,43 @@ MODWHEEL = 1  # CC1. This Hydra mutes via the Mute keyswitch, not the mod wheel,
 # low string plus intervals above it.
 # ---------------------------------------------------------------------------
 GUITAR_MAPS = {
-    # Shreddage 3 Hydra, 7-string, Drop A. Concert pitch: low A1 = 33.
-    # 33 collides with the "Lowest note" keyswitch, so this is exactly the value
-    # to confirm by ear. If the probe shows the low string sounds an octave up,
-    # set low_string 45 and transpose_octaves accordingly.
-    "hydra_drop_a": {
-        "library": "Shreddage Hydra",
+    # Shreddage 3.5 Argent — 9-string (Schecter Damien Platinum), lowest string
+    # tuned to C#. Plays at concert pitch. Confirmed against the official manual
+    # and David's instrument UI:
+    #   * lowest PLAYABLE note = MIDI 25 (low C# string open); MIDI 24 is the
+    #     "Thrash note" keyswitch, NOT a pitch — do not root a riff there.
+    #   * palm mute = the Mute keyswitch (C#-2 = 1); the mute DEPTH (very->half
+    #     muted) is set by the played note's VELOCITY, so no mod wheel.
+    #   * Power Chord Mute (4) / Power Chord Sustain (3) auto-voice root+5th+
+    #     octave from a single root note.
+    # low_string is the riff ROOT. Chosen E (28) so guitar and bass lock on the
+    # same low note (bass floors at E); the engine frets E on the low strings.
+    "argent_e": {
+        "library": "Shreddage 3.5 Argent (9-string, low C#)",
         "ks": SHREDDAGE3_KS,
         "ks_notes": KS_NOTES,
-        # VERIFIED LIVE: the instrument's lowest playable note is MIDI 24, which
-        # in Drop A is the low string open (sounds A). Every interval in a riff
-        # is relative to this, so a fifth (root+7) etc. lands right regardless of
-        # how the sample engine fingers it.
-        "low_string": 24,
-        "range_lo": 24, "range_hi": 107,
+        "low_string": 28,                 # riff root E; physical low string = 25
+        "range_lo": 25, "range_hi": 107,
         "base_articulation": "sustain",
-        "modwheel_mute": False,           # this Hydra mutes via keyswitch
+        "modwheel_mute": False,           # Argent mutes via keyswitch + velocity
+        "power_chords": True,             # root hits can voice power chords
     },
 }
 
 BASS_MAPS = {
-    # Nolly bass library — no note map was available, so this is a plain-note
-    # map: no keyswitches, no mod wheel. Notes at concert pitch, root an octave
-    # below the guitar low string (A0 = 21). CONFIRM the octave by ear the same
-    # way; `low_string` is the knob.
-    "nolly_drop_a": {
-        "library": "Nolly Bass",
+    # GGD The Nolly Bass Library — Nolly's Dingwall NG2 6-string (the Periphery V
+    # tone). Pick-based with automatic alternate picking; no slaps/taps/bends/
+    # slides. Confirmed range E0-G4 = MIDI 28-79; the floor is E0 = 28 (why the
+    # earlier A0 = 21 was silent). Driven as plain notes, locked to the guitar's
+    # low E.
+    "nolly_e": {
+        "library": "GGD Nolly Bass (Dingwall NG2 6-string)",
         "ks": {},
-        # VERIFIED LIVE: the Nolly library's lowest playable note is MIDI 28 —
-        # its low string open (sounds A, an octave under the guitar's low A).
-        # The old value (21) was below range, so the bass was silent.
-        "low_string": 28,
+        "low_string": 28,                 # E0, the library's lowest note
         "base_articulation": None,
         "modwheel_mute": False,
-        "range_lo": 28, "range_hi": 67,
+        "power_chords": False,
+        "range_lo": 28, "range_hi": 79,
     },
 }
 

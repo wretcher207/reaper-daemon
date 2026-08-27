@@ -72,25 +72,25 @@ def test_parse_bars_intervals_and_ring_length():
 
 
 def test_bass_collapses_intervals_to_root():
-    g = riffs.make_spec(["5...b...7...h..."], "hydra_drop_a")
+    g = riffs.make_spec(["5...b...7...h..."], "argent_e")
     b = riffs.bass_from_guitar(g)
     assert all(h["interval"] == 0 for h in b["hits"])
-    assert b["map"] == "nolly_drop_a"
+    assert b["map"] == "nolly_e"
 
 
 # ---- performance engine ---------------------------------------------------
 
 def test_perform_is_deterministic():
     spec = riffs.demo_guitar_spec()
-    a, _ = perform(spec, "hydra_drop_a", seed=101)
-    b, _ = perform(spec, "hydra_drop_a", seed=101)
+    a, _ = perform(spec, "argent_e", seed=101)
+    b, _ = perform(spec, "argent_e", seed=101)
     assert a == b
 
 
 def test_double_track_seeds_differ():
     spec = riffs.demo_guitar_spec()
-    left, _ = perform(spec, "hydra_drop_a", seed=101)
-    right, _ = perform(spec, "hydra_drop_a", seed=202)
+    left, _ = perform(spec, "argent_e", seed=101)
+    right, _ = perform(spec, "argent_e", seed=202)
     lv = [e for e in left if e["type"] == "note"]
     rv = [e for e in right if e["type"] == "note"]
     # same notes, but the humanization (velocity/timing) must differ -> width
@@ -99,10 +99,10 @@ def test_double_track_seeds_differ():
 
 
 def test_guitar_articulation_via_keyswitches():
-    # chugs fire the Mute keyswitch, let-rings the Sustain keyswitch; this Hydra
+    # chugs fire the Mute keyswitch, let-rings the Sustain keyswitch; Argent
     # does not mute via the mod wheel, so no CC is emitted.
     spec = riffs.demo_guitar_spec()
-    events, _ = perform(spec, "hydra_drop_a", seed=1)
+    events, _ = perform(spec, "argent_e", seed=1)
     ks_notes = [e for e in events
                 if e["type"] == "note" and e["pitch"] in KS_PITCHES]
     pitches = {e["pitch"] for e in ks_notes}
@@ -112,27 +112,27 @@ def test_guitar_articulation_via_keyswitches():
 
 
 def test_keyswitch_precedes_the_note_it_governs():
-    spec = riffs.make_spec(["x..............."], "hydra_drop_a")
-    events, _ = perform(spec, "hydra_drop_a", seed=1)
+    spec = riffs.make_spec(["x..............."], "argent_e")
+    events, _ = perform(spec, "argent_e", seed=1)
     ks = next(e for e in events if e["pitch"] == SHREDDAGE3_KS["mute"])
-    note = next(e for e in events if e["pitch"] == get_map("hydra_drop_a")["low_string"])
+    note = next(e for e in events if e["pitch"] == get_map("argent_e")["low_string"])
     assert ks["tick"] <= note["tick"]
 
 
 def test_bass_has_no_keyswitch_or_cc():
     g = riffs.demo_guitar_spec()
     b = riffs.bass_from_guitar(g)
-    events, _ = perform(b, "nolly_drop_a", seed=7, is_bass=True)
+    events, _ = perform(b, "nolly_e", seed=7, is_bass=True)
     assert all(e["type"] == "note" for e in events)
-    assert all(e["pitch"] == get_map("nolly_drop_a")["low_string"] for e in events)
+    assert all(e["pitch"] == get_map("nolly_e")["low_string"] for e in events)
 
 
 def test_no_repeat_golden_rule_on_root():
     # a bar of straight root mutes must not repeat a velocity back-to-back.
-    spec = riffs.make_spec(["xxxxxxxxxxxxxxxx"], "hydra_drop_a")
-    events, _ = perform(spec, "hydra_drop_a", seed=42)
+    spec = riffs.make_spec(["xxxxxxxxxxxxxxxx"], "argent_e")
+    events, _ = perform(spec, "argent_e", seed=42)
     roots = [e for e in events
-             if e["type"] == "note" and e["pitch"] == get_map("hydra_drop_a")["low_string"]]
+             if e["type"] == "note" and e["pitch"] == get_map("argent_e")["low_string"]]
     roots.sort(key=lambda e: e["tick"])
     for a, b in zip(roots, roots[1:]):
         assert abs(a["vel"] - b["vel"]) >= NO_REPEAT_GAP
@@ -140,7 +140,7 @@ def test_no_repeat_golden_rule_on_root():
 
 def test_velocities_stay_in_band():
     spec = riffs.demo_guitar_spec()
-    events, _ = perform(spec, "hydra_drop_a", seed=5)
+    events, _ = perform(spec, "argent_e", seed=5)
     lo = min(b[1] for b in ART_VEL.values())
     hi = max(b[2] for b in ART_VEL.values())
     for e in _played(events):
@@ -148,9 +148,9 @@ def test_velocities_stay_in_band():
 
 
 def test_low_string_override_transposes_whole_riff():
-    spec = riffs.make_spec(["x...5..........."], "hydra_drop_a")
+    spec = riffs.make_spec(["x...5..........."], "argent_e")
     spec["low_string_override"] = 45
-    events, _ = perform(spec, "hydra_drop_a", seed=1)
+    events, _ = perform(spec, "argent_e", seed=1)
     pitches = sorted(e["pitch"] for e in _played(events))
     # root at 45, fifth at 45+7=52
     assert pitches == [45, 52]

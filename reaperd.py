@@ -1638,7 +1638,7 @@ def build_parser():
                    help="built-in riff: demo | probe (ignored with --bars-file)")
     s.add_argument("--bars-file", default=None,
                    help="custom riff: text file, one 16-char bar per line")
-    s.add_argument("--map", default="hydra_drop_a", help="tuning map (guitar part)")
+    s.add_argument("--map", default="argent_e", help="tuning map (guitar part)")
     s.add_argument("--seed", type=int, default=0x5152, help="RNG seed")
     s.add_argument("--low-string", type=int, default=None,
                    help="override the map's low-string MIDI note (probe result)")
