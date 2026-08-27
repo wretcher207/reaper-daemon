@@ -55,14 +55,9 @@ def main(argv=None):
 
     try:
         gspec = _guitar_spec(args)
-        if args.part == "bass":
-            spec = bass_from_guitar(gspec)
-            is_bass = True
-            map_name = spec["map"]
-        else:
-            spec = gspec
-            is_bass = False
-            map_name = args.map
+        is_bass = args.part == "bass"
+        spec = bass_from_guitar(gspec) if is_bass else gspec
+        map_name = spec.get("map", args.map)
         if args.low_string is not None and "low_string_override" not in spec:
             spec["low_string_override"] = args.low_string
         events, info = perform(spec, map_name, seed=args.seed, is_bass=is_bass)

@@ -41,18 +41,33 @@ David's live UI (see `docs/instruments.md`).
 ## Commands
 
 ```bash
-# render + insert the built-in demo riff onto the double-tracked pair + bass
-python reaperd.py shred --track argent-l --part guitar --seed 101
-python reaperd.py shred --track argent-r --part guitar --seed 202
-python reaperd.py shred --track nolly-bass-library --part bass --seed 303
+# THE one-liner: lay down / re-cut the whole 4-track jam (2 guitars + bass +
+# drums), replacing whatever is on those tracks. Re-run it after any riff edit.
+python reaperd.py band
+# custom riff + drum DSL, other tracks/tempo:
+python reaperd.py band --bars-file myriff.txt --dsl mydrums.dsl --tempo 138
+```
 
-# a custom riff (one 16-char bar per line), onto the selected spot
+`band` defaults to the session tracks (argent-l/argent-r/nolly-bass-library/
+rs-drums-monarch), the demo riff, the bundled `examples/jam-e.dsl` drums, seeds
+101/202/303, and `--replace` on. It's the smooth path — one command instead of
+clear+insert four times.
+
+Single-part commands (what `band` is built from):
+
+```bash
+# one part at a time; --replace clears the track region first
+python reaperd.py shred --track argent-l --part guitar --seed 101 --replace
+python reaperd.py shred --track nolly-bass-library --part bass --seed 303 --replace
+python reaperd.py groove examples/jam-e.dsl --track rs-drums-monarch --replace
+
+# a custom riff — one bar per line; spaces inside a bar are visual only
 python reaperd.py shred --track argent-l --bars-file myriff.txt --position 0.0
 
 # a general low-string probe for a NEW/unknown instrument
 python reaperd.py shred --track argent-l --riff probe
 
-# override the riff root once for a one-off (e.g. try the low C# string)
+# override the riff root once (e.g. try the low C# string)
 python reaperd.py shred --track argent-l --seed 101 --low-string 25
 ```
 
@@ -74,6 +89,16 @@ Standalone (no REAPER): `python skills/guitar-apparatus/shredgen.py --riff demo
 
 ## Verify loop
 
-A part is not done until it is heard in REAPER. After `shred`, read it back with
-`get_midi_notes` (structure) and audition it (feel). Trust the ears over the
-plan — re-cut the riff string, re-render, re-insert.
+A part is not done until it is heard in REAPER. After `band`/`shred`, read it
+back with `get_midi_notes` (structure) and audition it (feel). Trust the ears
+over the plan — re-cut the riff string, re-run `band`.
+
+Note: `get_midi_notes` returns each note's position as **`ppq`** (with
+`ppq_per_quarter`), not `tick` — a common trip-up, since the engine and tests
+speak `tick`. Read `n["ppq"]`, and a track with more than one item needs an
+explicit `item_index` (else `AMBIGUOUS_ITEM`).
+
+A distorted high-gain tone flattens dynamics (the RMS envelope pins near max
+whether a note is muted or open), and it masks pitch movement to the ear. If a
+riff "sounds the same," the fix is usually musical — move the notes (pitch),
+not just the velocity/articulation.

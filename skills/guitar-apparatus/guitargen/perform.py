@@ -17,8 +17,25 @@ A riff spec is a plain dict (see riffs.py). Pure and deterministic:
 same (spec, map, seed) -> same events.
 """
 import random
+from dataclasses import dataclass
 
 from .maps import get_map, MODWHEEL
+
+
+@dataclass
+class _Planned:
+    """One planned hit, carried between the velocity/no-repeat/emit passes.
+    Named fields (not a positional tuple) so a reorder can't silently scramble
+    the golden-velocity pass. `tick` is the pre-humanize base tick; `vel` is
+    mutated in place by the no-repeat pass."""
+    hit: dict
+    tick: int
+    pitch: int
+    vel: int
+    art: str
+    depth: object      # int mod-wheel value, or None
+    dur: int
+    ks_slot: object    # articulation-slot name, or None (bass)
 
 # articulation -> (velocity center, lo, hi). Chugs live loud but with headroom so
 # the contour + jitter spread them across a band instead of piling at the top
@@ -42,14 +59,13 @@ ART_VEL = {
 # the single root note); fast root chugs stay single-note, and melodic notes
 # (non-root) always stay single so a lead line reads as a line, not chords.
 def ks_slot_for(art, is_root, power_chords):
+    ring = art in ("sustain", "let_ring")
     if power_chords and is_root:
         if art == "accent":
             return "pwr_mute"
-        if art in ("sustain", "let_ring"):
+        if ring:
             return "pwr_sustain"
-    if art in ("sustain", "let_ring"):
-        return "sustain"
-    return "mute"          # mute, ghost, and melodic/accented single chugs
+    return "sustain" if ring else "mute"   # else: mute, ghost, melodic/chug
 
 # articulation -> mod-wheel palm-mute depth center, used ONLY on maps that mute
 # via the mod wheel (map flag modwheel_mute). Off for the Hydra.
@@ -105,7 +121,7 @@ def perform(spec, map_name, *, seed=0x5152, is_bass=False):
     power_chords = bool(gm.get("power_chords"))
 
     # ---- pass 1: per-hit velocity from the deterministic contour -------------
-    planned = []           # [hit, tick, pitch, vel, art, mute_depth, dur, ks_slot]
+    planned = []
     for h in hits:
         step = int(h["step"])
         art = h.get("art", "mute")
@@ -149,27 +165,26 @@ def perform(spec, map_name, *, seed=0x5152, is_bass=False):
 
         dur = max(1, int(round(int(h.get("len_steps", 1)) * step_ticks
                                * ART_LEN.get(art, 0.55))))
-        planned.append([h, base_tick, pitch, vel, art, depth, dur, ks_slot])
+        planned.append(_Planned(h, base_tick, pitch, vel, art, depth, dur, ks_slot))
 
     # ---- golden no-repeat: never the same velocity twice in a row on one pitch
     by_pitch = {}
     for p in planned:
-        by_pitch.setdefault(p[2], []).append(p)
+        by_pitch.setdefault(p.pitch, []).append(p)
     for pitch, lst in by_pitch.items():
-        lst.sort(key=lambda p: p[1])
-        art0 = lst[0][4]
-        _, lo, hi = ART_VEL.get(art0, ART_VEL["mute"])
+        lst.sort(key=lambda p: p.tick)
+        _, lo, hi = ART_VEL.get(lst[0].art, ART_VEL["mute"])
         prev = None
         for p in lst:
-            v = p[3]
+            v = p.vel
             if prev is not None and abs(v - prev) < NO_REPEAT_GAP:
-                mag = NO_REPEAT_GAP + (p[1] * 2654435761 + pitch) % 5   # 4..8
+                mag = NO_REPEAT_GAP + (p.tick * 2654435761 + pitch) % 5   # 4..8
                 v = _clamp(prev + mag if v >= prev else prev - mag, lo, hi)
                 if abs(v - prev) < NO_REPEAT_GAP:
                     v = _clamp(prev - mag if prev >= hi - NO_REPEAT_GAP
                                else prev + mag, lo, hi)
-                p[3] = v
-            prev = p[3]
+                p.vel = v
+            prev = p.vel
 
     # ---- pass 2: emit CC (mod wheel) + notes with micro-timing --------------
     # one timing offset per tick so a dyad's two notes stay locked together.
@@ -183,37 +198,38 @@ def perform(spec, map_name, *, seed=0x5152, is_bass=False):
 
     last_slot = None
     last_depth = None
-    for h, base_tick, pitch, vel, art, depth, dur, ks_slot in planned:
-        off = int(round(tick_offset(base_tick) + tbias))
-        tick = max(0, base_tick + off)
+    for p in planned:
+        off = int(round(tick_offset(p.tick) + tbias))
+        tick = max(0, p.tick + off)
 
         # articulation keyswitch: fire only when the slot changes (Mute <-> Sustain
         # as the riff moves between chugs and let-rings). A KS note sits a few
         # ticks before the note it governs so the engine has switched in time.
-        if ks_slot is not None and ks_slot != last_slot and ks_slot in ks_notes:
-            ks_pitch, ks_vel = ks_notes[ks_slot]
+        if p.ks_slot is not None and p.ks_slot != last_slot and p.ks_slot in ks_notes:
+            ks_pitch, ks_vel = ks_notes[p.ks_slot]
             events.append({"type": "note", "tick": max(0, tick - KS_LEAD),
                            "pitch": ks_pitch, "vel": ks_vel,
                            "dur": KS_TICKS, "chan": 0})
-            last_slot = ks_slot
+            last_slot = p.ks_slot
 
         # mod-wheel ride only on maps that mute that way
-        if depth is not None and depth != last_depth:
+        if p.depth is not None and p.depth != last_depth:
             events.append({"type": "cc", "tick": max(0, tick - KS_LEAD),
-                           "cc": MODWHEEL, "val": depth, "chan": 0})
-            last_depth = depth
+                           "cc": MODWHEEL, "val": p.depth, "chan": 0})
+            last_depth = p.depth
 
-        events.append({"type": "note", "tick": tick, "pitch": pitch,
-                       "vel": vel, "dur": dur, "chan": 0})
+        events.append({"type": "note", "tick": tick, "pitch": p.pitch,
+                       "vel": p.vel, "dur": p.dur, "chan": 0})
 
-        dyad = h.get("dyad")
+        dyad = p.hit.get("dyad")
         if dyad is not None:
-            events.append({"type": "note", "tick": tick, "pitch": pitch + int(dyad),
-                           "vel": _clamp(vel - 6, 1, 127), "dur": dur, "chan": 0})
+            events.append({"type": "note", "tick": tick, "pitch": p.pitch + int(dyad),
+                           "vel": _clamp(p.vel - 6, 1, 127), "dur": p.dur, "chan": 0})
 
+    n_cc = sum(1 for e in events if e["type"] == "cc")
     info = {
-        "notes": sum(1 for e in events if e["type"] == "note"),
-        "ccs": sum(1 for e in events if e["type"] == "cc"),
+        "notes": len(events) - n_cc,
+        "ccs": n_cc,
         "bars": int(spec.get("bars", 0)),
         "seed": seed,
         "map": map_name,

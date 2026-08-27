@@ -1008,10 +1008,70 @@ def cmd_eq(args):
     return 0 if live else 1
 
 
+def _discard(path):
+    """Remove a render that was never inserted; missing file is fine."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _persist_midi(br, prefix, slug):
+    """A persistent path under rendered-midi/ for a render.
+
+    REAPER imports a .mid by REFERENCE on this build, so the file must OUTLIVE
+    the item — a deleted temp file leaves an empty take (proven live). Renders
+    are kept here (gitignored); the .mid is the take's source of truth.
+    """
+    render_dir = os.path.join(br, "rendered-midi")
+    os.makedirs(render_dir, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", slug)
+    return os.path.join(render_dir, f"{prefix}-{safe}-{secrets.token_hex(3)}.mid")
+
+
+def _render_insert(br, gen_argv, midi, *, track, position, tempo, replace, tag):
+    """Run a generator subprocess that writes `midi`, then insert it onto the
+    track through the bridge. The one write path `shred`, `groove`, and `band`
+    all share. `track` None targets the selected track. `replace` clears the
+    track's region from `position` first, so a re-cut doesn't stack takes.
+    Returns (rc, message). On any failure the orphaned render is discarded.
+    """
+    try:
+        r = subprocess.run(gen_argv, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        _discard(midi)
+        return 1, f"[{tag}] ERROR: generator did not finish in 120s"
+    if r.returncode != 0:
+        _discard(midi)
+        return 1, (r.stderr or r.stdout or "").rstrip()
+    lines = [r.stdout.rstrip()] if r.stdout else []
+
+    sel = {"target_track_name": track} if track else {"use_selected_track": True}
+    pos = ({"type": "time", "seconds": float(position)}
+           if position is not None else {"type": "cursor"})
+    if replace and position is not None:
+        send_type("delete_items_in_range",
+                  {**sel, "range": {"type": "time", "seconds": float(position)},
+                   "length_seconds": 600},
+                  bridge_root=br, timeout_ms=10000, resolve=False, repair=False)
+    payload = {**sel, "midi_path": midi, "position": pos}
+    if tempo is not None:
+        payload["project_tempo"] = tempo
+    res = send_type("insert_midi_file", payload, bridge_root=br,
+                    timeout_ms=20000, resolve=False, repair=False)
+    if not res.get("ok"):
+        _discard(midi)
+        return 1, f"[{tag}] FAILED: {res.get('error')}"
+    tname = res.get("data", {}).get("track", {}).get("name", track or "selected")
+    at = position if position is not None else "cursor"
+    lines.append(f"[{tag}] OK: {tname} @ {at}s")
+    return 0, "\n".join(x for x in lines if x)
+
+
 def cmd_groove(args):
     br = args.bridge_root
-    # Instant heartbeat gate (jam has always had it): a dead REAPER should
-    # fail here in ~0s, not after the full 20s insert timeout.
+    # Instant heartbeat gate: a dead REAPER should fail here in ~0s, not after
+    # the full 20s insert timeout.
     if not status_ok(br, quiet=True):
         print("[groove] REAPER is DOWN — relaunch it, nothing inserted.", file=sys.stderr)
         return 1
@@ -1021,71 +1081,24 @@ def cmd_groove(args):
     cfg = load_drum_config(br) or {}
     track = args.track or cfg.get("track")
     cfg_map = args.map or cfg.get("map")
-
-    # Position: empty = edit cursor; a value forces that time in seconds.
-    if args.position is not None:
-        pos = {"type": "time", "seconds": float(args.position)}
-    else:
-        pos = {"type": "cursor"}
-
     groovegen = os.path.join(br, "skills", "drum-apparatus", "groovegen.py")
     if not os.path.isfile(groovegen):
         print(f"[groove] ERROR: drum engine not found at {groovegen}", file=sys.stderr)
         return 1
 
-    # REAPER imports a .mid by REFERENCE on this build, so the file must outlive
-    # the item — a deleted temp file leaves an empty take. Render to a persistent
-    # folder and keep it (same fix as `shred`).
-    render_dir = os.path.join(br, "rendered-midi")
-    os.makedirs(render_dir, exist_ok=True)
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_",
-                  (track or "selected") + "-" + os.path.basename(args.dsl))
-    midi = os.path.join(render_dir, f"groove-{safe}-{secrets.token_hex(3)}.mid")
+    midi = _persist_midi(br, "groove",
+                         (track or "selected") + "-" + os.path.basename(args.dsl))
     gen = [sys.executable, groovegen, "--dsl", args.dsl, "--out", midi]
     if cfg_map:
         gen += ["--map", cfg_map]
     if args.seed is not None:
         gen += ["--seed", str(args.seed)]
     print(f"[groove] Rendering DSL: {args.dsl}")
-    try:
-        r = subprocess.run(gen, capture_output=True, text=True, timeout=120)
-    except subprocess.TimeoutExpired:
-        print("[groove] ERROR: drum engine did not finish in 120s", file=sys.stderr)
-        try:
-            os.unlink(midi)
-        except OSError:
-            pass
-        return 1
-    if r.returncode != 0:
-        print(r.stderr or r.stdout, file=sys.stderr)
-        try:
-            os.unlink(midi)
-        except OSError:
-            pass
-        return 1
-    if r.stdout:
-        print(r.stdout.rstrip())
-
-    if track:
-        payload = {"target_track_name": track, "midi_path": midi, "position": pos}
-    else:
-        payload = {"use_selected_track": True, "midi_path": midi, "position": pos}
-    if args.tempo is not None:
-        payload["project_tempo"] = args.tempo
-    res = send_type("insert_midi_file", payload, bridge_root=br,
-                    timeout_ms=20000, resolve=False, repair=False)
-    if not res.get("ok"):
-        try:
-            os.unlink(midi)   # item never created; drop the orphaned render
-        except OSError:
-            pass
-        print(f"[groove] FAILED: {res.get('error')}", file=sys.stderr)
-        return 1
-    tname = res.get("data", {}).get("track", {}).get("name", "track")
-    print(f"[groove] OK: inserted on {tname} at "
-          f"{args.position if args.position is not None else 'cursor'}s "
-          f"(source: {midi})")
-    return 0
+    rc, msg = _render_insert(br, gen, midi, track=track, position=args.position,
+                             tempo=args.tempo,
+                             replace=getattr(args, "replace", False), tag="groove")
+    print(msg, file=(sys.stderr if rc else sys.stdout))
+    return rc
 
 
 def cmd_jam(args):
@@ -1112,87 +1125,96 @@ def cmd_jam(args):
     return rc
 
 
+def _shred_gen_argv(br, *, part, track, seed, map_name, tempo, riff, bars_file,
+                    low_string):
+    """Build the (shredgen_path, midi_path, argv) for one guitar/bass render.
+    Shared by `shred` (one part) and `band` (all four)."""
+    shredgen = os.path.join(br, "skills", "guitar-apparatus", "shredgen.py")
+    midi = _persist_midi(br, f"shred-{part}", f"{track}-{seed}")
+    gen = [sys.executable, shredgen, "--part", part, "--map", map_name,
+           "--seed", str(seed), "--tempo", str(tempo or 120), "--out", midi]
+    gen += ["--bars-file", bars_file] if bars_file else ["--riff", riff]
+    if low_string is not None:
+        gen += ["--low-string", str(low_string)]
+    return shredgen, midi, gen
+
+
 def cmd_shred(args):
     """Render a humanized guitar/bass riff and insert it onto a named track.
 
-    The guitar-side counterpart to `groove`: shells out to the guitar-apparatus
-    renderer (notes + mod-wheel palm-mute CC + keyswitch), then inserts the .mid
-    through the bridge's `insert_midi_file`, the same write path the drum groove
-    uses. One part per call; drive a double-tracked pair by calling twice with two
-    seeds onto argent-l / argent-r, and once more with --part bass.
+    The guitar-side counterpart to `groove`, sharing its `_render_insert` write
+    path. One part per call; `band` lays down the whole double-tracked jam at once.
     """
     br = args.bridge_root
     if not status_ok(br, quiet=True):
         print("[shred] REAPER is DOWN — relaunch it, nothing inserted.", file=sys.stderr)
         return 1
-    shredgen = os.path.join(br, "skills", "guitar-apparatus", "shredgen.py")
+    shredgen, midi, gen = _shred_gen_argv(
+        br, part=args.part, track=args.track, seed=args.seed, map_name=args.map,
+        tempo=args.tempo, riff=args.riff, bars_file=args.bars_file,
+        low_string=args.low_string)
     if not os.path.isfile(shredgen):
         print(f"[shred] ERROR: guitar engine not found at {shredgen}", file=sys.stderr)
         return 1
-
-    if args.position is not None:
-        pos = {"type": "time", "seconds": float(args.position)}
-    else:
-        pos = {"type": "cursor"}
-
-    # REAPER imports a .mid by REFERENCE (not copied in-project) on this build,
-    # so the file must OUTLIVE the item — a deleted temp file leaves an empty
-    # take (proven live). Render to a persistent, project-referable folder and
-    # keep it; the .mid is the take's source of truth.
-    render_dir = os.path.join(br, "rendered-midi")
-    os.makedirs(render_dir, exist_ok=True)
-    safe_track = re.sub(r"[^A-Za-z0-9._-]", "_", args.track)
-    uid = secrets.token_hex(3)
-    midi = os.path.join(render_dir,
-                        f"shred-{args.part}-{safe_track}-{args.seed}-{uid}.mid")
-    gen = [sys.executable, shredgen, "--part", args.part, "--map", args.map,
-           "--seed", str(args.seed), "--tempo", str(args.tempo or 120),
-           "--out", midi]
-    if args.bars_file:
-        gen += ["--bars-file", args.bars_file]
-    else:
-        gen += ["--riff", args.riff]
-    if args.low_string is not None:
-        gen += ["--low-string", str(args.low_string)]
-
     print(f"[shred] Rendering {args.part}: {args.bars_file or args.riff}")
-    try:
-        r = subprocess.run(gen, capture_output=True, text=True, timeout=120)
-    except subprocess.TimeoutExpired:
-        print("[shred] ERROR: guitar engine did not finish in 120s", file=sys.stderr)
-        try:
-            os.unlink(midi)
-        except OSError:
-            pass
-        return 1
-    if r.returncode != 0:
-        print(r.stderr or r.stdout, file=sys.stderr)
-        try:
-            os.unlink(midi)
-        except OSError:
-            pass
-        return 1
-    if r.stdout:
-        print(r.stdout.rstrip())
+    rc, msg = _render_insert(br, gen, midi, track=args.track, position=args.position,
+                             tempo=args.tempo,
+                             replace=getattr(args, "replace", False),
+                             tag=f"shred/{args.part}")
+    print(msg, file=(sys.stderr if rc else sys.stdout))
+    return rc
 
-    payload = {"target_track_name": args.track, "midi_path": midi, "position": pos}
-    if args.tempo is not None:
-        payload["project_tempo"] = args.tempo
-    res = send_type("insert_midi_file", payload, bridge_root=br,
-                    timeout_ms=20000, resolve=False, repair=False)
-    if not res.get("ok"):
-        # the item was never created; the orphaned render is just clutter.
-        try:
-            os.unlink(midi)
-        except OSError:
-            pass
-        print(f"[shred] FAILED: {res.get('error')}", file=sys.stderr)
+
+def cmd_band(args):
+    """Lay down (or re-cut) a whole four-track metal jam in ONE command: two
+    double-tracked guitars, a locked bass, and drums — replacing whatever is on
+    those tracks. This is the smooth path: one line instead of clear+insert x4.
+    """
+    br = args.bridge_root
+    if not status_ok(br, quiet=True):
+        print("[band] REAPER is DOWN — relaunch it, nothing inserted.", file=sys.stderr)
         return 1
-    tname = res.get("data", {}).get("track", {}).get("name", "track")
-    print(f"[shred] OK: inserted {args.part} on {tname} at "
-          f"{args.position if args.position is not None else 'cursor'}s "
-          f"(source: {midi})")
-    return 0
+    shredgen = os.path.join(br, "skills", "guitar-apparatus", "shredgen.py")
+    groovegen = os.path.join(br, "skills", "drum-apparatus", "groovegen.py")
+    for tool in (shredgen, groovegen):
+        if not os.path.isfile(tool):
+            print(f"[band] ERROR: engine not found at {tool}", file=sys.stderr)
+            return 1
+    dsl = args.dsl or os.path.join(br, "skills", "guitar-apparatus", "examples",
+                                   "jam-e.dsl")
+    if not os.path.isfile(dsl):
+        print(f"[band] ERROR: drum DSL not found: {dsl}", file=sys.stderr)
+        return 1
+    seeds = [int(s) for s in args.seeds.split(",")] if args.seeds else [101, 202, 303]
+    while len(seeds) < 3:
+        seeds.append(seeds[-1] + 101)
+    pos, tempo, replace = args.position, args.tempo, not args.no_replace
+
+    # (part, track, seed) for the three guitar/bass renders, then drums.
+    jobs = [
+        ("guitar", args.guitar_l, seeds[0]),
+        ("guitar", args.guitar_r, seeds[1]),
+        ("bass", args.bass, seeds[2]),
+    ]
+    rc_total = 0
+    for part, track, seed in jobs:
+        _sg, midi, gen = _shred_gen_argv(
+            br, part=part, track=track, seed=seed, map_name=args.map, tempo=tempo,
+            riff=args.riff, bars_file=args.bars_file, low_string=args.low_string)
+        rc, msg = _render_insert(br, gen, midi, track=track, position=pos,
+                                 tempo=tempo, replace=replace, tag=f"band/{track}")
+        print(msg, file=(sys.stderr if rc else sys.stdout))
+        rc_total |= rc
+    # drums
+    midi = _persist_midi(br, "groove", args.drums + "-" + os.path.basename(dsl))
+    gen = [sys.executable, groovegen, "--dsl", dsl, "--out", midi,
+           "--map", args.drum_map]
+    rc, msg = _render_insert(br, gen, midi, track=args.drums, position=pos,
+                             tempo=tempo, replace=replace, tag=f"band/{args.drums}")
+    print(msg, file=(sys.stderr if rc else sys.stdout))
+    rc_total |= rc
+    print("[band] done." if not rc_total else "[band] finished with errors.")
+    return rc_total
 
 
 def cmd_riff(args):
@@ -1633,10 +1655,36 @@ def build_parser():
     s.add_argument("--tempo", type=int, default=None, help="project tempo override")
     s.add_argument("--seed", type=int, default=None, help="RNG seed")
     s.add_argument("--map", default=None, help="drum-kit map (default: GM Standard)")
+    s.add_argument("--replace", action="store_true",
+                   help="clear the track from --position before inserting")
     s.set_defaults(func=cmd_groove)
 
     s = sub.add_parser("jam", help="render a DSL beat from stdin onto the selected track")
     s.set_defaults(func=cmd_jam)
+
+    s = sub.add_parser("band",
+                       help="lay down / re-cut a whole 4-track jam in one command")
+    s.add_argument("--guitar-l", default="argent-l", help="left guitar track")
+    s.add_argument("--guitar-r", default="argent-r", help="right guitar track")
+    s.add_argument("--bass", default="nolly-bass-library", help="bass track")
+    s.add_argument("--drums", default="rs-drums-monarch", help="drum track")
+    s.add_argument("--riff", default="demo", help="built-in riff: demo | probe")
+    s.add_argument("--bars-file", default=None,
+                   help="custom guitar riff: text file, one bar per line")
+    s.add_argument("--dsl", default=None,
+                   help="drum DSL (default: bundled examples/jam-e.dsl)")
+    s.add_argument("--map", default="argent_e", help="guitar tuning map")
+    s.add_argument("--drum-map", default="RS Monarch", help="drum-kit map")
+    s.add_argument("--seeds", default="101,202,303",
+                   help="comma seeds for guitar-l, guitar-r, bass")
+    s.add_argument("--low-string", type=int, default=None,
+                   help="override the guitar low-string MIDI note")
+    s.add_argument("--position", type=float, default=0.0,
+                   help="time in seconds (default: 0 = bar 1)")
+    s.add_argument("--tempo", type=int, default=None, help="project tempo override")
+    s.add_argument("--no-replace", action="store_true",
+                   help="append instead of replacing the tracks (default: replace)")
+    s.set_defaults(func=cmd_band)
 
     s = sub.add_parser("shred",
                        help="render a humanized guitar/bass riff and insert it")
@@ -1653,6 +1701,8 @@ def build_parser():
     s.add_argument("--position", type=float, default=None,
                    help="time in seconds (default: edit cursor)")
     s.add_argument("--tempo", type=int, default=None, help="project tempo override")
+    s.add_argument("--replace", action="store_true",
+                   help="clear the track from --position before inserting")
     s.set_defaults(func=cmd_shred)
 
     s = sub.add_parser("riff",

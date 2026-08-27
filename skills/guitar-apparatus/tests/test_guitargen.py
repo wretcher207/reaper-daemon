@@ -63,6 +63,12 @@ def test_parse_bars_rejects_wrong_length():
         riffs.parse_bars(["xxx"])  # not 16 steps
 
 
+def test_parse_bars_ignores_spaces():
+    # spaces inside a bar are visual grouping only, like the drum DSL
+    assert (riffs.parse_bars(["Xxx.mx.xXx.vXxk."])
+            == riffs.parse_bars(["Xxx. mx.x Xx.v Xxk."]))
+
+
 def test_parse_bars_intervals_and_ring_length():
     hits = riffs.parse_bars(["o...x..........."])  # let-ring root, then a mute
     assert hits[0]["interval"] == 0 and hits[0]["art"] == "let_ring"

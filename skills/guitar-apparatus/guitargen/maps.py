@@ -71,11 +71,8 @@ GUITAR_MAPS = {
     # same low note (bass floors at E); the engine frets E on the low strings.
     "argent_e": {
         "library": "Shreddage 3.5 Argent (9-string, low C#)",
-        "ks": SHREDDAGE3_KS,
-        "ks_notes": KS_NOTES,
+        "ks_notes": KS_NOTES,             # articulation slot -> (ks pitch, ks vel)
         "low_string": 28,                 # riff root E; physical low string = 25
-        "range_lo": 25, "range_hi": 107,
-        "base_articulation": "sustain",
         "modwheel_mute": False,           # Argent mutes via keyswitch + velocity
         "power_chords": True,             # root hits can voice power chords
     },
@@ -89,12 +86,9 @@ BASS_MAPS = {
     # low E.
     "nolly_e": {
         "library": "GGD Nolly Bass (Dingwall NG2 6-string)",
-        "ks": {},
         "low_string": 28,                 # E0, the library's lowest note
-        "base_articulation": None,
         "modwheel_mute": False,
         "power_chords": False,
-        "range_lo": 28, "range_hi": 79,
     },
 }
 

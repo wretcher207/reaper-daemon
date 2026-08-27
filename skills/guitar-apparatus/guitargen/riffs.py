@@ -45,6 +45,10 @@ _TOKENS = {
     # monotone muted rake. m=b2 n=b3 v=b5/tritone f=5th k=b7
     "m": (1, "mute"), "n": (3, "mute"), "v": (6, "mute"),
     "f": (7, "mute"), "k": (10, "mute"),
+    # OPEN let-ring melodic note for the ringing intro (b2). The other open
+    # melodic notes already exist: 5=5th b=tritone 7=b7 h=octave (all let_ring),
+    # o=root (power chord, rings).
+    "M": (1, "let_ring"),
     # dissonant palm-muted RING CLUSTERS: root + the clashing interval, together
     "r": (0, "mute_ring"),          # root ring, single note
     "2": (0, "mute_ring", 1),       # E + b2  (minor-2nd crunch)
@@ -56,17 +60,25 @@ _RING_ARTS = {"let_ring", "sustain", "mute_ring"}
 
 
 def parse_bars(bars, steps_per_bar=16):
-    """Turn a list of bar strings into hit dicts on an absolute step grid."""
+    """Turn a list of bar strings into hit dicts on an absolute step grid.
+
+    Spaces inside a bar are visual only (group cells for readability, like the
+    drum DSL), so `"Xxx. mx.x Xx.v Xxk."` is the same as `"Xxx.mx.xXx.vXxk."`.
+    """
     raw = []
     for bi, bar in enumerate(bars):
-        if len(bar) != steps_per_bar:
+        cells = [c for c in bar if not c.isspace()]
+        if len(cells) != steps_per_bar:
             raise ValueError(
-                f"bar {bi} has {len(bar)} steps, expected {steps_per_bar}: {bar!r}")
-        for si, ch in enumerate(bar):
+                f"bar {bi+1} ({bar!r}) has {len(cells)} cells, need exactly "
+                f"{steps_per_bar} (spaces don't count)")
+        for si, ch in enumerate(cells):
             if ch == ".":
                 continue
             if ch not in _TOKENS:
-                raise ValueError(f"bar {bi} step {si}: unknown token {ch!r}")
+                raise ValueError(
+                    f"bar {bi+1} cell {si+1}: unknown token {ch!r} — "
+                    f"valid: {' '.join(sorted(_TOKENS))} .")
             tok = _TOKENS[ch]
             hit = {"step": bi * steps_per_bar + si,
                    "interval": tok[0], "art": tok[1]}
@@ -119,13 +131,16 @@ def bass_from_guitar(spec):
 # redirect.
 # ---------------------------------------------------------------------------
 DEMO_BARS = [
-    "Xxx.mx.xXx.vXxk.",   # 1  E-chug anchors, line walks F(b2)/Bb(b5)/D(b7)
-    "Xxx.kx.xXx.x2...",   # 2  answer: D move, hangs an E+b2 cluster (palm-muted)
-    "Xxx.mx.xXx.vXxk.",   # 3  riff A again
-    "Xxx.nx.xXx.xt...",   # 4  answer: G(b3) move, hangs an E+tritone cluster
+    # bars 1-2: OPEN ringing dissonant intro — big let-ring E power chords with
+    # ringing melodic notes (b7/tritone/5/b2). Rings and sings; the opposite of a
+    # muted chug. Then the heavy muted riff kicks in at bar 3 for contrast.
+    "o...7...b...5...",   # 1  E5 (rings) + D(b7) + Bb(tritone) + B(5), all open
+    "o...b...M...5...",   # 2  E5 + Bb + F(b2) + B, ringing
+    "Xxx.mx.xXx.vXxk.",   # 3  HEAVY muted riff kicks in: line walks F/Bb/D
+    "Xxx.kx.xXx.x2...",   # 4  answer: D move, hangs an E+b2 cluster (palm-muted)
     "2...t...j...9...",   # 5  lift: palm-muted dissonant CLUSTERS over the E pedal
     "2...t...j...r...",   # 6  lift answer, settles back onto the root ring
-    "Xxx.mx.xXx.vXxk.",   # 7  riff A returns
+    "Xxx.mx.xXx.vXxk.",   # 7  heavy riff returns
     "XxxXxfXxvXxkXX.r",   # 8  build: gallop climbing 5/b5/b7 into a root-ring stab
 ]
 
