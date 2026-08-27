@@ -1033,7 +1033,14 @@ def cmd_groove(args):
         print(f"[groove] ERROR: drum engine not found at {groovegen}", file=sys.stderr)
         return 1
 
-    midi = tempfile.NamedTemporaryFile(suffix=".mid", delete=False).name
+    # REAPER imports a .mid by REFERENCE on this build, so the file must outlive
+    # the item — a deleted temp file leaves an empty take. Render to a persistent
+    # folder and keep it (same fix as `shred`).
+    render_dir = os.path.join(br, "rendered-midi")
+    os.makedirs(render_dir, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_",
+                  (track or "selected") + "-" + os.path.basename(args.dsl))
+    midi = os.path.join(render_dir, f"groove-{safe}-{secrets.token_hex(3)}.mid")
     gen = [sys.executable, groovegen, "--dsl", args.dsl, "--out", midi]
     if cfg_map:
         gen += ["--map", cfg_map]
@@ -1067,16 +1074,17 @@ def cmd_groove(args):
         payload["project_tempo"] = args.tempo
     res = send_type("insert_midi_file", payload, bridge_root=br,
                     timeout_ms=20000, resolve=False, repair=False)
-    try:
-        os.unlink(midi)
-    except OSError:
-        pass
     if not res.get("ok"):
+        try:
+            os.unlink(midi)   # item never created; drop the orphaned render
+        except OSError:
+            pass
         print(f"[groove] FAILED: {res.get('error')}", file=sys.stderr)
         return 1
     tname = res.get("data", {}).get("track", {}).get("name", "track")
     print(f"[groove] OK: inserted on {tname} at "
-          f"{args.position if args.position is not None else 'cursor'}s")
+          f"{args.position if args.position is not None else 'cursor'}s "
+          f"(source: {midi})")
     return 0
 
 
