@@ -1,6 +1,7 @@
 """Tests for drumgen.humanize: the after-the-fact humanize pass."""
 from drumgen.catalog import load_maps
-from drumgen.humanize import plan_humanize, pitch_families, FAMILY_BAND
+from drumgen.humanize import (plan_humanize, pitch_families, detect_fills,
+                              ROLE_FAMILY, FAMILY_BAND)
 
 PPQ = 960
 BAR = PPQ * 4
@@ -172,6 +173,43 @@ def test_cymbals_do_not_all_pile_at_the_ceiling():
     at_ceiling = sum(1 for v in vels if v >= ceiling)
     assert at_ceiling <= len(vels) * 0.1        # not a pile
     assert len(set(vels)) >= 8                    # real spread
+
+
+def _tom_fill(start_index, start_tick, hits=8, pitches=(38, 37, 36, 35)):
+    """A descending 16th-note tom roll, all flat 127."""
+    notes = []
+    for k in range(hits):
+        p = pitches[k % len(pitches)]
+        notes.append(_note(start_index + k, start_tick + k * SIXTEENTH, p))
+    return notes
+
+
+def test_fill_is_detected_groove_is_not():
+    kit = load_maps()["RS Monarch"]
+    fam = {int(p): ROLE_FAMILY.get(r) for r, p in kit.items()}
+    # a groove: kicks + backbeat snare, spaced out -> no fill
+    groove = _flat_take()
+    assert detect_fills(groove, fam, SIXTEENTH) == []
+    # a tom roll -> exactly one fill
+    fills = detect_fills(_tom_fill(0, 0), fam, SIXTEENTH)
+    assert len(fills) == 1 and len(fills[0]) == 8
+
+
+def test_fill_velocity_ramps_up():
+    """The whole point: a fill crescendos, not random, and not the reverse."""
+    notes = _tom_fill(0, 0, hits=8)
+    out = plan_humanize(notes, PPQ, map_name="RS Monarch",
+                        kit_map=load_maps()["RS Monarch"], amount=25)
+    vel = [e["velocity"] for e in sorted(out["edits"], key=lambda e: e["index"])]
+    assert out["summary"]["fills"] == 1
+    # last hit is the hardest; first is among the softest
+    assert vel[-1] == max(vel)
+    assert vel[0] <= min(vel) + 4
+    # net trend is strongly upward: compare first third to last third means
+    third = len(vel) // 3
+    assert sum(vel[-third:]) / third - sum(vel[:third]) / third >= 8
+    # still no two-in-a-row identical
+    assert all(vel[i] != vel[i - 1] for i in range(1, len(vel)))
 
 
 def test_every_family_has_a_band():

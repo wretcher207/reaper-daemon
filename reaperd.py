@@ -1251,7 +1251,8 @@ def cmd_humanize(args):
     s = plan["summary"]
     print(f"[humanize] {s['notes']} notes | amount {s['amount']} seed {s['seed']} | "
           f"{s['velocity_edits']} vel, {s['position_edits']} moved "
-          f"(mean {s['mean_move_ticks']}t, max {s['max_move_ticks']}t)")
+          f"(mean {s['mean_move_ticks']}t, max {s['max_move_ticks']}t) | "
+          f"{s['fills']} fills shaped ({s['fill_notes']} notes)")
     if s["unclassified"]:
         print(f"[humanize] {s['unclassified']} note(s) unclassified (neutral band); "
               f"pass --map for exact role bands.")

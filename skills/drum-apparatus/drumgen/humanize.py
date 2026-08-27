@@ -125,6 +125,61 @@ def _clamp(v, lo, hi):
     return int(round(max(lo, min(hi, v))))
 
 
+# The voices a fill is played on -- the hands moving around the kit. A fill is a
+# dense run across these; the gap threshold keeps steady-groove backbeats (a
+# half-note apart) out.
+FILL_VOICES = {"tom", "snare_center", "snare_rim"}
+
+
+def detect_fills(ordered, fam, sixteenth, min_hits=3, min_toms=1):
+    """Find fills: dense runs across the tom/snare voices, in time order.
+
+    A run breaks when the gap to the next hit exceeds an eighth note. A run
+    qualifies as a fill only if it has >= min_hits hits and includes >= min_toms
+    tom hits -- toms are the signature of a fill, and the tom gate keeps a
+    cluster of snare ghosts in a groove from being read as one.
+
+    Returns a list of runs; each run is a list of note dicts in time order.
+    """
+    stream = sorted((n for n in ordered if fam.get(n["pitch"]) in FILL_VOICES),
+                    key=lambda n: n["ppq"])
+    gap = sixteenth * 2
+    runs, cur = [], []
+
+    def flush():
+        if len(cur) >= min_hits:
+            toms = sum(1 for n in cur if fam.get(n["pitch"]) == "tom")
+            if toms >= min_toms:
+                runs.append(list(cur))
+
+    for n in stream:
+        if cur and (n["ppq"] - cur[-1]["ppq"]) > gap:
+            flush()
+            cur = []
+        cur.append(n)
+    flush()
+    return runs
+
+
+def _fill_ramp(runs):
+    """Map each fill note's index -> a velocity offset shaping a crescendo.
+
+    A drummer digs INTO a fill: it starts a touch under the groove and ramps up
+    into the downbeat/crash that resolves it. The curve eases in (p**1.3) so it
+    accelerates toward the peak rather than rising flatly, and the final hit
+    gets an extra push -- that is the one feeding the crash.
+    """
+    ramp, in_fill = {}, set()
+    for run in runs:
+        L = len(run)
+        for i, n in enumerate(run):
+            p = (i / (L - 1)) if L > 1 else 1.0
+            ramp[n["index"]] = -8.0 + 20.0 * (p ** 1.3)
+            in_fill.add(n["index"])
+        ramp[run[-1]["index"]] += 3.0
+    return ramp, in_fill
+
+
 def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
                   amount=25, seed=20260827, bar_ticks=None):
     """Plan a humanize pass over an existing take.
@@ -180,10 +235,18 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
                     weakfoot.add(n["index"])
         i = j + 1
 
+    # ---- fills: shape each detected fill as a crescendo (musical logic, not
+    # random). Applied as structure -- like the metric contour, it does not
+    # scale with amount; amount only scales the random garnish on top.
+    fills = detect_fills(ordered, fam, sixteenth)
+    fill_ramp, fill_notes = _fill_ramp(fills)
+
     # ---- velocity pass -----
-    # Base spread scales with amount. Cymbals get more of it: a drummer varies
-    # crash/china force far more than a kick, and they are the exposed hits.
-    jit = amount / 100.0 * 20.0
+    # Randomness is the garnish, not the driver: the deterministic contour
+    # (metric accents, backbeats, fill crescendos, weak foot) carries the
+    # dynamics; jitter just keeps it off the grid. Cymbals get a bit more since
+    # a drummer genuinely varies crash force more than a kick.
+    jit = amount / 100.0 * 15.0
     new_vel = {}
     for n in ordered:
         f = family_of(n)
@@ -194,11 +257,16 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
         downbeat = (step == 0)
         onbeat = (step % steps_per_beat == 0)
         backbeat = step in (steps_per_beat, steps_per_beat * 3)  # beats 2 & 4
+        in_fill = n["index"] in fill_notes
 
+        if in_fill:
+            # The phrase crescendo replaces the per-hit metric lift: inside a
+            # fill the shape IS the dynamic, not the bar position of each hit.
+            v += fill_ramp[n["index"]]
         # Metric contour. Cymbals are ACCENTS in their own right -- stacking a
         # downbeat lift on top only drove them into the ceiling and flattened
         # them there, so they take no metric lift.
-        if f in ("snare_rim", "snare_center", "snare_flam"):
+        elif f in ("snare_rim", "snare_center", "snare_flam"):
             if backbeat:
                 v += 8
             elif onbeat:
@@ -228,7 +296,9 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
             shelled = any(family_of(m) in SHELL_FAMILIES for m in tick_index.get(n["ppq"], []))
             if shelled:
                 v += 3   # additive, not x1.12 -- the multiply overshot the ceiling
-        this_jit = jit * (1.6 if f in CYMBAL_FAMILIES else 1.0)
+        this_jit = jit * (1.5 if f in CYMBAL_FAMILIES else 1.0)
+        if in_fill:
+            this_jit *= 0.35        # let the crescendo read; a little life on top
         v += vrng.gauss(0, this_jit)
         new_vel[n["index"]] = _clamp(v, lo, hi)
 
@@ -314,6 +384,8 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
         "amount": amount,
         "seed": seed,
         "families": fam_counts,
+        "fills": len(fills),
+        "fill_notes": len(fill_notes),
         "unclassified": fam_counts.get("other", 0),
         "max_move_ticks": max(moves) if moves else 0,
         "mean_move_ticks": round(sum(moves) / len(moves), 2) if moves else 0,
