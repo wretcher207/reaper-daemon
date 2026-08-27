@@ -39,6 +39,7 @@ __pycache__/
 
 # Internal dev notes — kept locally, not shipped in the public repo
 MEMORY.md
+MUSICAL_AUTOMATION_SYSTEM_PLAN.md
 HANDOFF.md
 ERRORS.md
 CLAUDE.md
