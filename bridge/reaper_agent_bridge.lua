@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.13.0
+-- @version 3.13.1
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -13,6 +13,14 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.13.1: Maintenance. The undocumented enum_installed_fx command is removed
+--   (never in the schema, untested, uncalled, and duplicated by the CLI's
+--   installed-plugin resolver). Repo-side: the unreachable site/ product page
+--   is deleted (netlify.toml 301s everything to deadpixeldesign.com; the old
+--   page lives in git history), one-time spike tooling and a self-consistency
+--   fixture test are removed, and the drumgen.profile argv builder is shared
+--   between the CLI and the MCP server so the two cannot drift. No behavior
+--   change for any documented command.
 --   3.13.0: Daemon Beater release. The bridge script itself is unchanged; the
 --   version moves in lockstep with the repo release. In the cloned repo
 --   (ReaPack installs only this bridge): the guitar stem profiler reads any
@@ -4127,25 +4135,6 @@ local function command_scan_fx(command)
 end
 
 -- Enumerate plugins INSTALLED in REAPER (not just FX already on tracks).
--- add_fx fails when fx_name doesn't match REAPER's exact listing; this lets an
--- agent discover the precise name (incl. "VST3:" prefix and vendor suffix)
--- before adding. Optional payload.query filters case-insensitively by substring.
-local function command_enum_installed_fx(command)
-  local payload = command.payload or {}
-  local query = payload.query and tostring(payload.query):lower() or nil
-  local matches = {}
-  local i = 0
-  while true do
-    local ok_, name = reaper.EnumInstalledFX(i)
-    if not ok_ or not name or name == "" then break end
-    if not query or name:lower():find(query, 1, true) then
-      matches[#matches + 1] = name
-    end
-    i = i + 1
-  end
-  return { query = payload.query or nil, count = #matches, fx = matches }
-end
-
 -- Discover a drum library's note->piece mapping by reading the MIDI note
 -- names REAPER has for the track. Most serious drum samplers (GGD, Superior
 -- Drummer, EZdrummer, BFD, Additive Drums) install a .midnam that REAPER
@@ -4245,7 +4234,6 @@ local handlers = {}
 local NO_UNDO_BLOCK = {
   get_context = true, get_fx_parameters = true, scan_fx = true,
   get_fx_param_automation = true,
-  enum_installed_fx = true,
   discover_drum_map = true,
   get_track_routing = true,
   -- capture_track_audio restores everything it touches (selection, render
@@ -4359,7 +4347,6 @@ end
 handlers.get_context = command_get_context
 handlers.get_fx_parameters = command_get_fx_parameters
 handlers.scan_fx = command_scan_fx
-handlers.enum_installed_fx = command_enum_installed_fx
 handlers.discover_drum_map = command_discover_drum_map
 
 -- Transport / project

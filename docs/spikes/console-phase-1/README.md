@@ -4,7 +4,9 @@ Archived. This is the evidence trail for the Daemon Console panel, not live code
 Nothing in the repo calls `spike_appender.py` any more, and `PROCEDURE.md` registers
 a panel whose behaviour has since changed, so do not follow it as installation
 instructions. It is here as a working pattern to copy for Phase 2, and as the record
-of what was actually observed rather than claimed.
+of what was actually observed rather than claimed. The spike tooling itself (`spike_appender.py` and
+`spike_results.jsonl`) was removed after the console shipped; both live in
+git history if the raw rows are ever needed.
 
 ## The problem it solved
 

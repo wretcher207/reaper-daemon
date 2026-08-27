@@ -574,19 +574,11 @@ def tool_profile_track(args):
     project, track, err = _saved_project_arg("profile_track", args)
     if err:
         return err
-    argv = ["-m", "drumgen.profile", project, track]
-    bars = args.get("bars")
-    start_bar = args.get("start_bar")
-    max_seconds = args.get("max_seconds")
-    # drumgen.profile takes these positionally, in this order. is-not-None, not
-    # truthiness (same rule as reaperd.cmd_profile): max_seconds=0 must reach
-    # drumgen and be REJECTED there, not silently become "the whole item".
-    if bars is not None or start_bar or max_seconds is not None:
-        argv.append(str(bars if bars is not None else 0))  # 0 = whole item
-        if start_bar or max_seconds is not None:
-            argv.append(str(start_bar or 0))
-        if max_seconds is not None:
-            argv.append(str(max_seconds))
+    # argv lives in reaperd.drum_profile_args so the CLI and MCP builders
+    # cannot drift apart (drumgen takes the window positionally, in order).
+    argv = reaperd.drum_profile_args(
+        project, track, bars=args.get("bars"), start_bar=args.get("start_bar"),
+        max_seconds=args.get("max_seconds"))
     proc, err = _run_drum_module("profile", argv, PROFILE_TIMEOUT_S)
     if err:
         return err

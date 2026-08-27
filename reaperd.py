@@ -1138,6 +1138,28 @@ def cmd_riff(args):
     return 0
 
 
+def drum_profile_args(project, track, bars=None, start_bar=None,
+                      max_seconds=None, json_flag=False):
+    """Positional argv for drumgen.profile, WITHOUT the executable.
+
+    Shared by the CLI (cmd_profile) and the MCP server (tool_profile_track)
+    so the two argv builders cannot drift: drumgen takes these positionally,
+    in this order, and a change here must land in both callers at once.
+    is-not-None, not truthiness: --max-seconds 0 must reach drumgen and be
+    rejected there, not silently turn into "profile the whole item".
+    """
+    argv = ["-m", "drumgen.profile", project, track]
+    if bars is not None or start_bar or max_seconds is not None:
+        argv.append(str(bars if bars is not None else 0))  # 0 = whole item
+        if start_bar or max_seconds is not None:
+            argv.append(str(start_bar or 0))
+        if max_seconds is not None:
+            argv.append(str(max_seconds))
+    if json_flag:
+        argv.append("--json")
+    return argv
+
+
 def cmd_profile(args):
     """Profile a guitar stem bar-by-bar (David's analyze step, before kicks).
 
@@ -1155,18 +1177,9 @@ def cmd_profile(args):
     if not os.path.isdir(skill_dir):
         print(f"[profile] ERROR: drum skill not found at {skill_dir}", file=sys.stderr)
         return 1
-    cmd = [sys.executable, "-m", "drumgen.profile", args.project, args.track]
-    # is-not-None, not truthiness: --max-seconds 0 must reach drumgen and
-    # be rejected there, not silently turn into "profile the whole item".
-    if (args.bars is not None or args.start_bar
-            or args.max_seconds is not None):
-        cmd.append(str(args.bars if args.bars is not None else 0))  # 0 = whole item
-        if args.start_bar or args.max_seconds is not None:
-            cmd.append(str(args.start_bar))
-        if args.max_seconds is not None:
-            cmd.append(str(args.max_seconds))
-    if args.json:
-        cmd.append("--json")
+    cmd = [sys.executable] + drum_profile_args(
+        args.project, args.track, bars=args.bars, start_bar=args.start_bar,
+        max_seconds=args.max_seconds, json_flag=args.json)
     try:
         r = subprocess.run(cmd, cwd=skill_dir, capture_output=True, text=True,
                            timeout=600)

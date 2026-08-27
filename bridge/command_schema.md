@@ -480,6 +480,18 @@ and expiry ride the heartbeat as `active_preview_token` / `preview_expires_at`.
 `{ "target_track_name": "Gtr DI", "fx_name": "ReaEQ (Cockos)", "fx_scope": "track", "show": false }`
 `fx_name` must match the plugin as REAPER lists it.
 
+### add_fx_chain
+```json
+{ "target_track_name": "Gtr Bus", "chain_name": "my-guitar-chain" }
+{ "target_track_guid": "...", "chain_path": "C:/chains/bus.RfxChain" }
+```
+Splices a saved `.RfxChain` file onto a track's FX chain. `chain_name` resolves
+against REAPER's `FXChains` resource folder (extension optional); `chain_path` is
+an explicit file. Read-verify: the handler snapshots the FX count, splices the
+chunk, and restores the original chain on any mismatch, so a parse bug can
+ever leave a half-merged track. Result carries `chain.fx_in_chain`,
+`fx_count_after`, and the added FX names.
+
 ### remove_fx / bypass_fx / move_fx
 ```json
 { "target_track_name": "Gtr DI", "fx_name_contains": "ReaEQ" }
