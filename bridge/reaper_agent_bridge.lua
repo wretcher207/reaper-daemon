@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.13.1
+-- @version 3.14.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
