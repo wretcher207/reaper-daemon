@@ -16,36 +16,38 @@ THE ONE UNVERIFIED THING (confirm by ear, then it is locked):
 """
 
 # ---------------------------------------------------------------------------
-# Shreddage 3 default keyswitch + CC map (from David's shreddage.txt).
-# Values are MIDI note numbers for keyswitches; CC1 (mod wheel) is the palm-mute
-# morph and is not a note.
+# Shreddage Hydra keyswitch map — VERIFIED LIVE from David's instrument UI
+# (2026-08-27), which does NOT match the older shreddage.txt. Articulation
+# keyswitches sit at the very bottom (MIDI 0-11); the string-position overrides
+# and utility functions ride above/below the playable range. Values are MIDI
+# note numbers (Kontakt C3=60 naming: C-2 = 0).
+#
+# Articulation is selected by a keyswitch NOTE (not the mod wheel): the Sustain
+# slot at pitch 0 is split by the KS note's own velocity — 1-115 Sustain,
+# 116-126 Rake, 127 Pinch Harmonic — while Mute, Staccato, and the power-chord
+# variants are their own pitches. So a palm-muted chug means firing the Mute
+# keyswitch (1) before the note; a let-ring means Sustain (0).
 # ---------------------------------------------------------------------------
 SHREDDAGE3_KS = {
-    # fretting styles
-    "fret_polyphonic": 117, "fret_moving_lead": 116, "fret_sweep": 115,
-    "fret_natural": 114,
-    # picking direction
-    "pick_alternate": 110, "pick_down": 109, "pick_up": 108,
-    # holds / strums (rarely needed for chug riffs)
-    "hold_choke": 97, "hold_mute": 96,
-    "strum_up_partial": 95, "strum_down_partial": 94,
-    "strum_up_all": 93, "strum_down_all": 92,
-    "toggle_strum": 91, "hold_strum": 90,
-    # utility
-    "highest_note": 88, "lowest_note": 33, "repeat_last": 32,
-    "slide_note": 31, "play_noise": 30, "slide": 29,
-    # articulations (the ones a riff actually switches between)
-    "fx": 21, "tremolo": 20, "pinch_harmonic": 19, "harmonic": 18,
-    "tapping": 17, "choke": 16, "pwr_staccato": 15, "staccato": 14,
-    "pwr_sustain": 13, "sustain": 12,
-    # neck position / string forcing
-    "hand_position": 10, "force_string_off": 7,
-    "force_string_1e": 6, "force_string_2b": 5, "force_string_3g": 4,
-    "force_string_4d": 3, "force_string_5d": 2, "force_string_6e": 1,
-    "force_string_7a": 0,
+    "sustain": 0, "mute": 1, "staccato": 2,
+    "pwr_sustain": 3, "pwr_mute": 4, "pwr_staccato": 5,
+    "tremolo": 6, "choke": 7, "tapping": 8,
+    "nat_harmonic": 9, "art_harmonic": 10, "fx": 11,
+    # same pitch as sustain, selected by keyswitch-note velocity:
+    "rake": 0, "pinch_harmonic": 0,
 }
 
-MODWHEEL = 1  # CC1 morphs Shreddage sustain (0) <-> palm mute (127)
+# articulation-slot -> (keyswitch pitch, keyswitch-note velocity). The velocity
+# both stays inside Sustain's 1-115 band (so a sustain KS never trips Rake/Pinch)
+# and, for the split slot, selects the sub-articulation.
+KS_NOTES = {
+    "sustain": (0, 64), "mute": (1, 64), "staccato": (2, 64),
+    "pwr_sustain": (3, 64), "pwr_mute": (4, 64),
+    "pinch_harmonic": (0, 127), "rake": (0, 120),
+}
+
+MODWHEEL = 1  # CC1. This Hydra mutes via the Mute keyswitch, not the mod wheel,
+#              so the mod-wheel ride is off by default (map flag modwheel_mute).
 
 
 # ---------------------------------------------------------------------------
@@ -61,13 +63,17 @@ GUITAR_MAPS = {
     # to confirm by ear. If the probe shows the low string sounds an octave up,
     # set low_string 45 and transpose_octaves accordingly.
     "hydra_drop_a": {
-        "library": "Shreddage 3 Hydra",
+        "library": "Shreddage Hydra",
         "ks": SHREDDAGE3_KS,
-        "low_string": 33,                 # A1 concert — CONFIRM BY EAR
-        "strings": [33, 40, 45, 50, 55, 59, 64],  # A1 E2 A2 D3 G3 B3 E4
-        "base_articulation": "sustain",   # single-note chugs
-        "chord_articulation": "pwr_sustain",
-        "range_lo": 33, "range_hi": 87,
+        "ks_notes": KS_NOTES,
+        # VERIFIED LIVE: the instrument's lowest playable note is MIDI 24, which
+        # in Drop A is the low string open (sounds A). Every interval in a riff
+        # is relative to this, so a fifth (root+7) etc. lands right regardless of
+        # how the sample engine fingers it.
+        "low_string": 24,
+        "range_lo": 24, "range_hi": 107,
+        "base_articulation": "sustain",
+        "modwheel_mute": False,           # this Hydra mutes via keyswitch
     },
 }
 
@@ -79,10 +85,13 @@ BASS_MAPS = {
     "nolly_drop_a": {
         "library": "Nolly Bass",
         "ks": {},
-        "low_string": 21,                 # A0 concert — CONFIRM BY EAR
-        "strings": [21, 28, 33, 38],      # A0 E1 A1 D2 (drop-A 4-string span)
+        # VERIFIED LIVE: the Nolly library's lowest playable note is MIDI 28 —
+        # its low string open (sounds A, an octave under the guitar's low A).
+        # The old value (21) was below range, so the bass was silent.
+        "low_string": 28,
         "base_articulation": None,
-        "range_lo": 12, "range_hi": 60,
+        "modwheel_mute": False,
+        "range_lo": 28, "range_hi": 67,
     },
 }
 

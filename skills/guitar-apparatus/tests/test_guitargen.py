@@ -3,8 +3,16 @@ import pytest
 
 from guitargen.smf import write_smf, parse_smf
 from guitargen.perform import perform, ART_VEL, NO_REPEAT_GAP
-from guitargen.maps import get_map, MODWHEEL, SHREDDAGE3_KS
+from guitargen.maps import get_map, MODWHEEL, SHREDDAGE3_KS, KS_NOTES
 from guitargen import riffs
+
+KS_PITCHES = {p for p, _v in KS_NOTES.values()}
+
+
+def _played(events):
+    """Notes that are actual guitar/bass notes, not keyswitch triggers."""
+    return [e for e in events
+            if e["type"] == "note" and e["pitch"] not in KS_PITCHES]
 
 
 # ---- SMF writer -----------------------------------------------------------
@@ -90,17 +98,25 @@ def test_double_track_seeds_differ():
     assert lv != rv
 
 
-def test_guitar_emits_keyswitch_and_modwheel():
+def test_guitar_articulation_via_keyswitches():
+    # chugs fire the Mute keyswitch, let-rings the Sustain keyswitch; this Hydra
+    # does not mute via the mod wheel, so no CC is emitted.
     spec = riffs.demo_guitar_spec()
-    events, info = perform(spec, "hydra_drop_a", seed=1)
-    ks = SHREDDAGE3_KS["sustain"]
-    assert any(e["type"] == "note" and e["pitch"] == ks and e["tick"] == 0
-               for e in events)
-    ccs = [e for e in events if e["type"] == "cc"]
-    assert ccs and all(e["cc"] == MODWHEEL for e in ccs)
-    # palm-mute chugs ride high, let-rings drop low -> a real morph range
-    vals = [e["val"] for e in ccs]
-    assert max(vals) >= 100 and min(vals) <= 20
+    events, _ = perform(spec, "hydra_drop_a", seed=1)
+    ks_notes = [e for e in events
+                if e["type"] == "note" and e["pitch"] in KS_PITCHES]
+    pitches = {e["pitch"] for e in ks_notes}
+    assert SHREDDAGE3_KS["mute"] in pitches      # chugs
+    assert SHREDDAGE3_KS["sustain"] in pitches   # let-rings
+    assert not any(e["type"] == "cc" for e in events)
+
+
+def test_keyswitch_precedes_the_note_it_governs():
+    spec = riffs.make_spec(["x..............."], "hydra_drop_a")
+    events, _ = perform(spec, "hydra_drop_a", seed=1)
+    ks = next(e for e in events if e["pitch"] == SHREDDAGE3_KS["mute"])
+    note = next(e for e in events if e["pitch"] == get_map("hydra_drop_a")["low_string"])
+    assert ks["tick"] <= note["tick"]
 
 
 def test_bass_has_no_keyswitch_or_cc():
@@ -127,16 +143,14 @@ def test_velocities_stay_in_band():
     events, _ = perform(spec, "hydra_drop_a", seed=5)
     lo = min(b[1] for b in ART_VEL.values())
     hi = max(b[2] for b in ART_VEL.values())
-    for e in events:
-        if e["type"] == "note" and e["pitch"] != SHREDDAGE3_KS["sustain"]:
-            assert lo <= e["vel"] <= hi
+    for e in _played(events):
+        assert lo <= e["vel"] <= hi
 
 
 def test_low_string_override_transposes_whole_riff():
     spec = riffs.make_spec(["x...5..........."], "hydra_drop_a")
     spec["low_string_override"] = 45
     events, _ = perform(spec, "hydra_drop_a", seed=1)
-    pitches = sorted(e["pitch"] for e in events
-                     if e["type"] == "note" and e["pitch"] != SHREDDAGE3_KS["sustain"])
+    pitches = sorted(e["pitch"] for e in _played(events))
     # root at 45, fifth at 45+7=52
     assert pitches == [45, 52]

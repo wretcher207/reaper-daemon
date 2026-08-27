@@ -31,15 +31,19 @@ ART_VEL = {
     "ghost":    (64, 44, 84),
 }
 
-# articulation -> mod-wheel palm-mute depth center (0 = full sustain, 127 = full
-# mute). A little per-hit wander is applied so the mute is not frozen.
+# articulation -> which keyswitch SLOT the instrument should be in. On the Hydra,
+# a palm-muted chug is the Mute keyswitch and a ring is Sustain — the keyswitch,
+# not the mod wheel, is what mutes. Accents stay muted (a djent accent is a harder
+# palm mute, not an open note).
+ART_TO_KS = {
+    "mute": "mute", "ghost": "mute", "accent": "mute",
+    "sustain": "sustain", "let_ring": "sustain",
+}
+
+# articulation -> mod-wheel palm-mute depth center, used ONLY on maps that mute
+# via the mod wheel (map flag modwheel_mute). Off for the Hydra.
 ART_MUTE = {
-    "mute":     116,
-    "accent":   96,    # accents dig in — hit harder, mute opens a touch
-    "sustain":  10,
-    "let_ring": 4,
-    "ghost":    122,
-    "bass":     0,     # bass rides open; no morph
+    "mute": 116, "accent": 96, "sustain": 10, "let_ring": 4, "ghost": 122,
 }
 
 # articulation -> note length as a fraction of its authored step length. Mutes are
@@ -84,16 +88,11 @@ def perform(spec, map_name, *, seed=0x5152, is_bass=False):
     tbias = spec.get("timing_bias", 0.0) * step_ticks      # +behind, -ahead
 
     events = []
-
-    # ---- base articulation keyswitch (guitars only; bass has none) ----------
-    ks_map = gm.get("ks") or {}
-    base_art = gm.get("base_articulation")
-    if not is_bass and base_art and base_art in ks_map:
-        events.append({"type": "note", "tick": 0, "pitch": ks_map[base_art],
-                       "vel": 1, "dur": KS_TICKS, "chan": 0})
+    ks_notes = gm.get("ks_notes") or {}
+    modwheel_mute = bool(gm.get("modwheel_mute"))
 
     # ---- pass 1: per-hit velocity from the deterministic contour -------------
-    planned = []           # (hit, tick, pitch, vel, art, mute_depth, dur_ticks)
+    planned = []           # [hit, tick, pitch, vel, art, mute_depth, dur, ks_slot]
     for h in hits:
         step = int(h["step"])
         art = h.get("art", "mute")
@@ -127,16 +126,17 @@ def perform(spec, map_name, *, seed=0x5152, is_bass=False):
         v += vrng.gauss(0, 5.0)          # garnish only
         vel = _clamp(v, lo, hi)
 
-        # mod-wheel palm-mute depth
-        if is_bass:
-            depth = ART_MUTE["bass"]
+        # mod-wheel palm-mute depth (only used when the map mutes via mod wheel)
+        if is_bass or not modwheel_mute:
+            depth = None
         else:
-            depth = ART_MUTE.get(art, 100) + mrng.randint(-4, 4)
-            depth = _clamp(depth, 0, 127)
+            depth = _clamp(ART_MUTE.get(art, 100) + mrng.randint(-4, 4), 0, 127)
+
+        ks_slot = None if is_bass else ART_TO_KS.get(art, "mute")
 
         dur = max(1, int(round(int(h.get("len_steps", 1)) * step_ticks
                                * ART_LEN.get(art, 0.55))))
-        planned.append([h, base_tick, pitch, vel, art, depth, dur])
+        planned.append([h, base_tick, pitch, vel, art, depth, dur, ks_slot])
 
     # ---- golden no-repeat: never the same velocity twice in a row on one pitch
     by_pitch = {}
@@ -168,15 +168,26 @@ def perform(spec, map_name, *, seed=0x5152, is_bass=False):
             toff[t] = max(-tcap, min(tcap, o))
         return toff[t]
 
+    last_slot = None
     last_depth = None
-    for h, base_tick, pitch, vel, art, depth, dur in planned:
+    for h, base_tick, pitch, vel, art, depth, dur, ks_slot in planned:
         off = int(round(tick_offset(base_tick) + tbias))
         tick = max(0, base_tick + off)
 
-        if not is_bass and depth != last_depth:
-            cc_tick = max(0, tick - KS_LEAD)
-            events.append({"type": "cc", "tick": cc_tick, "cc": MODWHEEL,
-                           "val": depth, "chan": 0})
+        # articulation keyswitch: fire only when the slot changes (Mute <-> Sustain
+        # as the riff moves between chugs and let-rings). A KS note sits a few
+        # ticks before the note it governs so the engine has switched in time.
+        if ks_slot is not None and ks_slot != last_slot and ks_slot in ks_notes:
+            ks_pitch, ks_vel = ks_notes[ks_slot]
+            events.append({"type": "note", "tick": max(0, tick - KS_LEAD),
+                           "pitch": ks_pitch, "vel": ks_vel,
+                           "dur": KS_TICKS, "chan": 0})
+            last_slot = ks_slot
+
+        # mod-wheel ride only on maps that mute that way
+        if depth is not None and depth != last_depth:
+            events.append({"type": "cc", "tick": max(0, tick - KS_LEAD),
+                           "cc": MODWHEEL, "val": depth, "chan": 0})
             last_depth = depth
 
         events.append({"type": "note", "tick": tick, "pitch": pitch,
