@@ -21,10 +21,12 @@ double-triggers), so nothing gets skipped.
 import random
 
 try:  # reuse the renderer's taste constants when the package is importable
-    from .groovekit import (KICK_VEL_MAX, VOICE_PROFILE, HAT_CURVE,
-                            CYMBAL_SHELL_BOOST)
+    from .groovekit import (KICK_VEL_MAX, KICK_VEL_MIN, KICK_RUN_BAND,
+                            VOICE_PROFILE, HAT_CURVE, CYMBAL_SHELL_BOOST)
 except Exception:  # pragma: no cover - standalone fallback keeps the module usable
     KICK_VEL_MAX = 114
+    KICK_VEL_MIN = 96
+    KICK_RUN_BAND = (105, 112)
     VOICE_PROFILE = {"RS Monarch": {"snare_role": "SNARE_RIM", "snare_vel": (90, 110)}}
     HAT_CURVE = {"HH_CLOSED_TIP": 0.8, "HH_CLOSED_EDGE": 0.8, "HH_PEDAL": 0.8,
                  "HH_OPEN_1": 1.0, "HH_OPEN_2": 1.0, "HH_OPEN_3": 1.0}
@@ -57,7 +59,7 @@ ROLE_FAMILY = {
 # hits ACROSS the band instead of piling them against the top (a pile at the
 # ceiling reads as "flat" -- consecutive hits clamp to the same value).
 FAMILY_BAND = {
-    "kick":         (102, 1, KICK_VEL_MAX),   # 114
+    "kick":         (102, KICK_VEL_MIN, KICK_VEL_MAX),   # 96-114
     "snare_center": (100, 86, 116),
     "snare_rim":    (100, 90, 110),
     "snare_flam":   (100, 90, 112),
@@ -223,6 +225,11 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
     # ---- fast-kick weak foot: alternate hits in a run drop 7-9 -----
     vrng = random.Random(seed)
     weakfoot = set()
+    # Kicks inside a genuine double-bass run take the run band (David: 105-112),
+    # not the general kick center — a foot on a beater does not ride the
+    # section's dynamic the way a hand on a shell does.
+    run_kicks = set()
+    run_lo, run_hi = KICK_RUN_BAND
     kicks = [n for n in ordered if family_of(n) == "kick"]
     kicks.sort(key=lambda n: n["ppq"])
     i = 0
@@ -233,6 +240,7 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
         run = kicks[i:j + 1]
         if len(run) >= 2:
             for k, n in enumerate(run):
+                run_kicks.add(n["index"])
                 if k % 2 == 1:
                     weakfoot.add(n["index"])
         i = j + 1
@@ -253,6 +261,8 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
     for n in ordered:
         f = family_of(n)
         c, lo, hi = band.get(f, band["other"])
+        if n["index"] in run_kicks:
+            c, lo = run_hi, max(lo, run_lo)
         v = float(c)
         off = n["ppq"] % bar_ticks
         step = round(off / sixteenth)

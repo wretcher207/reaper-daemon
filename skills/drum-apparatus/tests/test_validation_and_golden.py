@@ -9,9 +9,10 @@ from drumgen.groovekit import DSLError, parse_dsl, render
 from drumgen.smf import write_smf
 
 
-def _render(dsl, seed=1):
+def _render(dsl, seed=1, **extra):
     d = parse_dsl(dsl)
     params = {"tempo": d["tempo"], "ppq": d["ppq"], "map": d["map"], "humanize": 0}
+    params.update(extra)
     return render(d["sections"], params, random.Random(seed)), load_maps()[d["map"]], d
 
 
@@ -69,16 +70,68 @@ def test_golden_rule_across_lanes_sharing_a_pitch():
 def test_run_first_hit_not_boosted_but_bar2_recovery_is():
     dsl = ("@tempo 144\n@map RS Monarch\n[v] bars=2 feel=mf\ngrid 16\n"
            "kick | xxxxxxxxxxxxxxxx |\n")
-    evs, dm, d = _render(dsl, seed=1)
+    # Run kicks now start from the double-bass band (KICK_RUN_BAND), which pins
+    # a bar-start hit at the ceiling and would hide the boost this test guards.
+    # Push the band down so the arithmetic is visible again — the mechanism under
+    # test is the fatigue envelope, not where the band sits.
+    evs, dm, d = _render(dsl, seed=1, kick_run_band=(60, 70), kick_vel_min=1)
     ppq = d["ppq"]
     kicks = sorted((e["tick"], e["vel"]) for e in evs if e["pitch"] == dm["KICK_R"])
     first = kicks[0][1]
-    # mf center 88 + on-beat 6 + bar-start 10 = ~104 (± small gauss). The old
-    # phantom +8..10 "recovery" pushed this to ~113.
-    assert first <= 110, f"first hit of the run looks recovery-boosted: {first}"
+    # band top 70 + on-beat 6 + bar-start 10 = ~86 (± small gauss). The old
+    # phantom +8..10 "recovery" pushed this to ~95.
+    assert first <= 92, f"first hit of the run looks recovery-boosted: {first}"
     bar2_first = next(v for t, v in kicks if t >= ppq * 4)
     # Real recovery on bar 2's first run-hit still applies (fights the decay).
     assert bar2_first >= first - 5
+
+
+# ---- kick weight: David's 2026-08-27 call ----------------------------------
+
+def test_double_bass_kicks_sit_in_the_run_band():
+    """A 16th double-bass run lands 105-114, not at the section's feel center.
+
+    David: "your kicks are just really weak — 105 to 112 at least on double
+    bass parts." Before this, a plain `x` kick derived from feel (mf=88) and a
+    whole run averaged ~91 with a floor in the 50s.
+    """
+    dsl = ("@tempo 188\n@map RS Monarch\n[v] bars=4 feel=mf\ngrid 16\n"
+           "kick | xxxxxxxxxxxxxxxx |\n")
+    evs, dm, _ = _render(dsl, seed=3)
+    vels = [e["vel"] for e in evs if e["pitch"] == dm["KICK_R"]]
+    assert len(vels) == 64
+    assert min(vels) >= 105, f"limp kick in a double-bass run: min {min(vels)}"
+    assert max(vels) <= 114, f"kick over David's ceiling: max {max(vels)}"
+    # fatigue + weak foot still move inside the band; a flat run is the tell.
+    assert len(set(vels)) >= 4, f"run is flat: {sorted(set(vels))}"
+
+
+def test_weak_foot_stays_under_the_strong_foot_in_a_run():
+    """Left foot is the weaker one — as a population, not per-hit.
+
+    KICK_R/KICK_L share one pitch on Monarch, so this reads the pre-SMF roles.
+    """
+    from drumgen.groovekit import parse_dsl as _p, render as _r
+    d = _p("@tempo 188\n@map GM Standard\n[v] bars=4 feel=mf\ngrid 16\n"
+           "kick | xxxxxxxxxxxxxxxx |\n")
+    dm = load_maps()["GM Standard"]
+    evs = _r(d["sections"], {"tempo": d["tempo"], "ppq": d["ppq"],
+                             "map": d["map"], "humanize": 0}, random.Random(5))
+    right = [e["vel"] for e in evs if e["pitch"] == dm["KICK_R"]]
+    left = [e["vel"] for e in evs if e["pitch"] == dm["KICK_L"]]
+    assert right and left
+    assert sum(left) / len(left) < sum(right) / len(right), \
+        f"left foot is not the weaker one: L {sum(left)/len(left):.1f} " \
+        f"R {sum(right)/len(right):.1f}"
+
+
+def test_sparse_kicks_are_not_limp_either():
+    """A non-run kick still clears the general floor (KICK_VEL_MIN)."""
+    dsl = ("@tempo 188\n@map RS Monarch\n[v] bars=2 feel=mp\ngrid 16\n"
+           "kick | x...x...x...x... |\n")
+    evs, dm, _ = _render(dsl, seed=11)
+    vels = [e["vel"] for e in evs if e["pitch"] == dm["KICK_R"]]
+    assert min(vels) >= 96, f"limp sparse kick: {min(vels)}"
 
 
 # ---- kick R/L alternation carries across section seams ----------------------

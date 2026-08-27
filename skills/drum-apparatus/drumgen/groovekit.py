@@ -90,6 +90,20 @@ FEEL_CENTER = {
 # per render with params["kick_vel_max"].
 KICK_VEL_MAX = 114
 
+# ...but never limp either. Derived from the feel center alone, a plain `x` kick
+# landed in the 80s and David called the whole board weak (2026-08-27). A kick is
+# a foot on a beater, not a hand on a shell — it does not track the section's
+# dynamic the way the hands do. General floor, overridable per render with
+# params["kick_vel_min"].
+KICK_VEL_MIN = 96
+
+# Double-bass parts sit HERE, not at the feel center: David's call is 105-112 on
+# a genuine run. The right foot takes the top of the band and the weak-foot drop
+# (7-9, below) puts the left near the bottom, so the band's own width IS the
+# foot-to-foot difference. Fatigue then sags within the band and recovers each
+# bar. Overridable per render with params["kick_run_band"].
+KICK_RUN_BAND = (105, 112)
+
 # Per-kit voice preferences, keyed by map name. A kit can say "the snare I reach
 # for is the rimshot, held in this band." Unset -> plain role, full 1-127 range.
 VOICE_PROFILE = {
@@ -363,6 +377,8 @@ def render(sections, params, rng):
     drum_map = load_maps()[params["map"]]
     profile = VOICE_PROFILE.get(params["map"], {})
     kick_max = params.get("kick_vel_max", KICK_VEL_MAX)
+    kick_min = params.get("kick_vel_min", KICK_VEL_MIN)
+    run_lo, run_hi = params.get("kick_run_band", KICK_RUN_BAND)
 
     def pitch_for(role):
         r = role
@@ -383,7 +399,7 @@ def render(sections, params, rng):
     for _kr in ("KICK_R", "KICK_L"):
         _kp = pitch_for(_kr)
         if _kp is not None:
-            bounds[_kp] = (1, kick_max)
+            bounds[_kp] = (kick_min, kick_max)
     if profile.get("snare_vel"):
         _sp = pitch_for(profile.get("snare_role", "SNARE"))
         if _sp is not None:
@@ -521,6 +537,7 @@ def render(sections, params, rng):
                 role = base_role
                 is_left = False
                 vel = float(base_center)
+                vel_floor = None
 
                 if kind == "kick":
                     role = kick_foot_at.get(gstep, "KICK_R")
@@ -528,6 +545,14 @@ def render(sections, params, rng):
                 elif kind == "kick_l":
                     role = "KICK_L"
                     is_left = True
+
+                # A kick inside a genuine run (both feet working) starts from the
+                # double-bass band, NOT the section's feel center — a foot on a
+                # beater does not ride the dynamic the way a hand does. The
+                # weak-foot drop below then separates left from right inside it.
+                if kind in ("kick", "kick_l") and run_meta.get(gstep, (0, 1))[1] >= 2:
+                    vel = float(run_hi)
+                    vel_floor = float(run_lo)
                 elif kind == "snare":
                     if c == CELL_GHOST:
                         role = "SNARE_GHOST"
@@ -551,6 +576,7 @@ def render(sections, params, rng):
                     vel += 18
                 elif c == CELL_GHOST:
                     vel = float(rng.randint(28, 40))
+                    vel_floor = None  # a ghost is a ghost, even on a kick lane
                 elif c == CELL_FLAM:
                     vel += 18 - 6  # slightly under an accent
 
@@ -579,7 +605,7 @@ def render(sections, params, rng):
 
                 intents.append({
                     "gstep": gstep, "bar": bar_idx, "step_in_bar": step_in_bar,
-                    "role": role, "vel": vel, "cell": c,
+                    "role": role, "vel": vel, "cell": c, "_lo": vel_floor,
                 })
 
             # ----- (5) FATIGUE ENVELOPE on runs -----
@@ -639,6 +665,10 @@ def render(sections, params, rng):
             if pitch is None:
                 continue  # unmapped role on a sparse/discovered map
             lo, hi = bounds.get(pitch, (1, 127))
+            # a run kick carries its own (tighter) floor so fatigue and the
+            # golden rule sag it within the double-bass band, not out of it
+            if it.get("_lo") is not None:
+                lo = max(lo, it["_lo"])
             prev_v = prev_v_by_pitch.get(pitch)
             v = it["vel"]
             if prev_v is not None and abs(v - prev_v) < 4:
