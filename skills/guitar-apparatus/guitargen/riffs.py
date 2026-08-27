@@ -10,6 +10,10 @@ keeps a part editable by eye the way the drum DSL's step grid is:
     b   tritone (root+6),  let ring      7   min7th  (root+10), let ring
     h   octave  (root+12), let ring
 
+  moving palm-muted single notes (the riff melody — walk the pitch, no monotone):
+    m   b2 (root+1)   n   b3 (root+3)   v   b5 (root+6)   f   5th (root+7)
+    k   b7 (root+10)
+
   dissonant palm-muted RING CLUSTERS (Mute keyswitch, top vel; root struck with
   the clashing note so you hear it crunch):
     r   root ring (single)  2   E+b2            t   E+tritone
@@ -36,6 +40,11 @@ _TOKENS = {
     "x": (0, "mute"), "X": (0, "accent"), "o": (0, "let_ring"), "g": (0, "ghost"),
     "4": (5, "mute"), "5": (7, "let_ring"), "b": (6, "let_ring"),
     "7": (10, "let_ring"), "h": (12, "let_ring"),
+    # moving palm-muted single notes (the riff MELODY, E phrygian): the chugs
+    # walk to these between the low-E anchors so the part reads as notes, not a
+    # monotone muted rake. m=b2 n=b3 v=b5/tritone f=5th k=b7
+    "m": (1, "mute"), "n": (3, "mute"), "v": (6, "mute"),
+    "f": (7, "mute"), "k": (10, "mute"),
     # dissonant palm-muted RING CLUSTERS: root + the clashing interval, together
     "r": (0, "mute_ring"),          # root ring, single note
     "2": (0, "mute_ring", 1),       # E + b2  (minor-2nd crunch)
@@ -103,20 +112,21 @@ def bass_from_guitar(spec):
 
 
 # ---------------------------------------------------------------------------
-# The demo: 8 bars, key of E, 120 BPM. Riff A (driving syncopated chug) x2, a
-# more open melodic lift (riff B), then riff A returns and builds to a ringing
-# resolve. Content is a jam starting point — the point of the first pass is the
-# feel and the pipeline; the notes are David's to redirect.
+# The demo: 8 bars, key of E, 120 BPM. Riff A is a MOVING E-phrygian riff (the
+# palm-muted line walks to b2/b3/b5/b7 between low-E power-chord anchors, so it
+# reads as notes, not a monotone chug). Bars 5-6 are a dissonant palm-muted
+# cluster lift; bar 8 builds and resolves. A jam start — notes are David's to
+# redirect.
 # ---------------------------------------------------------------------------
 DEMO_BARS = [
-    "Xxx.Xx.xXx.xXxx.",   # 1  riff A: accents on the quarters, gaps breathe
-    "Xx.xXx.xXx.x2...",   # 2  answer: hangs a dissonant b2, palm-muted, ringing
-    "Xxx.Xx.xXx.xXxx.",   # 3  riff A again
-    "Xx.xXx.xXx.xt...",   # 4  answer: hangs a tritone, palm-muted, ringing
+    "Xxx.mx.xXx.vXxk.",   # 1  E-chug anchors, line walks F(b2)/Bb(b5)/D(b7)
+    "Xxx.kx.xXx.x2...",   # 2  answer: D move, hangs an E+b2 cluster (palm-muted)
+    "Xxx.mx.xXx.vXxk.",   # 3  riff A again
+    "Xxx.nx.xXx.xt...",   # 4  answer: G(b3) move, hangs an E+tritone cluster
     "2...t...j...9...",   # 5  lift: palm-muted dissonant CLUSTERS over the E pedal
     "2...t...j...r...",   # 6  lift answer, settles back onto the root ring
-    "Xxx.Xx.xXx.xXxx.",   # 7  riff A returns
-    "XxxXxxXxxXxxXX.r",   # 8  build: 3+3+3+3 gallop into a palm-muted root ring
+    "Xxx.mx.xXx.vXxk.",   # 7  riff A returns
+    "XxxXxfXxvXxkXX.r",   # 8  build: gallop climbing 5/b5/b7 into a root-ring stab
 ]
 
 
