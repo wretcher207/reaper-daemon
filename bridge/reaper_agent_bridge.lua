@@ -4431,6 +4431,140 @@ handlers.get_midi_notes = command_get_midi_notes
 handlers.set_note_velocities = command_set_note_velocities
 handlers.set_note_positions  = command_set_note_positions
 
+-- Index-addressed bulk note edit (velocity and/or position) in one undo block.
+-- Added 2026-08-27 for the humanize pass. The (tick,pitch) write path is the
+-- safe default for hand-built edits because an index drifts if the take is
+-- edited between read and write -- but it CANNOT address two notes stacked on
+-- one tick and pitch (a flam, a double-trigger), so a whole-take pass silently
+-- skips them (this bit the first Monarch humanize: two stacked hits stayed at
+-- 127). Here the caller reads the take and writes it back in one shot with
+-- nothing editing in between, so addressing by take index is both safe and able
+-- to touch every note. A `note_count` staleness guard refuses the write if the
+-- take changed under it.
+--
+-- Confirmation matches velocity and note START exactly. The note END is
+-- advisory: on a one-shot drum sampler the sound is triggered by note-on and
+-- the note-off length is inaudible, and REAPER's overlap correction routinely
+-- trims a shifted note's end by a few ticks. Failing the pass on that (as the
+-- strict position path does) would reject a musically perfect edit, so end
+-- drift is counted and reported, not treated as failure.
+do
+handlers.apply_note_edits = function(command)
+  local payload = command.payload or {}
+  local edits = payload.edits
+  if type(edits) ~= "table" or #edits == 0 then
+    error("BAD_PAYLOAD: edits must be a non-empty array of " ..
+      "{index, velocity?, new_ppq?, new_end_ppq?}")
+  end
+
+  local take, track, track_index = midi_take_for(payload)
+  local before = read_midi_notes(take)
+  if payload.note_count ~= nil and math.floor(tonumber(payload.note_count) or -1) ~= #before then
+    error("TAKE_CHANGED: the take now holds " .. #before .. " notes but this " ..
+      "request was built from " .. math.floor(tonumber(payload.note_count) or -1) ..
+      "; re-read with get_midi_notes and rebuild. Nothing was changed.")
+  end
+  local by_index = {}
+  for _, n in ipairs(before) do by_index[n.index] = n end
+
+  local plan, invalid = {}, {}
+  for row, e in ipairs(edits) do
+    if type(e) ~= "table" then
+      invalid[#invalid + 1] = { row = row, reason = "not an object" }
+    else
+      local idx = math.floor(tonumber(e.index) or -1)
+      local base = by_index[idx]
+      local where = { row = row, index = idx }
+      if not base then
+        where.reason = "index out of range (take holds " .. #before .. " notes)"
+        invalid[#invalid + 1] = where
+      else
+        local vel = (e.velocity ~= nil) and math.floor(tonumber(e.velocity) or -1) or nil
+        local np = (e.new_ppq ~= nil) and math.floor((tonumber(e.new_ppq) or -1) + 0.5) or nil
+        local ne = (e.new_end_ppq ~= nil) and math.floor((tonumber(e.new_end_ppq) or -1) + 0.5) or nil
+        local bad = false
+        if vel == nil and np == nil then
+          bad = true; where.reason = "edit changes nothing (no velocity, no position)"
+        elseif vel ~= nil and (vel < 1 or vel > 127) then
+          bad = true; where.reason = "velocity out of 1-127"; where.velocity = e.velocity
+        elseif (np ~= nil) ~= (ne ~= nil) then
+          bad = true; where.reason = "new_ppq and new_end_ppq must be given together"
+        elseif np ~= nil and (np < 0 or ne <= np) then
+          bad = true; where.reason = "new_ppq >= 0 and new_end_ppq > new_ppq"
+          where.new_ppq = e.new_ppq; where.new_end_ppq = e.new_end_ppq
+        end
+        if bad then
+          invalid[#invalid + 1] = where
+        else
+          plan[#plan + 1] = { index = idx, from_vel = base.velocity, from_ppq = base.ppq,
+                              vel = vel, np = np, ne = ne }
+        end
+      end
+    end
+  end
+
+  if #invalid > 0 and payload.allow_partial ~= true then
+    error("NOTE_EDIT_INVALID: " .. #invalid .. " of " .. #edits ..
+      " edits are invalid; nothing was changed. " .. json.encode(invalid))
+  end
+  if #plan == 0 then
+    error("NOTE_EDIT_INVALID: no edit resolved; nothing was changed")
+  end
+
+  -- Write with noSort so the event indices the plan holds stay valid through
+  -- the whole loop and the pre-sort confirm read. nil fields are preserved by
+  -- MIDI_SetNote, so a velocity-only edit keeps its position and vice versa.
+  for _, h in ipairs(plan) do
+    reaper.MIDI_SetNote(take, h.index, nil, nil, h.np, h.ne, nil, nil, h.vel, true)
+  end
+
+  -- Confirm BEFORE sorting, by index (still valid under noSort).
+  local mid = read_midi_notes(take)
+  local by_idx2 = {}
+  for _, n in ipairs(mid) do by_idx2[n.index] = n end
+  local confirmed, wrong, end_drift = 0, {}, 0
+  for _, h in ipairs(plan) do
+    local n = by_idx2[h.index]
+    local ok = n ~= nil
+    if ok and h.vel ~= nil and n.velocity ~= h.vel then ok = false end
+    if ok and h.np ~= nil and n.ppq ~= h.np then ok = false end
+    if ok then
+      confirmed = confirmed + 1
+      if h.ne ~= nil and n.end_ppq ~= h.ne then end_drift = end_drift + 1 end
+    else
+      wrong[#wrong + 1] = { index = h.index, wanted_vel = h.vel,
+        got_vel = n and n.velocity or nil, wanted_ppq = h.np,
+        got_ppq = n and n.ppq or nil }
+    end
+  end
+
+  reaper.MIDI_Sort(take)
+  reaper.UpdateArrange()
+
+  if #wrong > 0 then
+    error("NOTE_EDIT_UNCONFIRMED: " .. #wrong .. " of " .. #plan ..
+      " edits did not read back at the requested velocity/start. The edit is " ..
+      "inside one undo block; one REAPER undo reverts it. Mismatches: " ..
+      json.encode(wrong))
+  end
+
+  local _, track_name = reaper.GetTrackName(track, "")
+  return {
+    track = { index = track_index, name = track_name },
+    requested = #edits,
+    applied = #plan,
+    confirmed = confirmed,
+    invalid = invalid,
+    end_advisory_drift = end_drift,
+    velocity_before = velocity_summary(before),
+    velocity_after = velocity_summary(read_midi_notes(take)),
+    verified_note = "Every applied edit was re-read by take index; velocity and " ..
+      "note-start matched. Note-off (end) is advisory on one-shot drums; " ..
+      end_drift .. " end(s) were trimmed by REAPER overlap correction.",
+  }
+end
+end
+
 -- Diagnostic read/write surface added 2026-08-18. Defined in a do-block
 -- assigning straight onto `handlers`: the main chunk is at Lua's 200-local
 -- limit, so new top-level `local function`s no longer fit.

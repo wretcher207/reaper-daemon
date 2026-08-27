@@ -1198,6 +1198,84 @@ def cmd_list_maps(args):
     return 0
 
 
+def cmd_humanize(args):
+    """Humanize an existing drum take: dynamics + micro-timing, one command.
+
+    Reads the take, plans the pass with the shared taste model (drumgen.humanize,
+    which reuses the renderer's kick ceiling / snare band / hat curve / cymbal
+    boost), and writes it back through the bridge's index-addressed
+    apply_note_edits -- so stacked hits (flams, double-triggers) are humanized
+    too, not skipped.
+    """
+    br = args.bridge_root
+    _skill_path(br)
+    try:
+        from drumgen.humanize import plan_humanize  # noqa: E402
+        from drumgen.catalog import load_maps       # noqa: E402
+    except Exception as e:
+        print(f"error: could not load humanize model: {e}", file=sys.stderr)
+        return 1
+
+    read_payload = {"target_track_name": args.track, "include_bars": False,
+                    "include_note_names": True, "max_notes": 100000}
+    if args.item_index is not None:
+        read_payload["item_index"] = args.item_index
+    res = send_type("get_midi_notes", read_payload, bridge_root=br,
+                    timeout_ms=20000, resolve=False, repair=False)
+    if not res.get("ok"):
+        print(f"[humanize] read FAILED: {res.get('error')}", file=sys.stderr)
+        return 1
+    data = res.get("data", {})
+    notes = data.get("notes", [])
+    if not notes:
+        print("[humanize] the take has no notes; nothing to do.", file=sys.stderr)
+        return 1
+    if data.get("truncated"):
+        print(f"[humanize] refusing: take has {data.get('note_count')} notes, more "
+              f"than the read cap; raise max_notes.", file=sys.stderr)
+        return 1
+    ppq = data.get("ppq_per_quarter", 960)
+    note_names = data.get("note_names") or {}
+
+    kit_map = None
+    if args.map:
+        maps = load_maps()
+        if args.map not in maps:
+            print(f"[humanize] unknown map {args.map!r}; try: {', '.join(sorted(maps))}",
+                  file=sys.stderr)
+            return 1
+        kit_map = maps[args.map]
+
+    plan = plan_humanize(notes, ppq, kit_map=kit_map, note_names=note_names,
+                         map_name=args.map, amount=args.amount, seed=args.seed)
+    s = plan["summary"]
+    print(f"[humanize] {s['notes']} notes | amount {s['amount']} seed {s['seed']} | "
+          f"{s['velocity_edits']} vel, {s['position_edits']} moved "
+          f"(mean {s['mean_move_ticks']}t, max {s['max_move_ticks']}t)")
+    if s["unclassified"]:
+        print(f"[humanize] {s['unclassified']} note(s) unclassified (neutral band); "
+              f"pass --map for exact role bands.")
+    if args.dry_run:
+        print("[humanize] dry run: no write sent.")
+        print(json.dumps(s, indent=2))
+        return 0
+
+    write_payload = {"target_track_name": args.track, "edits": plan["edits"],
+                     "note_count": len(notes), "allow_partial": False}
+    if args.item_index is not None:
+        write_payload["item_index"] = args.item_index
+    wres = send_type("apply_note_edits", write_payload, bridge_root=br,
+                     timeout_ms=30000, resolve=False, repair=False)
+    if not wres.get("ok"):
+        print(f"[humanize] write FAILED: {wres.get('error')}", file=sys.stderr)
+        return 1
+    wd = wres.get("data", {})
+    print(f"[humanize] applied {wd.get('applied')} / confirmed {wd.get('confirmed')}"
+          f" | end-trim (advisory) {wd.get('end_advisory_drift')}")
+    print("[humanize] done. Ctrl+S in REAPER to save; one Ctrl+Z reverts the pass.")
+    return _exit_for(wres)
+
+
 def _overlay_dir(bridge_root):
     # "maps" is a sibling of catalog/, under skills/drum-apparatus/
     return os.path.join(bridge_root, "skills", "drum-apparatus", "maps")
@@ -1480,6 +1558,22 @@ def build_parser():
     s.add_argument("--json", action="store_true",
                    help="emit the raw profile JSON instead of the table")
     s.set_defaults(func=cmd_profile)
+
+    s = sub.add_parser("humanize",
+                       help="add dynamics + micro-timing to an existing drum take")
+    s.add_argument("--track", required=True, help="drum track name")
+    s.add_argument("--item-index", type=int, default=None,
+                   help="which item on the track (default: the only item)")
+    s.add_argument("--amount", type=int, default=25,
+                   help="0-100: random spread + timing looseness (default 25); "
+                        "the dynamic contour is always applied")
+    s.add_argument("--map", default=None,
+                   help="drum-kit map for exact per-role velocity bands "
+                        "(default: infer roles from the track's MIDI note names)")
+    s.add_argument("--seed", type=int, default=20260827, help="RNG seed (reproducible)")
+    s.add_argument("--dry-run", action="store_true",
+                   help="plan and print the summary without writing")
+    s.set_defaults(func=cmd_humanize)
 
     s = sub.add_parser("list-maps", help="print available drum-kit maps")
     s.set_defaults(func=cmd_list_maps)

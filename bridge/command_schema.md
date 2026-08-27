@@ -753,6 +753,54 @@ check the size of the move against the tempo without re-reading the take.
 
 ---
 
+### apply_note_edits
+
+Bulk velocity and/or position edit addressed by **take note index**, in one undo
+block. This is the write path a whole-take pass (e.g. humanize) uses.
+
+```json
+{ "target_track_name": "Monarch-kit", "note_count": 801,
+  "edits": [ {"index": 0, "velocity": 108},
+             {"index": 1, "velocity": 121, "new_ppq": 6, "new_end_ppq": 126} ],
+  "allow_partial": false }
+```
+
+Each edit carries an `index` (from a `get_midi_notes` read) plus any of
+`velocity`, and `new_ppq` + `new_end_ppq` (which must be given together). A
+velocity-only edit keeps the note's position; a position-only edit keeps its
+velocity.
+
+**Why index, not `(ppq, pitch)`.** The `set_note_velocities` / `set_note_positions`
+path addresses by `(ppq, pitch)` so an edit built from a stale read fails visibly
+instead of hitting the wrong note — the right default for hand-built edits. But
+`(ppq, pitch)` **cannot name one of two notes stacked on the same tick and
+pitch** (a flam, a double-trigger); those come back `ambiguous` and are skipped.
+A whole-take pass reads the take and writes it straight back with nothing editing
+in between, so index addressing is both safe here and able to touch every note.
+The optional `note_count` is a staleness guard: if the take no longer holds that
+many notes, the write is refused (`TAKE_CHANGED`) rather than applied against a
+take that moved.
+
+Default is all-or-nothing across invalid edits (bad index, velocity outside
+1-127, a half-given position, `new_end_ppq <= new_ppq`); `allow_partial: true`
+applies what resolved and reports the rest in `invalid`.
+
+**Confirmation matches velocity and note START exactly; the note END is
+advisory.** On a one-shot drum sampler the sound is triggered by note-on, so the
+note-off length is inaudible, and REAPER's overlap correction routinely trims a
+shifted note's end by a few ticks. Failing the pass on that would reject a
+musically perfect edit (it did, on the first Monarch timing pass), so end drift
+is counted in `end_advisory_drift`, not treated as failure. A real velocity or
+start mismatch still fails `NOTE_EDIT_UNCONFIRMED`. Writes use `noSort` and the
+confirm read happens before the single closing `MIDI_Sort`, so the plan's indices
+stay valid through confirmation. Results carry `applied`, `confirmed`, `invalid`,
+`end_advisory_drift`, and `velocity_before` / `velocity_after` summaries.
+
+The `reaperd humanize` CLI is the intended caller: it reads the take, plans the
+pass with `drumgen.humanize` (the shared taste model), and ships the edits here.
+
+---
+
 ## Bridge lifecycle
 
 ### reload_bridge
