@@ -33,6 +33,17 @@ David's live UI (see `docs/instruments.md`).
   note through this step (real note values, held over the barline, instead of a
   row of equal 16ths), and `~` SLIDES into the next note (fires Argent's Slide
   keyswitch and forces the overlap). Write phrases, not bars.
+  **CHORD cells** — uppercase note names, read as a chord chart in the key of E:
+  `E`=0 `F`=F#(+2) `G`=+3 `A`=+5 `B`=+7 `C`=+8 `D`=+10. Each fires Power Chord
+  Sustain, which Argent voices root+5th+octave from the one note, so a section
+  can actually MOVE harmonically instead of pedaling the open string. **Case
+  matters** — `B`/`b`, `F`/`f`, `G`/`g`, `C`/`c` are different tokens; uppercase
+  is the chord, lowercase is a single note.
+  **Lead scale tones** (single ringing notes, for melodies over those chords):
+  `s`=F#(+2) `3`=G(+3) `a`=A(+5) `5`=B(+7) `6`=C(+8) `7`=D(+10) `h`=E(+12), with
+  `o` as E. Lift a lead into register with `--low-string 52` (E3) rather than
+  inventing octave tokens — the same alphabet then reads as the E-minor scale an
+  octave up.
 - **Performance engine** (`guitargen/perform.py`) — deterministic musical contour
   drives dynamics (downbeats / pushes accent, ghosts sit back), RNG is only
   garnish, and a golden no-repeat rule keeps consecutive chugs off one velocity —
@@ -127,3 +138,31 @@ that on Argent the Mute keyswitch's velocity is the mute DEPTH and **low is the
 scrape-like end** — a low velocity floor puts part of every riff in the scrape
 zone. Raising velocity makes a chug *less* muted, so it is never the fix for
 "give me more palm mute"; length is.
+
+## Arranging a section that is not one riff
+
+`band` renders ONE riff double-tracked across both guitars. A chorus usually is
+not that shape — chords under one part of it, a harmonised twin lead under
+another — so build it as separate `shred`-style inserts instead. Two rules:
+
+- **One articulation per item.** A chord part and a lead part merged into one
+  Kontakt instance fight over the keyswitch: whichever fires last wins for both,
+  because a keyswitch is global to the instrument. Give each its own item.
+  SEQUENTIAL items on one track are fine (bars 9-12 chords, 13-16 lead) — they
+  never sound at once. Stacked/overlapping items on one track are not.
+- **A harmonised twin lead is two tracks, not a dyad.** argent-l takes the
+  melody, argent-r a diatonic third above, same rhythm. Each gets its own
+  performance and its own side of the stereo field. Write the third out
+  explicitly per note (minor or major depending on the scale degree); parallel
+  shifting produces notes outside the key.
+
+**`delete_items_in_range` deletes every item that OVERLAPS the range**, not just
+the ones starting inside it (`pos < end and pos+len > start`). An item that ends
+exactly ON the bar line you are clearing from is one float ULP away from
+counting — clearing from bar 9 ate the previous section's bars 1-8 drum item,
+whose end and bar 9 are the same number. Start the clear a few ms AFTER the bar
+line: the section before ends at that line and stays safe, and anything starting
+on the line still overlaps and is still replaced.
+
+Position inserts with the bridge's `{"type": "bar", "bar": N}` rather than a
+float in seconds — it lands on REAPER's own bar line with no drift.

@@ -80,6 +80,27 @@ GUITAR_MAPS = {
         "modwheel_mute": False,           # Argent mutes via keyswitch + velocity
         "power_chords": True,             # root hits can voice power chords
         "legato": True,                   # overlapping notes slur (HO/PO), not re-pick
+        "bass_map": "nolly_e",
+    },
+    # DROP C# — Argent's ACTUAL open low string (MIDI 25), the lowest note the
+    # instrument plays. Use this when a part wants to sit on the low string rather
+    # than fretted up at E.
+    #
+    # Why this map exists / the drop-tuning ceiling: modern 7-string drop tunings
+    # below C# cannot be voiced here at concert pitch. Drop G# on a 7-string puts
+    # the low string at MIDI 20 — five semitones BELOW Argent's floor, and inside
+    # the keyswitch zone (0-24), so those notes fire articulations instead of
+    # sounding. Anything lower than C# has to be transposed up or retuned in
+    # Argent's own engine tuning page; guitargen will not silently eat the notes.
+    "argent_csharp": {
+        "library": "Shreddage 3.5 Argent (9-string, low C#)",
+        "ks_notes": KS_NOTES,
+        "low_string": 25,                 # the physical open low C# — the floor
+        "modwheel_mute": False,
+        "power_chords": True,
+        "legato": True,
+        # the Nolly floors at E0 (28), so a C# root only exists an octave up
+        "bass_map": "nolly_csharp",
     },
 }
 
@@ -92,6 +113,15 @@ BASS_MAPS = {
     "nolly_e": {
         "library": "GGD Nolly Bass (Dingwall NG2 6-string)",
         "low_string": 28,                 # E0, the library's lowest note
+        "modwheel_mute": False,
+        "power_chords": False,
+    },
+    # Drop C# partner. C#0 (25) is below the Nolly's E0 floor, so the bass takes
+    # the root an OCTAVE UP at C#1 (37) — which is where a bass player would put
+    # it anyway rather than chase a note the instrument cannot make.
+    "nolly_csharp": {
+        "library": "GGD Nolly Bass (Dingwall NG2 6-string)",
+        "low_string": 37,                 # C#1 — guitar's C# root, up an octave
         "modwheel_mute": False,
         "power_chords": False,
     },

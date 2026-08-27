@@ -57,6 +57,9 @@ ART_VEL = {
     # the mute depth (low = very muted, high = half-muted), so pushing velocity to
     # the top keeps the palm mute but lets it sing — a dissonant cluster that hangs.
     "mute_ring": (120, 112, 127),
+    # a big open power chord: struck harder than a single ringing note, because
+    # it is three strings and the whole point is that it opens up.
+    "chord":    (112, 100, 127),
 }
 
 # Which keyswitch SLOT the instrument should be in for a given hit. Argent mutes
@@ -67,6 +70,12 @@ ART_VEL = {
 # (non-root) always stay single so a lead line reads as a line, not chords.
 def ks_slot_for(art, is_root, power_chords):
     ring = art in ("sustain", "let_ring")
+    # A CHORD token asks for a power chord at whatever degree it names — Argent
+    # voices root+5th+octave off any single note, so the old "only the open root
+    # can be a chord" rule was our limit, not the instrument's. That rule is what
+    # kept a part from moving harmonically at all.
+    if art == "chord":
+        return "pwr_sustain" if power_chords else "sustain"
     if power_chords and is_root:
         if art == "accent":
             return "pwr_mute"
@@ -90,7 +99,7 @@ ART_MUTE = {
 # A ghost stays a dead click.
 ART_LEN = {
     "mute": 0.95, "accent": 0.95, "sustain": 1.0, "let_ring": 1.0, "ghost": 0.4,
-    "mute_ring": 1.0,
+    "mute_ring": 1.0, "chord": 1.0,
 }
 
 NO_REPEAT_GAP = 4        # successive same-pitch chugs differ by at least this

@@ -27,6 +27,8 @@ root chug stays single-note; melodic (non-root) notes and every mute_ring stay
 single. See perform.py.
 """
 
+from .maps import get_map
+
 # token -> (interval semitones above low string, articulation[, dyad]).
 # `dyad` (optional 3rd field) adds a SECOND note that many semitones above the
 # first, struck together — a real cluster you hear clash, not a single note.
@@ -49,6 +51,22 @@ _TOKENS = {
     # melodic notes already exist: 5=5th b=tritone 7=b7 h=octave (all let_ring),
     # o=root (power chord, rings).
     "M": (1, "let_ring"),
+    # CHORDS — uppercase note names, read as a chord chart in the key of E. Each
+    # one fires Power Chord Sustain, which Argent auto-voices root+5th+octave
+    # from the single note, so a chorus can actually MOVE harmonically instead of
+    # pedaling the open string. `o` stays the E chord for every riff written
+    # before these existed.
+    # CASE MATTERS: `B`/`b`, `F`/`f`, `G`/`g`, `A`/`a`, `C`/`c`, `D`/`d` are all
+    # different tokens. Uppercase = the chord, lowercase = a single note.
+    "E": (0, "chord"),   "F": (2, "chord"),   "G": (3, "chord"),
+    "A": (5, "chord"),   "B": (7, "chord"),   "C": (8, "chord"),
+    "D": (10, "chord"),
+    # the let-ring scale tones a LEAD line needs, filling the gaps left by the
+    # power-chord-safe set (o=E 5=B 7=D h=E8ve). 3 and 6 are the degree numbers;
+    # digits 2 and 4 were already spoken for, so the 2nd and the 4th take the
+    # letters s (sharp-2, F#) and a (the note A).
+    "s": (2, "let_ring"), "3": (3, "let_ring"),
+    "a": (5, "let_ring"), "6": (8, "let_ring"),
     # dissonant palm-muted RING CLUSTERS: root + the clashing interval, together
     "r": (0, "mute_ring"),          # root ring, single note
     "2": (0, "mute_ring", 1),       # E + b2  (minor-2nd crunch)
@@ -56,7 +74,7 @@ _TOKENS = {
     "9": (0, "mute_ring", 13),      # E + b9  (minor-2nd, octave up)
     "j": (0, "mute_ring", 11),      # E + maj7
 }
-_RING_ARTS = {"let_ring", "sustain", "mute_ring"}
+_RING_ARTS = {"let_ring", "sustain", "mute_ring", "chord"}
 # A ghost is a dead click, not a note — it never carries.
 _SHORT_ARTS = {"ghost"}
 # How far a palm-muted chug carries when there is room. Two 16ths = an 8th of
@@ -159,16 +177,26 @@ def bass_from_guitar(spec):
     guitar. A little behind-the-beat bias gives it finger-style feel.
     """
     art_map = {"accent": "accent", "let_ring": "sustain", "ghost": "ghost",
-               "mute": "mute", "sustain": "sustain", "mute_ring": "sustain"}
+               "mute": "mute", "sustain": "sustain", "mute_ring": "sustain",
+               "chord": "sustain"}
     hits = []
     for h in spec["hits"]:
-        hits.append({"step": h["step"], "interval": 0,
+        # A CHORD token names a harmony, so the bass takes that chord's root and
+        # the line follows the progression. Everything else is melody over the
+        # key's root, and the bass holds the low end under it (interval 0) rather
+        # than doubling the tune. Riffs with no chord tokens behave exactly as
+        # before: every hit collapses to the root.
+        interval = h["interval"] if h.get("art") == "chord" else 0
+        hits.append({"step": h["step"], "interval": interval,
                      "art": art_map.get(h["art"], "mute"),
                      "len_steps": h.get("len_steps", 1),
                      "hold": h.get("hold", False)})
+    # the bass map is whatever the guitar map pairs with, so a retune moves both
+    gm = get_map(spec["map"])
     return {"ppq": spec["ppq"], "steps_per_bar": spec["steps_per_bar"],
-            "bars": spec["bars"], "map": "nolly_e", "hits": hits,
-            "timing_bias": 0.05, "timing_sigma": 0.05}
+            "bars": spec["bars"], "map": gm.get("bass_map", "nolly_e"),
+            "hits": hits, "timing_bias": 0.05, "timing_sigma": 0.05,
+            "phrase_bars": spec.get("phrase_bars", 4)}
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +224,36 @@ DEMO_BARS = [
 
 def demo_guitar_spec():
     return make_spec(DEMO_BARS, "argent_e", timing_sigma=0.06)
+
+
+# ---------------------------------------------------------------------------
+# "dropcs" — an ORIGINAL 8-bar riff written in the modern prog-metal idiom, on
+# Argent's real open low string (C#, MIDI 25). Not a transcription of anything;
+# it is a vocabulary exercise for the connection cells:
+#
+#   * a syncopated open-string pedal with REAL GAPS — the space between chugs is
+#     the groove, and a wall of 16ths is what makes a part sound like a machine
+#   * `_` ties so the chugs have note VALUES (a chug that rings out is a note)
+#   * an upper melodic line that `~` slides and slurs, sitting on top of the
+#     pedal instead of alternating stab-for-stab with it
+#   * each 4-bar phrase resolves onto a ringing C#5 rather than a stab
+#
+# Intervals over C#: 3=E 5=F# 7=G# 10=B 12=C#(oct).
+# ---------------------------------------------------------------------------
+DROP_CSHARP_BARS = [
+    "x.x.xx.x.x_.~5__",   # 1  pedal with gaps, slides up into a ringing F#
+    "x.x.x.xx.n~f_.x_",   # 2  answer: E walks up to G#, chug tail
+    "x.xx.x.x.x.x~7__",   # 3  tighter pedal, slides into a ringing G#
+    "5___~7___h___~o_",   # 4  the line takes over: F#-G#-C# octave, home to C#5
+    "X.x.xx.x.x_.~7__",   # 5  phrase 2, harder: accented pedal into a ringing G#
+    "X.x.x.xx.k~h_.x_",   # 6  B slurs up to the octave
+    "X.xx.x.x.n_v~f__",   # 7  varied, NOT a copy of bar 3 — E, tritone, F#
+    "o_______~7___o__",   # 8  resolve: C#5 rings a half, G#, back to C#5
+]
+
+
+def drop_csharp_spec():
+    return make_spec(DROP_CSHARP_BARS, "argent_csharp", timing_sigma=0.06)
 
 
 def range_probe_spec(candidates=(25, 28, 33, 40)):

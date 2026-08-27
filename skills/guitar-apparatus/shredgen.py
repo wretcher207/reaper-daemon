@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from guitargen import perform, write_smf                       # noqa: E402
 from guitargen.riffs import (demo_guitar_spec, range_probe_spec,  # noqa: E402
-                             make_spec, bass_from_guitar)
+                             drop_csharp_spec, make_spec, bass_from_guitar)
 
 
 def _guitar_spec(args):
@@ -34,15 +34,18 @@ def _guitar_spec(args):
         return make_spec(bars, args.map, tempo=args.tempo)
     if args.riff == "demo":
         return demo_guitar_spec()
+    if args.riff == "dropcs":
+        return drop_csharp_spec()
     if args.riff == "probe":
         return range_probe_spec()
-    raise ValueError(f"unknown riff {args.riff!r} (use demo, probe, or --bars-file)")
+    raise ValueError(
+        f"unknown riff {args.riff!r} (use demo, dropcs, probe, or --bars-file)")
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="guitargen virtual-guitar/bass engine.")
     ap.add_argument("--riff", default="demo",
-                    help="built-in riff: demo | probe (ignored if --bars-file)")
+                    help="built-in riff: demo | dropcs | probe (ignored if --bars-file)")
     ap.add_argument("--bars-file", help="text file, one 16-char bar per line")
     ap.add_argument("--part", choices=["guitar", "bass"], default="guitar")
     ap.add_argument("--map", default="argent_e", help="guitar tuning map")

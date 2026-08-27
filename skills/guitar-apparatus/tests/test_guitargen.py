@@ -267,3 +267,37 @@ def test_demo_riff_actually_connects_across_barlines():
     slurs = sum(1 for a, b in zip(played, played[1:])
                 if a["tick"] + a["dur"] - b["tick"] >= 20)
     assert slurs >= 15, f"demo riff only slurs {slurs} times — it will sound stabby"
+
+
+def test_chord_tokens_voice_a_power_chord_at_any_degree():
+    """A chorus has to MOVE harmonically. Argent voices root+5th+octave off any
+    single note, so restricting power chords to the open root was our limit, not
+    the instrument's — a C token must fire Power Chord Sustain on C, not on E."""
+    spec = riffs.make_spec(["C_______G_______"], "argent_e", timing_sigma=0.0)
+    events, _ = perform(spec, "argent_e", seed=5)
+    played = sorted(_played(events), key=lambda e: e["tick"])
+    assert [e["pitch"] for e in played] == [28 + 8, 28 + 3]      # C2, G1
+    ks = [e for e in events if e["type"] == "note" and e["pitch"] < 25]
+    assert {e["pitch"] for e in ks} == {SHREDDAGE3_KS["pwr_sustain"]}
+    # a chord holds until the next chord, one tick short of re-picking it
+    assert played[0]["tick"] + played[0]["dur"] == played[1]["tick"] - 1
+
+
+def test_bass_follows_the_chords_but_still_pedals_under_a_riff():
+    """David's ask: "the bass supports the chord movement underneath." A chord
+    token names a harmony, so the bass takes ITS root; melody over the key's root
+    still collapses to the root, so every riff written before this is unchanged.
+    """
+    chords = riffs.make_spec(["C_______G_______"], "argent_e")
+    assert [h["interval"] for h in riffs.bass_from_guitar(chords)["hits"]] == [8, 3]
+    riff = riffs.make_spec(["x.xxn.xxf.xx7___"], "argent_e")
+    assert set(h["interval"] for h in riffs.bass_from_guitar(riff)["hits"]) == {0}
+
+
+def test_lead_register_is_reachable_with_a_low_string_override():
+    """A lead line is written with the same scale tokens and lifted into register
+    by --low-string, so one alphabet serves both the chord bed and the melody."""
+    spec = riffs.make_spec(["s___a___6_______"], "argent_e", timing_sigma=0.0)
+    ev, _ = perform({**spec, "low_string_override": 52}, "argent_e", seed=1)
+    assert [e["pitch"] for e in sorted(_played(ev), key=lambda e: e["tick"])] == [
+        54, 57, 60]                                   # F#3, A3, C4
