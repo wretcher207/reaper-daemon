@@ -20,6 +20,8 @@ double-triggers), so nothing gets skipped.
 """
 import random
 
+from . import goldenrule
+
 try:  # reuse the renderer's taste constants when the package is importable
     from .groovekit import (KICK_VEL_MAX, KICK_VEL_MIN, KICK_RUN_BAND,
                             VOICE_PROFILE, HAT_CURVE, CYMBAL_SHELL_BOOST)
@@ -92,7 +94,7 @@ NAME_KEYWORDS = [
     ("pedal", "hat_pedal"), ("closed", "hat_closed"),
     ("open", "hat_open"), ("hat", "hat_closed"),
     ("china", "china"), ("splash", "splash"), ("crash", "crash"),
-    ("ride", "ride"), ("bell", "bell"), ("stack", "stack"),
+    ("bell", "bell"), ("ride", "ride"), ("stack", "stack"),
 ]
 
 
@@ -381,22 +383,18 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
                 new_vel[n["index"]] = v
             prev = v
 
-    # ---- final no-repeat guarantee. The golden rule holds grooves to a >=3 gap
-    # but leaves fill notes to the crescendo pass; that can leave a single exact
-    # same-drum repeat where two fills meet on one drum across a run boundary. A
-    # 1-unit nudge toward the band interior kills it -- inaudible, and it cannot
-    # invert a crescendo. This is the hard floor under "never the same velocity
-    # twice in a row on one drum."
+    # ---- final no-repeat guarantee, through the SHARED implementation in
+    # drumgen.goldenrule -- the one place the rule lives, so a hand-rolled pass
+    # can import the same backstop instead of reimplementing (and missing) it.
+    # The >=3 pass above leaves fill notes to the crescendo; this hard floor
+    # catches the single exact repeat that can survive where two fills meet on
+    # one drum. A 1-unit nudge is inaudible and cannot invert a crescendo.
+    pitch_bands = {}
     for pitch, lst in by_pitch.items():
-        f = family_of(lst[0])
-        _, lo, hi = band.get(f, band["other"])
-        prev = None
-        for n in lst:                       # already ppq-sorted by the golden pass
-            v = new_vel[n["index"]]
-            if prev is not None and v == prev:
-                v = _clamp(v + 1 if v < hi else v - 1, lo, hi)
-                new_vel[n["index"]] = v
-            prev = v
+        _, lo, hi = band.get(family_of(lst[0]), band["other"])
+        pitch_bands[pitch] = (lo, hi)
+    new_vel = goldenrule.enforce(ordered, new_vel, pitch_bands,
+                                 min_gap=goldenrule.HARD_FLOOR_GAP)
 
     # ---- timing pass: one offset per tick (unison lock), preserve duration ---
     trng = random.Random(seed + 1)

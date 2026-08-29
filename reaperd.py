@@ -1338,11 +1338,14 @@ def cmd_humanize(args):
     try:
         from drumgen.humanize import plan_humanize  # noqa: E402
         from drumgen.catalog import load_maps       # noqa: E402
+        from drumgen import learn as drumlearn      # noqa: E402
+        from drumgen import goldenrule              # noqa: E402
     except Exception as e:
         print(f"error: could not load humanize model: {e}", file=sys.stderr)
         return 1
 
-    read_payload = {"target_track_name": args.track, "include_bars": False,
+    read_payload = {"target_track_name": args.track,
+                    "include_bars": bool(args.follow_lead),
                     "include_note_names": True, "max_notes": 100000}
     if args.item_index is not None:
         read_payload["item_index"] = args.item_index
@@ -1372,16 +1375,57 @@ def cmd_humanize(args):
             return 1
         kit_map = maps[args.map]
 
-    plan = plan_humanize(notes, ppq, kit_map=kit_map, note_names=note_names,
-                         map_name=args.map, amount=args.amount, seed=args.seed)
-    s = plan["summary"]
-    print(f"[humanize] {s['notes']} notes | amount {s['amount']} seed {s['seed']} | "
-          f"{s['velocity_edits']} vel, {s['position_edits']} moved "
-          f"(mean {s['mean_move_ticks']}t, max {s['max_move_ticks']}t) | "
-          f"{s['fills']} fills shaped ({s['fill_notes']} notes)")
-    if s["unclassified"]:
-        print(f"[humanize] {s['unclassified']} note(s) unclassified (neutral band); "
-              f"pass --map for exact role bands.")
+    if args.follow_lead:
+        # Follow David's lead: the hand he already put on this take is the spec,
+        # not the shared taste model. Learn it from the humanized head of the
+        # take, then carry it across the flat remainder.
+        bar_ticks = ppq * 4
+        if args.example_through_bar is not None:
+            boundary = args.example_through_bar * bar_ticks   # bars are 1-based
+            done_bars = args.example_through_bar
+        else:
+            boundary, done_bars = drumlearn.find_example_boundary(notes, bar_ticks)
+        if boundary is None:
+            print("[humanize] the whole take already varies -- nothing flat left "
+                  "to follow into. Drop --follow-lead to re-humanize it.",
+                  file=sys.stderr)
+            return 1
+        if not done_bars:
+            print("[humanize] no humanized example found: bar 1 is already flat. "
+                  "Humanize a section by hand first, or drop --follow-lead.",
+                  file=sys.stderr)
+            return 1
+        profile = drumlearn.learn_profile(notes, ppq, kit_map=kit_map,
+                                          note_names=note_names,
+                                          through_ppq=boundary,
+                                          bar_ticks=bar_ticks)
+        plan = drumlearn.plan_follow(notes, ppq, profile, from_ppq=boundary,
+                                     kit_map=kit_map, note_names=note_names,
+                                     seed=args.seed)
+        s = plan["summary"]
+        print(f"[humanize] following your lead from bars 1-{done_bars} "
+              f"({s['example_notes']} notes, {s['learned_slots']} learned slots, "
+              f"level {s['shift_from_default']:+d} vs the shared model)")
+        print(f"[humanize] carried across {s['followed_notes']} notes -> "
+              f"{s['velocity_edits']} velocity edits, {s['fills_shaped']} fills shaped")
+        print(f"[humanize] golden rule: {s['golden_rule_violations']} violation(s) "
+              f"in the plan"
+              + (f" ({s['golden_rule_remaining_in_example']} inside your own bars, "
+                 f"left alone)" if s['golden_rule_remaining_in_example'] else ""))
+        if s["guessed"]:
+            print(f"[humanize] NOT in your example, extrapolated -- give these a "
+                  f"listen: {', '.join(s['guessed'])}")
+    else:
+        plan = plan_humanize(notes, ppq, kit_map=kit_map, note_names=note_names,
+                             map_name=args.map, amount=args.amount, seed=args.seed)
+        s = plan["summary"]
+        print(f"[humanize] {s['notes']} notes | amount {s['amount']} seed {s['seed']} | "
+              f"{s['velocity_edits']} vel, {s['position_edits']} moved "
+              f"(mean {s['mean_move_ticks']}t, max {s['max_move_ticks']}t) | "
+              f"{s['fills']} fills shaped ({s['fill_notes']} notes)")
+        if s["unclassified"]:
+            print(f"[humanize] {s['unclassified']} note(s) unclassified (neutral band); "
+                  f"pass --map for exact role bands.")
     if args.dry_run:
         print("[humanize] dry run: no write sent.")
         print(json.dumps(s, indent=2))
@@ -1743,6 +1787,13 @@ def build_parser():
                    help="drum-kit map for exact per-role velocity bands "
                         "(default: infer roles from the track's MIDI note names)")
     s.add_argument("--seed", type=int, default=20260827, help="RNG seed (reproducible)")
+    s.add_argument("--follow-lead", action="store_true",
+                   help="learn the velocity hand from the part you already "
+                        "humanized by hand and carry it across the rest, instead "
+                        "of applying the shared taste model")
+    s.add_argument("--example-through-bar", type=int, default=None,
+                   help="with --follow-lead: the last bar you humanized "
+                        "(default: auto-detect the first flat bar)")
     s.add_argument("--dry-run", action="store_true",
                    help="plan and print the summary without writing")
     s.set_defaults(func=cmd_humanize)

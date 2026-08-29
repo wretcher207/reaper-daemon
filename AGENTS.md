@@ -11,6 +11,10 @@ the zero-dependency `reaperd.py` CLI.
 - `bridge/command_schema.md`: authoritative command payloads and result shapes. Open
   the relevant command section instead of loading the entire catalog by default.
 - `skills/drum-apparatus/`: drum DSL and kit-map behavior when that workflow is used.
+- Writing drum velocities — by any path, including a one-off script — means
+  `skills/drum-apparatus/drumgen/goldenrule.py`. No drum ever hits the same velocity
+  twice in a row, per drum in time order, whatever lands in between. `enforce()` to
+  apply it, `violations()` to prove it before the write.
 
 Prefer the MCP server when its tools are available. Use `reaperd.py` when MCP is not
 connected or when testing the CLI itself. Do not write ad hoc bridge JSON unless the

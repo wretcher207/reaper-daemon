@@ -126,8 +126,20 @@ David humanizes as he places each note (nudging velocity 2–3 notches per hit),
 in a final pass. So the engine bakes these in at render time — the output is
 already humanized, nothing to fix after. These are physics, not taste:
 
-1. **No two consecutive hits in a lane are EVER the same velocity** — differ by at
-   least 1. Identical velocities = the machine-gun tell. *(in code: groovekit velocity model)*
+1. **THE GOLDEN RULE — no drum ever hits the same velocity twice in a row.**
+   Per drum, in time order, across the whole take. **Other drums landing in
+   between are irrelevant**: kick 104, then a crash, a snare and another crash,
+   then kick 104 again is a violation. Identical velocities are the machine-gun
+   tell, and one audible pair gives the whole part away. This is the rule the
+   system is built on — a hard invariant, not a flourish, and it holds at every
+   amount setting.
+   *(in code: `drumgen/goldenrule.py` — the ONE implementation. `groovekit` bakes
+   it in at placement time; `humanize` and `learn` both end in `goldenrule.enforce`.)*
+   **Any velocity pass — including a one-off script written for a single take —
+   ends with `goldenrule.enforce` and is checked with `goldenrule.violations`
+   before the write.** Skipping it is how 66 violations shipped on the stigmergy
+   Monarch pass (2026-08-28): the bespoke model matched David's bands exactly and
+   still machine-gunned, because it never went through the humanizer.
 2. **A cymbal that lands together with a shell (kick/snare/tom) is louder** — a
    human pushes harder on the cymbal because he's also hitting a shell.
    *(in code: groovekit CYMBAL_SHELL_BOOST)*
@@ -156,6 +168,41 @@ already humanized, nothing to fix after. These are physics, not taste:
    that too ("I meant like a fill, man"). A naked kick run in a spotlight
    moment is the bug either way. *(judgment — apply at authoring time)*
 
+## Follow my lead (the usual way a long song gets humanized)
+
+David humanizes as he programs — he nudges each hit by ear as he places it. On a
+long song he does that for the first section by hand and then wants **the same
+hand carried through the rest**. That is the standard flow, not a special case.
+
+```
+python3 reaperd.py humanize --track Monarch --follow-lead --dry-run
+python3 reaperd.py humanize --track Monarch --follow-lead
+```
+
+It auto-detects where his hand stops (the first bar whose velocities are all one
+value — the dead 127 wall) and learns from everything before it. Override with
+`--example-through-bar N` when the take needs it.
+
+**The take he touched wins over the shared model.** `--follow-lead` measures what
+he actually did on THIS song and applies that; plain `humanize` applies the shared
+taste model. When they disagree, his hand is right — never "correct" his section
+toward the defaults.
+
+What it measures, per voice, per metric slot (downbeat / beat / off-eighth /
+in-between 16th / off-grid): the observed velocity band, plus the shape of his
+fills and which voices he actually ramps. The in-between 16th matters most — it is
+where his kick ducks ~5 for the weak hit, and it is the single biggest difference
+between "humanized" and "randomized".
+
+Three things to hold onto:
+- **It only does what he did.** If he only moved velocities, it only moves
+  velocities. Positions stay put unless the example region shows off-grid hits.
+- **His bars are never edited**, only read — but they seed the golden rule, so the
+  join at the boundary can't repeat either.
+- **Voices he had not reached yet are extrapolated and reported** in `guessed`.
+  Those are inference, not his taste. Say so, and ask him to listen to them
+  specifically.
+
 ## Velocity targets & per-kit voices (David's mix preferences)
 - **Kicks stay under ~114.** Punchy, not maxed. *(in code: groovekit KICK_VEL_MAX,
   per-render override `kick_vel_max`)*
@@ -183,6 +230,23 @@ as the reference for how his layers actually behave:
   that walls are not the default; cymbals carry pace/nuance/accents (see the
   cymbal rule above). Reach for a wall briefly, at a peak, not section-wide.
 - **Tom fills roll across the kit with velocity ramping up** (observed 92→106).
+
+### Measured again on stigmergy / Monarch (2026-08-28, bars 1—6 by hand)
+A second, independent read of his hand — 146 BPM, 508 notes, velocity only (every
+note stayed exactly on the grid, so **he did not touch timing on this one**):
+
+| Voice | Band | The shape inside it |
+| --- | --- | --- |
+| Kick | 99—106 | 103—106 on the 8th grid, **99—101 on the in-between 16th** |
+| Snare rimshot | 93—95 | flat and well under everything; backbeat a hair over |
+| Toms | 100—108 | each fill ramps upward across its hits |
+| Crashes / china | 112—121 | beat 3 hottest (~118), downbeat ~117, mid-bar ~115; china +1 |
+
+Jitter inside a band is only —1—2. The bands are narrow and the CONTOUR does the
+work — that is the opposite of "add randomness", and it is why a wide random
+spread never sounds like him. Consistent with the earlier skill-build read
+(cymbals on top, snare and toms underneath, kick well under its ceiling).
+
 
 ## Generate & insert
 1. **Compose** the section(s) as a spec or DSL once kicks/snare/cymbals/fills are
