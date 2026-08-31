@@ -11,6 +11,8 @@ the zero-dependency `reaperd.py` CLI.
 - `bridge/command_schema.md`: authoritative command payloads and result shapes. Open
   the relevant command section instead of loading the entire catalog by default.
 - `skills/drum-apparatus/`: drum DSL and kit-map behavior when that workflow is used.
+- `skills/guitar-apparatus/`: riff notation, tuning/keyswitch maps, and the performance
+  engine behind `shred` and `band`. Read it before writing or editing a riff file.
 - Writing drum velocities — by any path, including a one-off script — means
   `skills/drum-apparatus/drumgen/goldenrule.py`. No drum ever hits the same velocity
   twice in a row, per drum in time order, whatever lands in between. `enforce()` to
@@ -19,6 +21,10 @@ the zero-dependency `reaperd.py` CLI.
 Prefer the MCP server when its tools are available. Use `reaperd.py` when MCP is not
 connected or when testing the CLI itself. Do not write ad hoc bridge JSON unless the
 task is specifically testing the file protocol.
+
+`shred`, `band`, and `humanize` are CLI-only; the MCP server exposes no tool for them.
+Reach for `reaperd.py` for any part-writing or humanizing work regardless of what is
+connected.
 
 ## Action boundary
 

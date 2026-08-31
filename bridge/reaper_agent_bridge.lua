@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.14.0
+-- @version 3.15.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -13,6 +13,31 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.15.0: Playing release. The bridge script is unchanged; the version moves
+--   in lockstep with the repo. In the cloned repo (ReaPack installs only this
+--   bridge): guitar riffs connect instead of stabbing. New connection cells tie
+--   a note through the next step (_) and slide into it (~), palm-muted chugs
+--   carry up to two steps under the palm instead of being cut short, and a
+--   ringing note is held past the next attack so Shreddage slurs rather than
+--   re-picks. Uppercase chord tokens (E F G A B C D) fire Power Chord Sustain
+--   so a section moves harmonically, lead scale tones fill the single-note
+--   gaps, and the bass follows the chord instead of pedaling the root. Kicks
+--   are floored, and double-bass runs sit in the 105-112 band with the left
+--   foot weaker than the right. The no-repeat golden rule is now hardline in a
+--   shared drumgen/goldenrule.py that every write path calls, and
+--   `reaperd.py humanize --follow-lead` learns the velocity hand from the bars
+--   you humanized yourself and carries it across the rest of the take. Docs:
+--   README now covers shred, band, and humanize.
+--   3.14.0: Shreddage release. The bridge script is unchanged. Everything new
+--   lives in the cloned repo: a guitar and bass MIDI apparatus with tuning and
+--   keyswitch maps for Shreddage 3.5 Argent (9-string) and the GGD Nolly bass,
+--   a compact riff notation, and a performance engine that shares the drum
+--   humanizer's taste model. Articulation is set by keyswitch, and double
+--   tracking is two real performances from different seeds rather than a
+--   stereo copy. New CLI: `reaperd.py band` lays down or re-cuts a whole
+--   four-track jam in one command; `shred` and `groove` gained `--replace`.
+--   Also fixed: this REAPER build imports MIDI by reference, so the CLI keeps
+--   its rendered .mid files instead of deleting them.
 --   3.13.1: Maintenance. The undocumented enum_installed_fx command is removed
 --   (never in the schema, untested, uncalled, and duplicated by the CLI's
 --   installed-plugin resolver). Repo-side: the unreachable site/ product page

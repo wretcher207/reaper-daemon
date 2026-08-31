@@ -32,6 +32,12 @@ and can **auto-discover** a drum kit's note map from the library's own
 - **Markers, regions, media items.**
 - **MIDI** — insert MIDI files; a creative drum DSL engine with humanization
   (velocity model, fatigue, timing jitter).
+- **Guitar and bass** — `shred` renders a humanized riff (keyswitched palm
+  mutes, power chords, legato, ties and slides, chord tokens, lead scale
+  tones) onto a track; `band` cuts two guitars, bass and drums in one command.
+- **Humanize** — `humanize` puts a dynamic contour and micro-timing into a
+  drum take that already exists, and `--follow-lead` learns the hand from the
+  bars you humanized yourself.
 - **Discovery** — `scan_fx` dumps every FX and parameter; `discover_drum_map`
   reads a drum track's note names and builds a kit map for any library.
 
@@ -134,6 +140,9 @@ python3 reaperd.py verify <track> [--seconds N] [--json] -- <type> '<payload-jso
 python3 reaperd.py profile <project.rpp> <track> [--start-bar N] [--bars N] [--max-seconds S]
 python3 reaperd.py groove <beat.dsl> --track Drums [--position SEC] [--map NAME]
 python3 reaperd.py jam                          # DSL drum beat from stdin -> selected track
+python3 reaperd.py humanize --track Drums [--amount 0-100] [--follow-lead] [--dry-run]
+python3 reaperd.py shred --track argent-l [--part guitar|bass] [--bars-file riff.txt] [--seed N]
+python3 reaperd.py band                         # 2 guitars + bass + drums, one command
 python3 reaperd.py list-maps                    # available drum-kit maps
 python3 reaperd.py discover-map <track> [--save <name>]
 python3 reaperd.py add-map <name> --file <map.json>   # or --roles '{...}' / stdin
@@ -330,6 +339,81 @@ MCP clients get the same three steps without a shell: `profile_track`,
 file on disk, so save the project before calling them. On an unsaved
 project they describe stale material, which their payloads state outright.
 
+## Guitar and bass — `shred` and `band`
+
+`skills/guitar-apparatus/` is the guitar-side counterpart to the drum engine.
+It renders humanized guitar and bass MIDI and inserts it through the same
+bridge write path the drum groove uses (`insert_midi_file`).
+
+```bash
+# the whole four-track jam (2 guitars + bass + drums), replacing what was there
+python3 reaperd.py band
+
+# other tracks, a custom riff, a custom drum DSL, an explicit tempo
+python3 reaperd.py band --guitar-l argent-l --guitar-r argent-r \
+  --bass nolly-bass-library --drums rs-drums-monarch \
+  --bars-file riff.txt --dsl beat.dsl --tempo 146
+
+# one part at a time; --replace clears the track from --position first
+python3 reaperd.py shred --track argent-l --bars-file riff.txt --seed 101 --replace
+python3 reaperd.py shred --track nolly-bass-library --part bass --seed 303
+```
+
+A riff is a text file, **one bar per line, 16 steps** (spaces inside a bar are
+visual only):
+
+- `.` rest, `x` muted chug, `X` accented root, `o` let-ring root, `g` ghost.
+- Connection cells: `_` ties the previous note through this step, `~` slides
+  into the next one. These are what stop a riff sounding stabby. Chugs also
+  carry under the palm for up to two steps instead of being cut short.
+- Chord cells are **uppercase** note names read in the key of E (`E F G A B C
+  D`), each firing Power Chord Sustain so the section moves harmonically.
+- Lead scale tones are lowercase/digits (`s 3 a 5 6 7 h`) for single ringing
+  notes over those chords. Case matters: `B` is a chord, `b` is a tritone.
+- Palm-muted melody notes (`m n v f k`) walk between the low-E anchors so a
+  riff reads as notes instead of a monotone rake, and the dissonant
+  palm-muted ring clusters (`r 2 t 9 j`) strike the root with a clashing
+  interval so the clash actually bites.
+
+The full token table, with the reasoning behind each one, is in
+`skills/guitar-apparatus/SKILL.md`.
+
+Dynamics come from the drum humanizer's taste model: a deterministic musical
+contour drives velocity across a four-bar phrase, RNG is only garnish, and the
+no-repeat golden rule keeps consecutive chugs off one velocity. Double tracking
+is two *performances*, not a copy — same riff, different `--seed` on the left
+and right guitar.
+
+Tuning and keyswitch maps live in `skills/guitar-apparatus/guitargen/maps.py`
+and are confirmed against the instruments' own manuals: `argent_e` and
+`argent_csharp` (Shreddage 3.5 Argent, 9-string) and `nolly_e` /
+`nolly_csharp` (GGD Nolly bass). Another library is a new entry in that file.
+Ships in the cloned repo, not via ReaPack, and has no MCP tool — this is a CLI
+workflow.
+
+## Humanize an existing drum take
+
+`humanize` takes a flat drum item that is already on a track and gives it a
+dynamic contour and micro-timing, in place.
+
+```bash
+python3 reaperd.py humanize --track drums --dry-run       # plan, print, write nothing
+python3 reaperd.py humanize --track drums --amount 25     # 0-100 looseness (default 25)
+python3 reaperd.py humanize --track drums --follow-lead   # copy the hand from your own bars
+```
+
+The dynamic contour is always applied; `--amount` only scales the random
+spread and timing looseness on top of it. Fills build as a crescendo that
+peaks at the resolve rather than piling up on the ceiling. The golden rule is
+hardline (`skills/drum-apparatus/drumgen/goldenrule.py`): no drum hits the
+same velocity twice in a row, per drum in time order, whatever lands between.
+
+`--follow-lead` reads the velocity hand out of the bars you humanized by hand
+and carries it across the rest of the take instead of applying the shared
+taste model. It auto-detects the first flat bar; `--example-through-bar N`
+sets the boundary explicitly. `--seed` is fixed by default, so a run is
+reproducible.
+
 ## Agent protocol
 
 `reaperd.py` and the MCP server both speak this; write it yourself only if you
@@ -407,6 +491,7 @@ reaper_mcp.py                    MCP stdio server over the same bridge
 setup/install.py                 wire auto-start into REAPER (cross-platform)
 commands/examples/               one JSON example per command
 skills/drum-apparatus/           DSL drum engine + kit-map auto-discovery
+skills/guitar-apparatus/         guitar/bass riff notation + performance engine
 inbox/ outbox/ processing/ ...   runtime folders
 ```
 

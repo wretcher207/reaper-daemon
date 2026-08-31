@@ -22,7 +22,9 @@ David's live UI (see `docs/instruments.md`).
 ## What it does
 
 - **Tuning + articulation maps** (`guitargen/maps.py`) — data-driven, like kit
-  maps: `argent_e`, `nolly_e`.
+  maps: `argent_e` / `argent_csharp` (guitar), `nolly_e` / `nolly_csharp` (bass).
+  The `_csharp` pair roots the riff on Argent's actual open low string (MIDI 25);
+  the Nolly floors at E0, so its C# partner takes the root an octave up at 37.
 - **Riff notation** (`guitargen/riffs.py`) — one 16-char bar per line:
   `.`=rest `x`=muted chug `X`=accented (power chord) `o`=let-ring root (power
   chord) `g`=ghost `4`=fourth `5`=fifth `b`=tritone `7`=min7 `h`=octave (let-ring).
