@@ -1029,13 +1029,22 @@ def _persist_midi(br, prefix, slug):
     return os.path.join(render_dir, f"{prefix}-{safe}-{secrets.token_hex(3)}.mid")
 
 
-def _render_insert(br, gen_argv, midi, *, track, position, tempo, replace, tag):
+def _render_insert(br, gen_argv, midi, *, track, position, tempo, replace, tag,
+                   sender=None):
     """Run a generator subprocess that writes `midi`, then insert it onto the
     track through the bridge. The one write path `shred`, `groove`, and `band`
     all share. `track` None targets the selected track. `replace` clears the
     track's region from `position` first, so a re-cut doesn't stack takes.
     Returns (rc, message). On any failure the orphaned render is discarded.
+
+    `sender(cmd_type, payload, timeout_ms) -> reply dict` is the seam the MCP
+    server uses to reach the same path with its own envelope (it needs a
+    dry_run knob `send_type` does not have). Default is the CLI's own sender.
     """
+    if sender is None:
+        def sender(cmd_type, payload, timeout_ms):
+            return send_type(cmd_type, payload, bridge_root=br,
+                             timeout_ms=timeout_ms, resolve=False, repair=False)
     try:
         r = subprocess.run(gen_argv, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
@@ -1046,26 +1055,140 @@ def _render_insert(br, gen_argv, midi, *, track, position, tempo, replace, tag):
         return 1, (r.stderr or r.stdout or "").rstrip()
     lines = [r.stdout.rstrip()] if r.stdout else []
 
-    sel = {"target_track_name": track} if track else {"use_selected_track": True}
-    pos = ({"type": "time", "seconds": float(position)}
-           if position is not None else {"type": "cursor"})
-    if replace and position is not None:
-        send_type("delete_items_in_range",
-                  {**sel, "range": {"type": "time", "seconds": float(position)},
-                   "length_seconds": 600},
-                  bridge_root=br, timeout_ms=10000, resolve=False, repair=False)
+    # `track` is a name, None (the selected track), or a full bridge selector
+    # dict — the MCP server passes the last so GUID and substring targeting
+    # reach this path too. `position` is seconds, None (the edit cursor), or a
+    # position object ({"type":"bar",...}); anything but seconds means `replace`
+    # has no time to clear from and is skipped rather than guessing one.
+    if isinstance(track, dict):
+        sel = {k: v for k, v in track.items() if v is not None}
+        if not sel:
+            sel = {"use_selected_track": True}
+    else:
+        sel = {"target_track_name": track} if track else {"use_selected_track": True}
+    seconds = position if isinstance(position, (int, float)) and not isinstance(
+        position, bool) else None
+    if isinstance(position, dict):
+        pos = position
+    else:
+        pos = ({"type": "time", "seconds": float(seconds)}
+               if seconds is not None else {"type": "cursor"})
+    if replace and seconds is not None:
+        sender("delete_items_in_range",
+               {**sel, "range": {"type": "time", "seconds": float(seconds)},
+                "length_seconds": 600}, 10000)
     payload = {**sel, "midi_path": midi, "position": pos}
     if tempo is not None:
         payload["project_tempo"] = tempo
-    res = send_type("insert_midi_file", payload, bridge_root=br,
-                    timeout_ms=20000, resolve=False, repair=False)
+    res = sender("insert_midi_file", payload, 20000)
     if not res.get("ok"):
         _discard(midi)
         return 1, f"[{tag}] FAILED: {res.get('error')}"
-    tname = res.get("data", {}).get("track", {}).get("name", track or "selected")
-    at = position if position is not None else "cursor"
-    lines.append(f"[{tag}] OK: {tname} @ {at}s")
+    fallback = track if isinstance(track, str) and track else "selected"
+    tname = res.get("data", {}).get("track", {}).get("name", fallback)
+    at = f"{seconds}s" if seconds is not None else (
+        pos.get("type", "cursor") if isinstance(pos, dict) else "cursor")
+    lines.append(f"[{tag}] OK: {tname} @ {at}")
     return 0, "\n".join(x for x in lines if x)
+
+
+def render_groove(br, *, dsl_path=None, dsl_text=None, track=None, kit_map=None,
+                  seed=None, position=None, tempo=None, replace=False,
+                  sender=None, tag="groove"):
+    """Render a drum DSL and insert it. Returns (rc, message).
+
+    Shared by `cmd_groove`, `band`'s drum leg, and the MCP `insert_groove`
+    tool, so the rendered .mid is persisted by ONE rule. It used to be two:
+    the MCP tool kept its own temp-file copy of this and went on deleting the
+    render after the insert, which leaves an empty take on a REAPER build that
+    imports MIDI by reference.
+    """
+    groovegen = os.path.join(br, "skills", "drum-apparatus", "groovegen.py")
+    if not os.path.isfile(groovegen):
+        return 1, f"[{tag}] ERROR: drum engine not found at {groovegen}"
+    if (dsl_path is None) == (dsl_text is None):
+        return 1, (f"[{tag}] ERROR: needs exactly one DSL source, "
+                   "a file path or inline text")
+    if dsl_path is not None and not os.path.isfile(dsl_path):
+        return 1, f"[{tag}] ERROR: DSL file not found: {dsl_path}"
+
+    name = track if isinstance(track, str) and track else "selected"
+    slug = name + "-" + (os.path.basename(dsl_path) if dsl_path else "inline")
+    midi = _persist_midi(br, "groove", slug)
+    gen = [sys.executable, groovegen, "--out", midi]
+    if dsl_path is not None:
+        gen += ["--dsl", dsl_path]
+    else:
+        # --spec=<text>, not two argv entries: a DSL line starting with '-'
+        # would otherwise be parsed as an option by the engine's argparse.
+        gen.append("--spec=" + dsl_text)
+    if kit_map:
+        gen += ["--map", kit_map]
+    if seed is not None:
+        gen += ["--seed", str(seed)]
+    return _render_insert(br, gen, midi, track=track, position=position,
+                          tempo=tempo, replace=replace, tag=tag, sender=sender)
+
+
+def render_shred(br, *, part, track, seed, map_name, tempo=None, riff=None,
+                 bars_file=None, low_string=None, position=None, replace=False,
+                 sender=None, tag=None):
+    """Render one humanized guitar/bass part and insert it. Returns (rc, message).
+    Shared by `cmd_shred`, `band`'s three string legs, and the MCP tool."""
+    tag = tag or f"shred/{part}"
+    shredgen, midi, gen = _shred_gen_argv(
+        br, part=part, track=track, seed=seed, map_name=map_name, tempo=tempo,
+        riff=riff, bars_file=bars_file, low_string=low_string)
+    if not os.path.isfile(shredgen):
+        return 1, f"[{tag}] ERROR: guitar engine not found at {shredgen}"
+    if bars_file and not os.path.isfile(bars_file):
+        return 1, f"[{tag}] ERROR: riff file not found: {bars_file}"
+    return _render_insert(br, gen, midi, track=track, position=position,
+                          tempo=tempo, replace=replace, tag=tag, sender=sender)
+
+
+def render_band(br, *, guitar_l, guitar_r, bass, drums, riff=None, bars_file=None,
+                dsl=None, map_name="argent_e", drum_map="RS Monarch",
+                seeds=(101, 202, 303), low_string=None, position=0.0, tempo=None,
+                replace=True, sender=None):
+    """Lay down (or re-cut) the whole four-track jam.
+
+    Returns (rc_total, [(rc, message), ...]) — one entry per leg, in cut order,
+    so a caller can route each message by its OWN result instead of sniffing
+    the text. Every leg is attempted even when an earlier one fails: a half-cut
+    jam that reports which tracks landed is fixable, a silent one is not.
+    """
+    shredgen = os.path.join(br, "skills", "guitar-apparatus", "shredgen.py")
+    groovegen = os.path.join(br, "skills", "drum-apparatus", "groovegen.py")
+    for engine in (shredgen, groovegen):
+        if not os.path.isfile(engine):
+            return 1, [(1, f"[band] ERROR: engine not found at {engine}")]
+    dsl = dsl or os.path.join(br, "skills", "guitar-apparatus", "examples",
+                              "jam-e.dsl")
+    if not os.path.isfile(dsl):
+        return 1, [(1, f"[band] ERROR: drum DSL not found: {dsl}")]
+
+    seeds = list(seeds) or [101, 202, 303]
+    while len(seeds) < 3:
+        seeds.append(seeds[-1] + 101)
+
+    rc_total, results = 0, []
+    for part, track, seed in (("guitar", guitar_l, seeds[0]),
+                              ("guitar", guitar_r, seeds[1]),
+                              ("bass", bass, seeds[2])):
+        rc, msg = render_shred(br, part=part, track=track, seed=seed,
+                               map_name=map_name, tempo=tempo, riff=riff,
+                               bars_file=bars_file, low_string=low_string,
+                               position=position, replace=replace, sender=sender,
+                               tag=f"band/{track}")
+        results.append((rc, msg))
+        rc_total |= rc
+    rc, msg = render_groove(br, dsl_path=dsl, track=drums, kit_map=drum_map,
+                            position=position, tempo=tempo, replace=replace,
+                            sender=sender, tag=f"band/{drums}")
+    results.append((rc, msg))
+    rc_total |= rc
+    return rc_total, results
 
 
 def cmd_groove(args):
@@ -1079,24 +1202,12 @@ def cmd_groove(args):
         print(f"[groove] ERROR: DSL file not found: {args.dsl}", file=sys.stderr)
         return 1
     cfg = load_drum_config(br) or {}
-    track = args.track or cfg.get("track")
-    cfg_map = args.map or cfg.get("map")
-    groovegen = os.path.join(br, "skills", "drum-apparatus", "groovegen.py")
-    if not os.path.isfile(groovegen):
-        print(f"[groove] ERROR: drum engine not found at {groovegen}", file=sys.stderr)
-        return 1
-
-    midi = _persist_midi(br, "groove",
-                         (track or "selected") + "-" + os.path.basename(args.dsl))
-    gen = [sys.executable, groovegen, "--dsl", args.dsl, "--out", midi]
-    if cfg_map:
-        gen += ["--map", cfg_map]
-    if args.seed is not None:
-        gen += ["--seed", str(args.seed)]
     print(f"[groove] Rendering DSL: {args.dsl}")
-    rc, msg = _render_insert(br, gen, midi, track=track, position=args.position,
-                             tempo=args.tempo,
-                             replace=getattr(args, "replace", False), tag="groove")
+    rc, msg = render_groove(br, dsl_path=args.dsl,
+                            track=args.track or cfg.get("track"),
+                            kit_map=args.map or cfg.get("map"), seed=args.seed,
+                            position=args.position, tempo=args.tempo,
+                            replace=getattr(args, "replace", False))
     print(msg, file=(sys.stderr if rc else sys.stdout))
     return rc
 
@@ -1149,18 +1260,12 @@ def cmd_shred(args):
     if not status_ok(br, quiet=True):
         print("[shred] REAPER is DOWN — relaunch it, nothing inserted.", file=sys.stderr)
         return 1
-    shredgen, midi, gen = _shred_gen_argv(
-        br, part=args.part, track=args.track, seed=args.seed, map_name=args.map,
-        tempo=args.tempo, riff=args.riff, bars_file=args.bars_file,
-        low_string=args.low_string)
-    if not os.path.isfile(shredgen):
-        print(f"[shred] ERROR: guitar engine not found at {shredgen}", file=sys.stderr)
-        return 1
     print(f"[shred] Rendering {args.part}: {args.bars_file or args.riff}")
-    rc, msg = _render_insert(br, gen, midi, track=args.track, position=args.position,
-                             tempo=args.tempo,
-                             replace=getattr(args, "replace", False),
-                             tag=f"shred/{args.part}")
+    rc, msg = render_shred(br, part=args.part, track=args.track, seed=args.seed,
+                           map_name=args.map, tempo=args.tempo, riff=args.riff,
+                           bars_file=args.bars_file, low_string=args.low_string,
+                           position=args.position,
+                           replace=getattr(args, "replace", False))
     print(msg, file=(sys.stderr if rc else sys.stdout))
     return rc
 
@@ -1174,45 +1279,17 @@ def cmd_band(args):
     if not status_ok(br, quiet=True):
         print("[band] REAPER is DOWN — relaunch it, nothing inserted.", file=sys.stderr)
         return 1
-    shredgen = os.path.join(br, "skills", "guitar-apparatus", "shredgen.py")
-    groovegen = os.path.join(br, "skills", "drum-apparatus", "groovegen.py")
-    for tool in (shredgen, groovegen):
-        if not os.path.isfile(tool):
-            print(f"[band] ERROR: engine not found at {tool}", file=sys.stderr)
-            return 1
-    dsl = args.dsl or os.path.join(br, "skills", "guitar-apparatus", "examples",
-                                   "jam-e.dsl")
-    if not os.path.isfile(dsl):
-        print(f"[band] ERROR: drum DSL not found: {dsl}", file=sys.stderr)
-        return 1
     seeds = [int(s) for s in args.seeds.split(",")] if args.seeds else [101, 202, 303]
-    while len(seeds) < 3:
-        seeds.append(seeds[-1] + 101)
-    pos, tempo, replace = args.position, args.tempo, not args.no_replace
-
-    # (part, track, seed) for the three guitar/bass renders, then drums.
-    jobs = [
-        ("guitar", args.guitar_l, seeds[0]),
-        ("guitar", args.guitar_r, seeds[1]),
-        ("bass", args.bass, seeds[2]),
-    ]
-    rc_total = 0
-    for part, track, seed in jobs:
-        _sg, midi, gen = _shred_gen_argv(
-            br, part=part, track=track, seed=seed, map_name=args.map, tempo=tempo,
-            riff=args.riff, bars_file=args.bars_file, low_string=args.low_string)
-        rc, msg = _render_insert(br, gen, midi, track=track, position=pos,
-                                 tempo=tempo, replace=replace, tag=f"band/{track}")
+    rc_total, results = render_band(
+        br, guitar_l=args.guitar_l, guitar_r=args.guitar_r, bass=args.bass,
+        drums=args.drums, riff=args.riff, bars_file=args.bars_file, dsl=args.dsl,
+        map_name=args.map, drum_map=args.drum_map, seeds=seeds,
+        low_string=args.low_string, position=args.position, tempo=args.tempo,
+        replace=not args.no_replace)
+    for rc, msg in results:
+        # A leg that failed says so on stderr; the ones that landed stay on
+        # stdout, so a half-cut jam is still readable in a pipe.
         print(msg, file=(sys.stderr if rc else sys.stdout))
-        rc_total |= rc
-    # drums
-    midi = _persist_midi(br, "groove", args.drums + "-" + os.path.basename(dsl))
-    gen = [sys.executable, groovegen, "--dsl", dsl, "--out", midi,
-           "--map", args.drum_map]
-    rc, msg = _render_insert(br, gen, midi, track=args.drums, position=pos,
-                             tempo=tempo, replace=replace, tag=f"band/{args.drums}")
-    print(msg, file=(sys.stderr if rc else sys.stdout))
-    rc_total |= rc
     print("[band] done." if not rc_total else "[band] finished with errors.")
     return rc_total
 
@@ -1324,7 +1401,9 @@ def cmd_list_maps(args):
     return 0
 
 
-def cmd_humanize(args):
+def humanize_take(br, *, track, item_index=None, amount=25, map_name=None,
+                  seed=20260827, follow_lead=False, example_through_bar=None,
+                  dry_run=False, sender=None):
     """Humanize an existing drum take: dynamics + micro-timing, one command.
 
     Reads the take, plans the pass with the shared taste model (drumgen.humanize,
@@ -1332,8 +1411,15 @@ def cmd_humanize(args):
     boost), and writes it back through the bridge's index-addressed
     apply_note_edits -- so stacked hits (flams, double-triggers) are humanized
     too, not skipped.
+
+    Returns (rc, [lines], summary_or_None). `lines` is the human report the CLI
+    prints; `summary` is the plan's own summary dict, which is what the MCP tool
+    hands back. One implementation so the two callers cannot drift.
     """
-    br = args.bridge_root
+    if sender is None:
+        def sender(cmd_type, payload, timeout_ms):
+            return send_type(cmd_type, payload, bridge_root=br,
+                             timeout_ms=timeout_ms, resolve=False, repair=False)
     _skill_path(br)
     try:
         from drumgen.humanize import plan_humanize  # noqa: E402
@@ -1341,110 +1427,121 @@ def cmd_humanize(args):
         from drumgen import learn as drumlearn      # noqa: E402
         from drumgen import goldenrule              # noqa: E402
     except Exception as e:
-        print(f"error: could not load humanize model: {e}", file=sys.stderr)
-        return 1
+        return 1, [f"error: could not load humanize model: {e}"], None
 
-    read_payload = {"target_track_name": args.track,
-                    "include_bars": bool(args.follow_lead),
+    lines = []
+    read_payload = {"target_track_name": track,
+                    "include_bars": bool(follow_lead),
                     "include_note_names": True, "max_notes": 100000}
-    if args.item_index is not None:
-        read_payload["item_index"] = args.item_index
-    res = send_type("get_midi_notes", read_payload, bridge_root=br,
-                    timeout_ms=20000, resolve=False, repair=False)
+    if item_index is not None:
+        read_payload["item_index"] = item_index
+    res = sender("get_midi_notes", read_payload, 20000)
     if not res.get("ok"):
-        print(f"[humanize] read FAILED: {res.get('error')}", file=sys.stderr)
-        return 1
+        return 1, [f"[humanize] read FAILED: {res.get('error')}"], None
     data = res.get("data", {})
     notes = data.get("notes", [])
     if not notes:
-        print("[humanize] the take has no notes; nothing to do.", file=sys.stderr)
-        return 1
+        return 1, ["[humanize] the take has no notes; nothing to do."], None
     if data.get("truncated"):
-        print(f"[humanize] refusing: take has {data.get('note_count')} notes, more "
-              f"than the read cap; raise max_notes.", file=sys.stderr)
-        return 1
+        return 1, [f"[humanize] refusing: take has {data.get('note_count')} notes, "
+                   "more than the read cap; raise max_notes."], None
     ppq = data.get("ppq_per_quarter", 960)
     note_names = data.get("note_names") or {}
 
     kit_map = None
-    if args.map:
+    if map_name:
         maps = load_maps()
-        if args.map not in maps:
-            print(f"[humanize] unknown map {args.map!r}; try: {', '.join(sorted(maps))}",
-                  file=sys.stderr)
-            return 1
-        kit_map = maps[args.map]
+        if map_name not in maps:
+            return 1, [f"[humanize] unknown map {map_name!r}; "
+                       f"try: {', '.join(sorted(maps))}"], None
+        kit_map = maps[map_name]
 
-    if args.follow_lead:
+    if follow_lead:
         # Follow David's lead: the hand he already put on this take is the spec,
         # not the shared taste model. Learn it from the humanized head of the
         # take, then carry it across the flat remainder.
         bar_ticks = ppq * 4
-        if args.example_through_bar is not None:
-            boundary = args.example_through_bar * bar_ticks   # bars are 1-based
-            done_bars = args.example_through_bar
+        if example_through_bar is not None:
+            boundary = example_through_bar * bar_ticks   # bars are 1-based
+            done_bars = example_through_bar
         else:
             boundary, done_bars = drumlearn.find_example_boundary(notes, bar_ticks)
         if boundary is None:
-            print("[humanize] the whole take already varies -- nothing flat left "
-                  "to follow into. Drop --follow-lead to re-humanize it.",
-                  file=sys.stderr)
-            return 1
+            return 1, ["[humanize] the whole take already varies -- nothing flat "
+                       "left to follow into. Drop follow_lead to re-humanize it."], None
         if not done_bars:
-            print("[humanize] no humanized example found: bar 1 is already flat. "
-                  "Humanize a section by hand first, or drop --follow-lead.",
-                  file=sys.stderr)
-            return 1
+            return 1, ["[humanize] no humanized example found: bar 1 is already "
+                       "flat. Humanize a section by hand first, or drop "
+                       "follow_lead."], None
         profile = drumlearn.learn_profile(notes, ppq, kit_map=kit_map,
                                           note_names=note_names,
                                           through_ppq=boundary,
                                           bar_ticks=bar_ticks)
         plan = drumlearn.plan_follow(notes, ppq, profile, from_ppq=boundary,
                                      kit_map=kit_map, note_names=note_names,
-                                     seed=args.seed)
+                                     seed=seed)
         s = plan["summary"]
-        print(f"[humanize] following your lead from bars 1-{done_bars} "
-              f"({s['example_notes']} notes, {s['learned_slots']} learned slots, "
-              f"level {s['shift_from_default']:+d} vs the shared model)")
-        print(f"[humanize] carried across {s['followed_notes']} notes -> "
-              f"{s['velocity_edits']} velocity edits, {s['fills_shaped']} fills shaped")
-        print(f"[humanize] golden rule: {s['golden_rule_violations']} violation(s) "
-              f"in the plan"
-              + (f" ({s['golden_rule_remaining_in_example']} inside your own bars, "
-                 f"left alone)" if s['golden_rule_remaining_in_example'] else ""))
+        lines.append(f"[humanize] following your lead from bars 1-{done_bars} "
+                     f"({s['example_notes']} notes, {s['learned_slots']} learned "
+                     f"slots, level {s['shift_from_default']:+d} vs the shared model)")
+        lines.append(f"[humanize] carried across {s['followed_notes']} notes -> "
+                     f"{s['velocity_edits']} velocity edits, {s['fills_shaped']} "
+                     "fills shaped")
+        lines.append(f"[humanize] golden rule: {s['golden_rule_violations']} "
+                     "violation(s) in the plan"
+                     + (f" ({s['golden_rule_remaining_in_example']} inside your own "
+                        "bars, left alone)"
+                        if s['golden_rule_remaining_in_example'] else ""))
         if s["guessed"]:
-            print(f"[humanize] NOT in your example, extrapolated -- give these a "
-                  f"listen: {', '.join(s['guessed'])}")
+            lines.append(f"[humanize] NOT in your example, extrapolated -- give "
+                         f"these a listen: {', '.join(s['guessed'])}")
     else:
         plan = plan_humanize(notes, ppq, kit_map=kit_map, note_names=note_names,
-                             map_name=args.map, amount=args.amount, seed=args.seed)
+                             map_name=map_name, amount=amount, seed=seed)
         s = plan["summary"]
-        print(f"[humanize] {s['notes']} notes | amount {s['amount']} seed {s['seed']} | "
-              f"{s['velocity_edits']} vel, {s['position_edits']} moved "
-              f"(mean {s['mean_move_ticks']}t, max {s['max_move_ticks']}t) | "
-              f"{s['fills']} fills shaped ({s['fill_notes']} notes)")
+        lines.append(
+            f"[humanize] {s['notes']} notes | amount {s['amount']} seed {s['seed']} | "
+            f"{s['velocity_edits']} vel, {s['position_edits']} moved "
+            f"(mean {s['mean_move_ticks']}t, max {s['max_move_ticks']}t) | "
+            f"{s['fills']} fills shaped ({s['fill_notes']} notes)")
         if s["unclassified"]:
-            print(f"[humanize] {s['unclassified']} note(s) unclassified (neutral band); "
-                  f"pass --map for exact role bands.")
-    if args.dry_run:
-        print("[humanize] dry run: no write sent.")
-        print(json.dumps(s, indent=2))
-        return 0
+            lines.append(f"[humanize] {s['unclassified']} note(s) unclassified "
+                         "(neutral band); pass a map for exact role bands.")
+    if dry_run:
+        lines.append("[humanize] dry run: no write sent.")
+        return 0, lines, s
 
-    write_payload = {"target_track_name": args.track, "edits": plan["edits"],
+    write_payload = {"target_track_name": track, "edits": plan["edits"],
                      "note_count": len(notes), "allow_partial": False}
-    if args.item_index is not None:
-        write_payload["item_index"] = args.item_index
-    wres = send_type("apply_note_edits", write_payload, bridge_root=br,
-                     timeout_ms=30000, resolve=False, repair=False)
+    if item_index is not None:
+        write_payload["item_index"] = item_index
+    wres = sender("apply_note_edits", write_payload, 30000)
     if not wres.get("ok"):
-        print(f"[humanize] write FAILED: {wres.get('error')}", file=sys.stderr)
-        return 1
+        return 1, lines + [f"[humanize] write FAILED: {wres.get('error')}"], s
     wd = wres.get("data", {})
-    print(f"[humanize] applied {wd.get('applied')} / confirmed {wd.get('confirmed')}"
-          f" | end-trim (advisory) {wd.get('end_advisory_drift')}")
-    print("[humanize] done. Ctrl+S in REAPER to save; one Ctrl+Z reverts the pass.")
-    return _exit_for(wres)
+    lines.append(f"[humanize] applied {wd.get('applied')} / confirmed "
+                 f"{wd.get('confirmed')} | end-trim (advisory) "
+                 f"{wd.get('end_advisory_drift')}")
+    lines.append("[humanize] done. Ctrl+S in REAPER to save; one Ctrl+Z reverts "
+                 "the pass.")
+    return _exit_for(wres), lines, s
+
+
+def cmd_humanize(args):
+    rc, lines, summary = humanize_take(
+        args.bridge_root, track=args.track, item_index=args.item_index,
+        amount=args.amount, map_name=args.map, seed=args.seed,
+        follow_lead=args.follow_lead,
+        example_through_bar=args.example_through_bar, dry_run=args.dry_run)
+    # Progress goes to stdout, the failing line to stderr: the CLI's contract
+    # is unchanged, only where the strings are built moved.
+    for line in lines[:-1]:
+        print(line)
+    if lines:
+        print(lines[-1], file=(sys.stderr if rc else sys.stdout))
+    if args.dry_run and summary is not None:
+        print(json.dumps(summary, indent=2))
+    return rc
 
 
 def _overlay_dir(bridge_root):

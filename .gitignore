@@ -54,3 +54,9 @@ skills/drum-apparatus/maps/*
 
 # Persistent MIDI renders referenced by REAPER items (by-reference import)
 rendered-midi/
+
+# Nested worktree of the product-page repo (its own git history)
+hawksbill/
+
+# Brand assets pending a move to C:/brand or the DPD repo — not this repo's to ship
+brand/

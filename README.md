@@ -245,7 +245,7 @@ Claude Desktop (`claude_desktop_config.json`):
 Then just ask: *"add a ReaEQ to the bass and carve 2 dB at 300 Hz"*, *"what
 plugins are on the master?"*, *"program a d-beat groove at bar 33"*.
 
-25 tools: project/FX discovery (`get_context`, `scan_fx`,
+29 tools: project/FX discovery (`get_context`, `scan_fx`,
 `get_fx_parameters`, `get_track_routing`), transport, tracks, FX chains,
 `set_fx_param` (formatted values like `"-16.00 dB"` work), independent
 automation-envelope readback (`get_fx_param_automation`) and writes,
@@ -254,7 +254,10 @@ post-FX stem capture, the drum-workflow trio (`profile_track` and
 `riff_grid`, which analyze a guitar stem out of the SAVED `.rpp` on disk
 rather than REAPER's live project, a caveat every payload carries, plus
 `insert_groove`, which renders a drum DSL to MIDI and inserts it in one
-call), the closed-loop pair — `verify_change` (run one
+call), the part-writing trio (`insert_riff` for one humanized guitar or
+bass part, `cut_band` for the whole four-track jam with per-leg results,
+`humanize_take` for dynamics and micro-timing on a take already on a
+track, `--follow-lead` included), the closed-loop pair — `verify_change` (run one
 mutation with measured pre/post proof, see
 [Closed-loop verify](#closed-loop-verify--mix-moves-with-measured-proof))
 and `tune_param` (iteratively search a parameter until a measured target
@@ -388,8 +391,10 @@ Tuning and keyswitch maps live in `skills/guitar-apparatus/guitargen/maps.py`
 and are confirmed against the instruments' own manuals: `argent_e` and
 `argent_csharp` (Shreddage 3.5 Argent, 9-string) and `nolly_e` /
 `nolly_csharp` (GGD Nolly bass). Another library is a new entry in that file.
-Ships in the cloned repo, not via ReaPack, and has no MCP tool — this is a CLI
-workflow.
+Ships in the cloned repo, not via ReaPack. The MCP server exposes the same
+write path as `insert_riff` (one part), `cut_band` (the four-track jam), and
+`humanize_take` (see below), so an agent without shell access can cut parts
+too.
 
 ## Humanize an existing drum take
 

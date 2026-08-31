@@ -22,9 +22,9 @@ Prefer the MCP server when its tools are available. Use `reaperd.py` when MCP is
 connected or when testing the CLI itself. Do not write ad hoc bridge JSON unless the
 task is specifically testing the file protocol.
 
-`shred`, `band`, and `humanize` are CLI-only; the MCP server exposes no tool for them.
-Reach for `reaperd.py` for any part-writing or humanizing work regardless of what is
-connected.
+The part-writing path is on both surfaces: `shred`/`band`/`humanize` on the CLI map
+to the `insert_riff`/`cut_band`/`humanize_take` MCP tools (`insert_groove` covers
+`groove`). One shared write path underneath, so behavior does not differ by surface.
 
 ## Action boundary
 

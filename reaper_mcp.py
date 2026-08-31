@@ -599,6 +599,171 @@ def tool_riff_grid(args):
     return _saved_project_result("riff", project, track, proc)
 
 
+def _render_sender(dry_run=False):
+    """The `sender` seam reaperd's render/humanize path takes, wired to this
+    server's own envelope so `dry_run` still works. Signature is fixed by
+    reaperd._render_insert: (cmd_type, payload, timeout_ms) -> reply dict."""
+    def send(cmd_type, payload, timeout_ms):
+        return _send(cmd_type, payload, timeout_ms=timeout_ms, dry_run=dry_run)
+    return send
+
+
+def _write_path_result(rc, message, extra=None):
+    """One result shape for the four write tools. `message` is reaperd's own
+    per-leg line, which already names the track and the position it landed at."""
+    body = {"ok": rc == 0, "report": message}
+    if extra:
+        body.update(extra)
+    return _text(json.dumps(body, indent=1), is_error=(rc != 0))
+
+
+def _reaper_down_result(tool):
+    return _error_result(
+        "REAPER_DOWN",
+        f"no fresh bridge heartbeat — REAPER is not running or the bridge never "
+        f"loaded. {tool} generated nothing and inserted nothing.")
+
+
+def _position_seconds(args, default=None):
+    """Seconds only. The riff and band tools cut at a time, and `replace` needs
+    a real start to clear from, so a position object is not accepted there."""
+    position = args.get("position")
+    if isinstance(position, bool) or not isinstance(position, (int, float)):
+        return default
+    return float(position)
+
+
+def _insert_position(args):
+    """insert_groove's looser rule, kept from before the shared write path: a
+    plain number of seconds OR a full position object ({"type":"bar",...}).
+    None = the edit cursor."""
+    position = args.get("position")
+    if isinstance(position, dict):
+        return position
+    return _position_seconds(args)
+
+
+def tool_insert_riff(args):
+    """One humanized guitar or bass part onto a named track."""
+    track = args.get("track")
+    if not track or not isinstance(track, str):
+        return _text("insert_riff needs a 'track' name", is_error=True)
+    part = args.get("part") or "guitar"
+    if part not in ("guitar", "bass"):
+        return _text("insert_riff: 'part' must be 'guitar' or 'bass'",
+                     is_error=True)
+    bars_text = args.get("bars_text")
+    bars_file = args.get("bars_file")
+    if bars_text is not None and bars_file is not None:
+        return _text("insert_riff needs ONE riff source: bars_text or "
+                     "bars_file, not both", is_error=True)
+    if bars_text is not None and (not isinstance(bars_text, str)
+                                  or not bars_text.strip()):
+        return _text("insert_riff: bars_text is empty", is_error=True)
+    if bars_file is not None:
+        if not isinstance(bars_file, str) or not bars_file.strip():
+            return _text("insert_riff: bars_file is empty", is_error=True)
+        bars_file = os.path.abspath(os.path.expanduser(bars_file))
+        if not os.path.isfile(bars_file):
+            return _error_result("RIFF_NOT_FOUND", f"no riff file at {bars_file}")
+    # Heartbeat gate first: a dead REAPER fails in ~0 s instead of after the
+    # render plus the 20 s insert wait.
+    if not reaperd.status_ok(bridge_root=BRIDGE_ROOT, quiet=True):
+        return _reaper_down_result("insert_riff")
+
+    tmp_bars = None
+    if bars_text is not None:
+        # The engine reads a riff from a FILE. This temp copy only has to
+        # outlive the generator, unlike the rendered .mid, which REAPER holds
+        # by reference and reaperd therefore persists.
+        tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w",
+                                          encoding="utf-8")
+        tmp.write(bars_text if bars_text.endswith("\n") else bars_text + "\n")
+        tmp.close()
+        tmp_bars = bars_file = tmp.name
+    try:
+        rc, msg = reaperd.render_shred(
+            BRIDGE_ROOT, part=part, track=track,
+            seed=args.get("seed", 0x5152), map_name=args.get("map", "argent_e"),
+            tempo=args.get("tempo"), riff=args.get("riff", "demo"),
+            bars_file=bars_file, low_string=args.get("low_string"),
+            position=_position_seconds(args), replace=bool(args.get("replace")),
+            sender=_render_sender(bool(args.get("dry_run"))))
+    finally:
+        if tmp_bars:
+            try:
+                os.unlink(tmp_bars)
+            except OSError:
+                pass
+    return _write_path_result(rc, msg, {"part": part, "track": track})
+
+
+def tool_cut_band(args):
+    """Two guitars, bass and drums in one call."""
+    if not reaperd.status_ok(bridge_root=BRIDGE_ROOT, quiet=True):
+        return _reaper_down_result("cut_band")
+    seeds = args.get("seeds") or [101, 202, 303]
+    if not isinstance(seeds, list) or not all(
+            isinstance(s, int) and not isinstance(s, bool) for s in seeds):
+        return _text("cut_band: 'seeds' must be a list of integers", is_error=True)
+    bars_file = args.get("bars_file")
+    if bars_file is not None:
+        bars_file = os.path.abspath(os.path.expanduser(bars_file))
+        if not os.path.isfile(bars_file):
+            return _error_result("RIFF_NOT_FOUND", f"no riff file at {bars_file}")
+    dsl = args.get("dsl_path")
+    if dsl is not None:
+        dsl = os.path.abspath(os.path.expanduser(dsl))
+        if not os.path.isfile(dsl):
+            return _error_result("DSL_NOT_FOUND", f"no DSL file at {dsl}")
+    rc, results = reaperd.render_band(
+        BRIDGE_ROOT,
+        guitar_l=args.get("guitar_l", "argent-l"),
+        guitar_r=args.get("guitar_r", "argent-r"),
+        bass=args.get("bass", "nolly-bass-library"),
+        drums=args.get("drums", "rs-drums-monarch"),
+        riff=args.get("riff", "demo"), bars_file=bars_file, dsl=dsl,
+        map_name=args.get("map", "argent_e"),
+        drum_map=args.get("drum_map", "RS Monarch"), seeds=seeds,
+        low_string=args.get("low_string"),
+        position=_position_seconds(args, default=0.0), tempo=args.get("tempo"),
+        replace=args.get("replace", True),
+        sender=_render_sender(bool(args.get("dry_run"))))
+    # Per-leg results, not one verdict: a jam where three tracks landed and one
+    # failed has to say WHICH, or the user re-cuts all four to find out.
+    legs = [{"ok": leg_rc == 0, "report": msg} for leg_rc, msg in results]
+    return _text(json.dumps({"ok": rc == 0, "legs": legs}, indent=1),
+                 is_error=(rc != 0))
+
+
+def tool_humanize_take(args):
+    """Dynamics + micro-timing onto a drum take that is already on the track."""
+    track = args.get("track")
+    if not track or not isinstance(track, str):
+        return _text("humanize_take needs a 'track' name", is_error=True)
+    if not reaperd.status_ok(bridge_root=BRIDGE_ROOT, quiet=True):
+        return _error_result(
+            "REAPER_DOWN",
+            "no fresh bridge heartbeat — REAPER is not running or the bridge "
+            "never loaded. The take was not read and nothing was written.")
+    rc, lines, summary = reaperd.humanize_take(
+        BRIDGE_ROOT, track=track, item_index=args.get("item_index"),
+        amount=args.get("amount", 25), map_name=args.get("map"),
+        seed=args.get("seed", 20260827),
+        follow_lead=bool(args.get("follow_lead")),
+        example_through_bar=args.get("example_through_bar"),
+        # dry_run here means "plan it and report, send no write" — the core
+        # skips apply_note_edits itself. The READ must stay real, so the sender
+        # is never the dry-run one: a dry-run get_midi_notes returns no take to
+        # plan against.
+        dry_run=bool(args.get("dry_run")), sender=_render_sender(False))
+    body = {"ok": rc == 0, "report": "\n".join(lines),
+            "dry_run": bool(args.get("dry_run"))}
+    if summary is not None:
+        body["summary"] = summary
+    return _text(json.dumps(body, indent=1), is_error=(rc != 0))
+
+
 def tool_insert_groove(args):
     dsl_text = args.get("dsl_text")
     dsl_path = args.get("dsl_path")
@@ -622,79 +787,22 @@ def tool_insert_groove(args):
     # Heartbeat gate first (same as reaperd.cmd_groove): a dead REAPER fails
     # here in ~0 s instead of after MIDI generation plus the 20 s insert wait.
     if not reaperd.status_ok(bridge_root=BRIDGE_ROOT, quiet=True):
-        return _error_result(
-            "REAPER_DOWN",
-            "no fresh bridge heartbeat — REAPER is not running or the bridge "
-            "never loaded. Nothing was generated and nothing was inserted.")
-    groovegen = os.path.join(_drum_skill_dir(), "groovegen.py")
-    if not os.path.isfile(groovegen):
-        return _error_result("DRUM_ENGINE_MISSING",
-                             f"drum engine not found at {groovegen}")
+        return _reaper_down_result("insert_groove")
 
     cfg = reaperd.load_drum_config(BRIDGE_ROOT) or {}
-    kit_map = args.get("map") or cfg.get("map")
-    selector = _track_payload(args)
-    if not any(v is not None for v in selector.values()):
+    selector = {k: v for k, v in _track_payload(args).items() if v is not None}
+    if not selector:
         # cmd_groove's fallback chain: named track, else drum-config's default
         # track, else whatever is selected in REAPER.
-        if cfg.get("track"):
-            selector = {"target_track_name": cfg["track"]}
-        else:
-            selector = {"use_selected_track": True}
-    position = args.get("position")
-    if position is None:
-        position = {"type": "cursor"}
-    elif isinstance(position, (int, float)) and not isinstance(position, bool):
-        position = {"type": "time", "seconds": float(position)}
-
-    midi = tempfile.NamedTemporaryFile(suffix=".mid", delete=False).name
-    try:
-        gen = [sys.executable, groovegen, "--out", midi]
-        if dsl_path is not None:
-            gen += ["--dsl", dsl_path]
-        else:
-            # --spec=<text>, not two argv entries: a DSL line starting with '-'
-            # would otherwise be parsed as an option by the engine's argparse.
-            gen.append("--spec=" + dsl_text)
-        if kit_map:
-            gen += ["--map", kit_map]
-        if args.get("seed") is not None:
-            gen += ["--seed", str(args["seed"])]
-        try:
-            gen_proc = subprocess.run(gen, capture_output=True, text=True,
-                                      timeout=GROOVE_GEN_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            return _error_result(
-                "GROOVE_TIMEOUT",
-                f"the drum engine did not finish in {GROOVE_GEN_TIMEOUT_S}s; "
-                "nothing was inserted")
-        except OSError as e:
-            return _error_result("GROOVE_FAILED", str(e))
-        if gen_proc.returncode != 0:
-            # groovegen exits 2 with a clean `error: <what is wrong>` line.
-            # That message IS the fix instruction — pass it through verbatim.
-            return _error_result(
-                "DSL_ERROR",
-                _child_error_details(gen_proc)
-                or f"the drum engine exited {gen_proc.returncode}")
-
-        payload = dict(selector)
-        payload.update({"midi_path": midi, "position": position})
-        reply = _send("insert_midi_file", payload,
-                      timeout_ms=GROOVE_INSERT_TIMEOUT_MS,
-                      dry_run=bool(args.get("dry_run")))
-        summary = (gen_proc.stdout or "").strip()
-        if not reply.get("ok"):
-            return _reply_result(reply, extra={"generated": summary})
-        return _reply_result(reply, extra={"generated": summary,
-                                           "midi_temp_file_deleted": True})
-    finally:
-        # Success, DSL error, bridge rejection, crash: the temp MIDI never
-        # survives the call (cmd_groove's contract).
-        try:
-            os.unlink(midi)
-        except OSError:
-            pass
+        selector = ({"target_track_name": cfg["track"]} if cfg.get("track")
+                    else {"use_selected_track": True})
+    rc, msg = reaperd.render_groove(
+        BRIDGE_ROOT, dsl_path=dsl_path, dsl_text=dsl_text, track=selector,
+        kit_map=args.get("map") or cfg.get("map"), seed=args.get("seed"),
+        position=_insert_position(args), tempo=args.get("tempo"),
+        replace=bool(args.get("replace")),
+        sender=_render_sender(bool(args.get("dry_run"))))
+    return _write_path_result(rc, msg, {"track": selector})
 
 
 # --- Closed-loop verify / tune ----------------------------------------------
@@ -1447,9 +1555,10 @@ TOOLS = [
                         "never both. MUTATES the project (undo-block wrapped, one "
                         "Ctrl/Cmd+Z reverts); supports dry_run. Refuses in ~0 s "
                         "when the bridge heartbeat is dead, before generating "
-                        "anything. The MIDI goes to a temp file that is deleted "
-                        "after the insert, so the payload reports what was "
-                        "generated rather than a reusable path. Kit map: the "
+                        "anything. The rendered .mid is KEPT under "
+                        "rendered-midi/ — REAPER imports MIDI by reference on "
+                        "this build, so a deleted render leaves an empty take. "
+                        "Kit map: the "
                         "DSL's own @map wins, then this map argument, then "
                         "drum-config.json, then GM Standard. Track: named track, "
                         "else drum-config.json's default, else REAPER's selected "
@@ -1470,6 +1579,127 @@ TOOLS = [
                      "description": "RNG seed for the humanizer; same seed + same DSL = same MIDI."},
         }),
         "handler": tool_insert_groove,
+    },
+    {
+        "name": "insert_riff",
+        "description": ("Render ONE humanized guitar or bass part and insert it "
+                        "on a track (skills/guitar-apparatus/). Write the riff "
+                        "as bars_text — one 16-step bar per line, e.g. "
+                        "'x.x.x.x.x.x.x.x.' — or point at a file with "
+                        "bars_file, never both; omit both to use the built-in "
+                        "'demo' riff. Step alphabet: '.' rest, 'x' muted chug, "
+                        "'X' accented root, 'o' let-ring root, 'g' ghost, '_' "
+                        "tie the previous note through this step, '~' slide "
+                        "into the next; UPPERCASE note names (E F G A B C D) "
+                        "are power chords in the key of E and lowercase are "
+                        "single notes, so case matters. Read "
+                        "skills/guitar-apparatus/SKILL.md for the full table "
+                        "before writing anything beyond chugs. Double tracking "
+                        "is two performances, not a copy: call this twice with "
+                        "DIFFERENT seeds for the left and right guitar. MUTATES "
+                        "the project (undo-block wrapped, one Ctrl/Cmd+Z "
+                        "reverts). Refuses in ~0 s when the bridge heartbeat is "
+                        "dead. The rendered .mid is kept under rendered-midi/, "
+                        "including on a dry run, because REAPER holds it by "
+                        "reference."),
+        "inputSchema": _schema({
+            **DRY_RUN_PROP,
+            "track": {"type": "string",
+                      "description": "Exact name of the track to insert on."},
+            "part": {"type": "string", "enum": ["guitar", "bass"],
+                     "description": "Which engine to play the riff on. Default guitar."},
+            "bars_text": {"type": "string",
+                          "description": "The riff inline, one bar per line. Mutually exclusive with bars_file."},
+            "bars_file": {"type": "string",
+                          "description": "Absolute path to a riff text file. Mutually exclusive with bars_text."},
+            "riff": {"type": "string",
+                     "description": "Built-in riff when neither bars source is given: 'demo' or 'probe'."},
+            "map": {"type": "string",
+                    "description": "Tuning/keyswitch map: argent_e (default), argent_csharp, nolly_e, nolly_csharp."},
+            "seed": {"type": "integer",
+                     "description": "RNG seed. Same riff + same seed = the same performance."},
+            "low_string": {"type": "integer",
+                           "description": "Override the map's low-string MIDI note (e.g. 52 to lift a lead into register)."},
+            "position": {"type": "number",
+                         "description": "Seconds from project start. Default: the edit cursor."},
+            "tempo": {"type": "integer", "description": "Project tempo override (BPM)."},
+            "replace": {"type": "boolean",
+                        "description": "Clear the track from `position` first, so a re-cut does not stack takes. Needs a numeric position."},
+        }, ["track"]),
+        "handler": tool_insert_riff,
+    },
+    {
+        "name": "cut_band",
+        "description": ("Lay down or re-cut a whole four-track jam in ONE call: "
+                        "two double-tracked guitars, a bass locked to them, and "
+                        "drums. The two guitars get different seeds "
+                        "automatically, so the width is two performances rather "
+                        "than a stereo copy. By default it REPLACES what is on "
+                        "those four tracks from `position` — pass replace=false "
+                        "to append instead. Every leg is attempted even if an "
+                        "earlier one fails, and the result reports each leg "
+                        "separately, so a partial cut says which tracks landed. "
+                        "MUTATES the project (undo-block wrapped). Refuses in "
+                        "~0 s when the bridge heartbeat is dead."),
+        "inputSchema": _schema({
+            **DRY_RUN_PROP,
+            "guitar_l": {"type": "string", "description": "Left guitar track name. Default argent-l."},
+            "guitar_r": {"type": "string", "description": "Right guitar track name. Default argent-r."},
+            "bass": {"type": "string", "description": "Bass track name. Default nolly-bass-library."},
+            "drums": {"type": "string", "description": "Drum track name. Default rs-drums-monarch."},
+            "bars_file": {"type": "string",
+                          "description": "Absolute path to a riff text file for all three string parts."},
+            "riff": {"type": "string",
+                     "description": "Built-in riff when bars_file is absent: 'demo' or 'probe'."},
+            "dsl_path": {"type": "string",
+                         "description": "Absolute path to the drum DSL. Default: the bundled examples/jam-e.dsl."},
+            "map": {"type": "string", "description": "Guitar tuning map. Default argent_e."},
+            "drum_map": {"type": "string", "description": "Drum-kit map name. Default 'RS Monarch'."},
+            "seeds": {"type": "array", "items": {"type": "integer"},
+                      "description": "Seeds for [guitar_l, guitar_r, bass]. Default [101, 202, 303]."},
+            "low_string": {"type": "integer", "description": "Override the map's low-string MIDI note."},
+            "position": {"type": "number", "description": "Seconds from project start. Default 0 (bar 1)."},
+            "tempo": {"type": "integer", "description": "Project tempo override (BPM)."},
+            "replace": {"type": "boolean",
+                        "description": "Clear each track from `position` first. Default true."},
+        }),
+        "handler": tool_cut_band,
+    },
+    {
+        "name": "humanize_take",
+        "description": ("Put a dynamic contour and micro-timing into a drum "
+                        "take that is ALREADY on a track — the take is read, "
+                        "planned, and written back in place through "
+                        "index-addressed note edits, so stacked hits (flams, "
+                        "double triggers) are humanized too. The contour is "
+                        "always applied; `amount` only scales the random spread "
+                        "and timing looseness on top of it. Fills build as a "
+                        "crescendo peaking at the resolve, and the golden rule "
+                        "is enforced: no drum hits the same velocity twice in a "
+                        "row. Use follow_lead when the user has already "
+                        "humanized the opening bars BY HAND and wants that hand "
+                        "carried across the rest — it learns from their bars "
+                        "instead of applying the shared taste model, and fails "
+                        "if there is no flat region left to follow into. Prefer "
+                        "dry_run first: it plans and returns the full summary "
+                        "without writing. MUTATES the project (undo-block "
+                        "wrapped, one Ctrl/Cmd+Z reverts the whole pass)."),
+        "inputSchema": _schema({
+            **DRY_RUN_PROP,
+            "track": {"type": "string", "description": "Exact name of the drum track."},
+            "item_index": {"type": "integer",
+                           "description": "Which item on the track. Default: the only item."},
+            "amount": {"type": "integer",
+                       "description": "0-100 random spread and timing looseness. Default 25."},
+            "map": {"type": "string",
+                    "description": "Drum-kit map for exact per-role velocity bands. Default: infer roles from the take's MIDI note names."},
+            "seed": {"type": "integer", "description": "RNG seed; a run is reproducible."},
+            "follow_lead": {"type": "boolean",
+                            "description": "Learn the velocity hand from the bars the user humanized and carry it across the rest."},
+            "example_through_bar": {"type": "integer",
+                                    "description": "With follow_lead: the last bar the user humanized (1-based). Default: auto-detect the first flat bar."},
+        }, ["track"]),
+        "handler": tool_humanize_take,
     },
     {
         "name": "verify_change",

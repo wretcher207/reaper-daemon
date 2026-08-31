@@ -1147,8 +1147,8 @@ def test_insert_groove_renders_and_inserts(root, monkeypatch):
                                   "track": "Drums", "seed": 7, "map": "MyKit"})
     body = json.loads(result_text(resp))
     assert body["ok"] is True
-    assert "32 notes" in body["generated"]
-    assert body["data"]["track"]["name"] == "Drums"
+    assert "32 notes" in body["report"]
+    assert "Drums" in body["report"]
     payload = cmds[0]["payload"]
     assert payload["target_track_name"] == "Drums"
     assert payload["position"] == {"type": "cursor"}
@@ -1159,7 +1159,10 @@ def test_insert_groove_renders_and_inserts(root, monkeypatch):
     assert any(a.startswith("--spec=kick x") for a in argv)
     assert argv[argv.index("--seed") + 1] == "7"
     assert argv[argv.index("--map") + 1] == "MyKit"
-    assert not os.path.exists(midi_arg(argv))  # temp MIDI cleaned on success
+    # The render is KEPT under rendered-midi/: REAPER imports MIDI by
+    # reference on this build, so deleting it would empty the take.
+    midi = midi_arg(argv)
+    assert os.path.dirname(midi) == os.path.join(root, "rendered-midi")
 
 
 def test_insert_groove_honors_dry_run(root, monkeypatch):
@@ -1172,7 +1175,7 @@ def test_insert_groove_honors_dry_run(root, monkeypatch):
     resp = call("insert_groove", {"dsl_text": "kick x...", "track": "Drums",
                                   "dry_run": True})
     body = json.loads(result_text(resp))
-    assert body["ok"] is True and body["dry_run"] is True
+    assert body["ok"] is True
     assert cmds[0]["dry_run"] is True
     assert cmds[0]["created_by"] == "mcp"
 
@@ -1199,9 +1202,9 @@ def test_insert_groove_surfaces_the_engine_message_and_unlinks_the_midi(
     resp = call("insert_groove", {"dsl_text": "kik x...", "track": "Drums"})
     assert resp["result"]["isError"] is True
     body = json.loads(result_text(resp))
-    assert body["error"]["code"] == "DSL_ERROR"
+    assert body["ok"] is False
     # Verbatim: this message is what the model needs to repair its DSL.
-    assert body["error"]["details"] == "error: unknown role 'kik' on line 3"
+    assert body["report"] == "error: unknown role 'kik' on line 3"
     assert not os.path.exists(midi_arg(seen[0]))
     assert os.listdir(os.path.join(root, "inbox")) == []
 
@@ -1216,8 +1219,8 @@ def test_insert_groove_unlinks_the_midi_when_the_bridge_rejects(
     resp = call("insert_groove", {"dsl_text": "kick x...", "track": "Ghost"})
     assert resp["result"]["isError"] is True
     body = json.loads(result_text(resp))
-    assert body["error"]["code"] == "NO_TARGET_TRACK"
-    assert "8 notes" in body["generated"]  # what was generated, honestly
+    assert body["ok"] is False
+    assert "NO_TARGET_TRACK" in body["report"]
     assert not os.path.exists(midi_arg(seen[0]))
 
 
@@ -1234,7 +1237,8 @@ def test_insert_groove_unlinks_the_midi_when_the_engine_times_out(
     monkeypatch.setattr(reaper_mcp.subprocess, "run", run)
     resp = call("insert_groove", {"dsl_text": "kick x...", "track": "Drums"})
     body = json.loads(result_text(resp))
-    assert body["error"]["code"] == "GROOVE_TIMEOUT"
+    assert body["ok"] is False
+    assert "did not finish" in body["report"]
     assert not os.path.exists(midi_arg(seen[0]))
 
 
@@ -1250,6 +1254,123 @@ def test_insert_groove_falls_back_to_drum_config_track_and_map(
     call("insert_groove", {"dsl_text": "kick x..."})
     assert cmds[0]["payload"]["target_track_name"] == "Kit"
     assert seen[0][seen[0].index("--map") + 1] == "RS Monarch"
+
+
+# --- guitar / band / humanize write tools -------------------------------------
+
+def guitar_skill(root):
+    """The guitar-apparatus layout insert_riff / cut_band require, including
+    the bundled default drum DSL cut_band falls back to."""
+    skill = os.path.join(root, "skills", "guitar-apparatus")
+    os.makedirs(os.path.join(skill, "examples"), exist_ok=True)
+    with open(os.path.join(skill, "shredgen.py"), "w", encoding="utf-8") as f:
+        f.write("# fake engine; subprocess is monkeypatched in these tests\n")
+    with open(os.path.join(skill, "examples", "jam-e.dsl"), "w",
+              encoding="utf-8") as f:
+        f.write("@map GM Standard\nkick x...\n")
+    return skill
+
+
+def test_write_tools_listed_with_schemas():
+    resp = reaper_mcp.handle_message(rpc("tools/list"))
+    tools = {t["name"]: t for t in resp["result"]["tools"]}
+    for name in ("insert_riff", "cut_band", "humanize_take"):
+        assert tools[name]["inputSchema"]["type"] == "object"
+        assert tools[name]["description"]
+    assert tools["insert_riff"]["inputSchema"]["required"] == ["track"]
+    assert tools["humanize_take"]["inputSchema"]["required"] == ["track"]
+    # Every cut_band argument has a taught default; nothing is required.
+    assert "required" not in tools["cut_band"]["inputSchema"]
+
+
+@pytest.mark.parametrize("args, needle", [
+    ({}, "track"),
+    ({"track": "argent-l", "bars_text": "x...", "bars_file": "r.txt"},
+     "not both"),
+    ({"track": "argent-l", "bars_text": "   "}, "empty"),
+    ({"track": "argent-l", "part": "keys"}, "part"),
+])
+def test_insert_riff_refuses_bad_arguments(root, args, needle):
+    resp = call("insert_riff", args)
+    assert resp["result"]["isError"] is True
+    assert needle in result_text(resp)
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_insert_riff_reports_a_missing_riff_file(root):
+    resp = call("insert_riff", {"track": "argent-l",
+                                "bars_file": os.path.join(root, "no.txt")})
+    body = json.loads(result_text(resp))
+    assert body["error"]["code"] == "RIFF_NOT_FOUND"
+
+
+@pytest.mark.parametrize("tool", ["insert_riff", "cut_band", "humanize_take"])
+def test_write_tools_gate_on_the_heartbeat(root, tool):
+    # No heartbeat file under this root: the gate refuses before any engine
+    # runs or any command reaches the inbox.
+    resp = call(tool, {"track": "argent-l"})
+    assert resp["result"]["isError"] is True
+    body = json.loads(result_text(resp))
+    assert body["error"]["code"] == "REAPER_DOWN"
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_insert_riff_renders_and_inserts(root, monkeypatch):
+    guitar_skill(root)
+    live_heartbeat(root)
+    seen = fake_child(monkeypatch, stdout="shredgen: 24 notes", record=[])
+    cmds = []
+    fake_bridge(root, {"ok": True, "type": "insert_midi_file",
+                       "data": {"track": {"name": "argent-l"}}}, record=cmds)
+    resp = call("insert_riff", {"track": "argent-l", "seed": 101,
+                                "bars_text": "x.x.x.x.x.x.x.x."})
+    body = json.loads(result_text(resp))
+    assert body["ok"] is True
+    assert body["part"] == "guitar" and body["track"] == "argent-l"
+    assert "argent-l" in body["report"]
+    argv = seen[0]
+    assert argv[argv.index("--part") + 1] == "guitar"
+    assert argv[argv.index("--seed") + 1] == "101"
+    # The inline riff's temp copy only has to outlive the generator.
+    assert not os.path.exists(argv[argv.index("--bars-file") + 1])
+    payload = cmds[0]["payload"]
+    assert payload["target_track_name"] == "argent-l"
+    # The render is KEPT under rendered-midi/ (REAPER imports by reference).
+    assert os.path.dirname(payload["midi_path"]) == os.path.join(
+        root, "rendered-midi")
+
+
+def test_cut_band_reports_each_leg(root, monkeypatch):
+    guitar_skill(root)
+    drum_skill(root)
+    live_heartbeat(root)
+    seen = fake_child(monkeypatch, stdout="ok", record=[])
+    cmds = []
+    fake_bridge_script(root, [{"ok": True, "type": "insert_midi_file"}] * 4,
+                       record=cmds)
+    resp = call("cut_band", {"replace": False})
+    body = json.loads(result_text(resp))
+    assert body["ok"] is True
+    assert [leg["ok"] for leg in body["legs"]] == [True] * 4
+    assert [c["payload"]["target_track_name"] for c in cmds] == [
+        "argent-l", "argent-r", "nolly-bass-library", "rs-drums-monarch"]
+    # Double tracking is two performances: the guitars get different seeds.
+    seeds = [a[a.index("--seed") + 1] for a in seen if "--seed" in a]
+    assert seeds[0] != seeds[1]
+
+
+def test_cut_band_refuses_non_integer_seeds(root):
+    live_heartbeat(root)
+    resp = call("cut_band", {"seeds": [101, "202", 303]})
+    assert resp["result"]["isError"] is True
+    assert "seeds" in result_text(resp)
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_humanize_take_requires_a_track(root):
+    resp = call("humanize_take", {})
+    assert resp["result"]["isError"] is True
+    assert "track" in result_text(resp)
 
 
 # --- console freeze policy ----------------------------------------------------
