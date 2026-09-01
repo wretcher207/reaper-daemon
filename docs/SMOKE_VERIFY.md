@@ -104,6 +104,33 @@ convergence without numbers.
    was touched (check track selection, solos, time selection, render settings
    — all should be exactly as you left them).
 
+## Step 5 — Daemon Console (5 min, needs ReaImGui + the `claude` CLI)
+
+Setup once: **Actions → New action → Load ReaScript** →
+`bridge/reaper_daemon_console.lua`, then run the action. The panel starts the
+sidecar itself; give it a few seconds to show a session id in the status
+strip.
+
+1. With a track selected, type "what track do I have selected?" and Send
+   (Ctrl+Enter). Pass: it names the track WITHOUT calling `get_context` —
+   the focus envelope answered it. The turn cost appears in the strip.
+2. Ask for a small change: "rename that track to SMOKE, then rename it
+   back." Pass: the transcript shows the tool calls, the track name changes
+   and changes back, and the audition strip appears after the first rename.
+3. Ask it to measure the selected track. Pass: it WARNS about the freeze
+   first, REAPER blocks briefly, and the reported capture is clamped to 8
+   seconds (the reply must say so).
+4. Make an FX change ("2 dB high shelf cut on this track's EQ"), then use
+   the strip: A/B toggles the FX on and off audibly, Undo reverts it, and a
+   verdict button (`too much`) sends a follow-up with no typing.
+5. Close the panel. Pass: within ~5 minutes the sidecar notices the dead
+   heartbeat and kills the paid session (`logs/console_sidecar.log` says so).
+   Re-running the action reconnects.
+
+Fail worth reporting: spacebar no longer reaching the transport with the
+panel open and the input unfocused (Escape should always release focus), or
+a measurement reported without the clamp caveat.
+
 ## If something breaks
 
 Keep the terminal output and run the failing step again with `--json` (for

@@ -285,6 +285,28 @@ its existing mutation commands remain explicit, independently authorized bridge
 operations. Reaper Daemon stays MIT-licensed and local. Planned hosted Post
 Mortem services or UI do not move this bridge behind a commercial boundary.
 
+## Daemon Console — a chat box docked inside REAPER
+
+The console puts the same agent *inside* REAPER: a ReaImGui panel you dock
+next to the transport, backed by a long-lived headless Claude Code session
+(`console_sidecar.py`, stdlib-only) with `reaper_mcp.py` wired in. Every
+prompt carries a live focus envelope (selected track + GUID, cursor bar, time
+selection, tempo, transport, dirty flag), so "measure the drums" with a track
+selected just works. After a change, an audition strip offers Locate / A/B /
+Loop / Undo and one-tap verdicts (`too much`, `not enough`, `keep it`) that
+send the follow-up with no typing.
+
+One-time setup: install [ReaImGui](https://github.com/cfillion/reaimgui)
+via ReaPack, then **Actions → New action → Load ReaScript** and pick
+`bridge/reaper_daemon_console.lua`. The panel starts the sidecar itself; the
+`claude` CLI must be on PATH. The session runs with full authority and no
+approval prompts — read the trust statement before first use.
+
+Full architecture, file protocol, money and liveness rules, and config
+reference: [`docs/CONSOLE.md`](docs/CONSOLE.md). The console is **clone-only**
+(not in the ReaPack package): ReaPack delivers Lua only, and the panel is
+useless without the sidecar.
+
 ## Drum kits — any library, auto-discovered
 
 The DSL drum engine (`skills/drum-apparatus/`) ships a few built-in kit maps
@@ -493,6 +515,9 @@ bridge/bridge_config.json        machine-specific config (regenerated)
 bridge/command_schema.md         full command reference
 reaperd.py                       cross-platform agent CLI (Python 3)
 reaper_mcp.py                    MCP stdio server over the same bridge
+console_sidecar.py               Daemon Console broker (headless Claude session)
+bridge/reaper_daemon_console.lua Daemon Console panel (ReaImGui, clone-only)
+docs/CONSOLE.md                  console architecture + operating rules
 setup/install.py                 wire auto-start into REAPER (cross-platform)
 commands/examples/               one JSON example per command
 skills/drum-apparatus/           DSL drum engine + kit-map auto-discovery

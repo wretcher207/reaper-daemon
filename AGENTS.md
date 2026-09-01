@@ -13,6 +13,9 @@ the zero-dependency `reaperd.py` CLI.
 - `skills/drum-apparatus/`: drum DSL and kit-map behavior when that workflow is used.
 - `skills/guitar-apparatus/`: riff notation, tuning/keyswitch maps, and the performance
   engine behind `shred` and `band`. Read it before writing or editing a riff file.
+- `docs/CONSOLE.md`: the Daemon Console (in-REAPER panel + `console_sidecar.py`) —
+  architecture, file protocol, money/liveness rules. Read it only when the task
+  touches the console; its session rules live in `docs/console_contract.md`.
 - Writing drum velocities — by any path, including a one-off script — means
   `skills/drum-apparatus/drumgen/goldenrule.py`. No drum ever hits the same velocity
   twice in a row, per drum in time order, whatever lands in between. `enforce()` to
