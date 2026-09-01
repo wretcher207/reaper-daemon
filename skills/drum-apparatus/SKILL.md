@@ -140,6 +140,15 @@ already humanized, nothing to fix after. These are physics, not taste:
    before the write.** Skipping it is how 66 violations shipped on the stigmergy
    Monarch pass (2026-08-28): the bespoke model matched David's bands exactly and
    still machine-gunned, because it never went through the humanizer.
+
+   **The rule governs what the SYSTEM generates. It is NOT a spec David's own
+   playing has to pass.** His hand-played Monarch bars 1-6 contain four
+   same-velocity repeats (Left Crash b2, Right Crash b3->4 and b5->6, Rack 1
+   b2->6). They were raised with him on 2026-09-01 and his verdict was that the
+   part is fine as it is. **Do not "fix" them, and do not run a humanize pass
+   over his own performance to make the numbers comply.** A violation count on
+   material he played is an observation to offer him, never a defect to
+   correct. He decides; the invariant binds the generator.
 2. **A cymbal that lands together with a shell (kick/snare/tom) is louder** — a
    human pushes harder on the cymbal because he's also hitting a shell.
    *(in code: groovekit CYMBAL_SHELL_BOOST)*
@@ -241,6 +250,10 @@ note stayed exactly on the grid, so **he did not touch timing on this one**):
 | Snare rimshot | 93—95 | flat and well under everything; backbeat a hair over |
 | Toms | 100—108 | each fill ramps upward across its hits |
 | Crashes / china | 112—121 | beat 3 hottest (~118), downbeat ~117, mid-bar ~115; china +1 |
+
+Four same-velocity repeats sit inside these bars. David reviewed them on
+2026-09-01 and left them: his hand, his call, and they do not read as
+machine-gunned in context. Treat that as settled rather than re-raising it.
 
 Jitter inside a band is only —1—2. The bands are narrow and the CONTOUR does the
 work — that is the opposite of "add randomness", and it is why a wide random
