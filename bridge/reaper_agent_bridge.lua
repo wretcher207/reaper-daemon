@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.15.0
+-- @version 3.16.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -13,6 +13,17 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.16.0: The bridge script is unchanged; the version moves in lockstep with
+--   the repo. In the cloned repo: the part-writing path is now on MCP — three
+--   new tools, insert_riff (one humanized guitar/bass part), cut_band (the
+--   whole four-track jam in one call, per-leg results), and humanize_take
+--   (dynamics + micro-timing on a take already on a track, --follow-lead
+--   included), 29 tools total, sharing one write path with the CLI's
+--   shred/band/humanize so behavior does not differ by surface. Fixed on the
+--   way: insert_groove no longer deletes its rendered .mid after insert, which
+--   left an empty take on by-reference REAPER builds. The Daemon Console (the
+--   in-REAPER chat panel + sidecar) is now documented in docs/CONSOLE.md;
+--   it is clone-only and does not ship through ReaPack.
 --   3.15.0: Playing release. The bridge script is unchanged; the version moves
 --   in lockstep with the repo. In the cloned repo (ReaPack installs only this
 --   bridge): guitar riffs connect instead of stabbing. New connection cells tie
