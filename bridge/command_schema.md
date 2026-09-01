@@ -291,6 +291,25 @@ background, so it always catches them offline. Check
 `get_context.media_offline_when_inactive` before treating `source_state:
 "offline"` as a property of the media rather than of the preference.
 
+### set_all_media_online
+Brings every offline media item in the project back online. No payload.
+```json
+{}
+```
+Runs REAPER action **40101** ("Item: Set all media online", project-wide; 40439
+is the selected-items variant). Ungated: it only restores media, and there is
+no state it can destroy.
+
+Exists because offline media is **sticky**. Measured 2026-09-01: once
+`offlineinact` has unloaded it, it does NOT come back from restoring or
+focusing the window from another process, from starting playback, or from
+turning the preference back off. This action does bring it back.
+
+The reply re-reads every audio source rather than trusting the action, and
+reports `audio_sources`, `online`, and `still_offline`. A `still_offline`
+above zero means the action did not do what it claims. MIDI sources are
+excluded from the count.
+
 ### set_media_offline_when_inactive
 Gated — requires `allow_risk_level_3: true`, or the reply is
 `PREFERENCE_BLOCKED`. Needs SWS (`SNM_SetIntConfigVar`); REAPER exposes no

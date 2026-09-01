@@ -1533,6 +1533,50 @@ eq(pcall(automation_transaction, { payload = { writes = {} } }), false,
 end)()
 
 ;(function()
+-- set_all_media_online (2026-09-01). 40101 is "Item: Set all media online",
+-- taken from REAPER's published action list, not guessed -- a wrong ID here
+-- fires some other action on David's project.
+local h = B.handlers.set_all_media_online
+local fired = nil
+_G.reaper.Main_OnCommand = function(id) fired = id end
+_G.reaper.CountTracks = function() return 1 end
+_G.reaper.GetTrack = function(_, i) return i == 0 and "track-object" or nil end
+_G.reaper.CountTrackMediaItems = function() return 2 end
+_G.reaper.GetTrackMediaItem = function(_, i) return "item-" .. i end
+_G.reaper.GetActiveTake = function(item) return "take-" .. item end
+_G.reaper.GetMediaItemTake_Source = function() return "src" end
+_G.reaper.GetMediaSourceType = function() return "WAVE" end
+_G.reaper.GetMediaSourceSampleRate = function() return 48000 end
+
+local res = h({})
+eq(fired, 40101, "set_all_media_online fires action 40101, not a guessed ID")
+eq(res.audio_sources, 2, "it counts the audio sources it checked")
+eq(res.online, 2, "it counts how many came back online")
+eq(res.still_offline, 0, "nothing left offline is reported as zero")
+
+-- The result is a RE-READ, not a claim. An action that silently does nothing
+-- must show up as still_offline, because that is the failure mode this whole
+-- area already produced once.
+_G.reaper.GetMediaSourceSampleRate = function() return 0 end
+local bad = h({})
+eq(bad.still_offline, 2, "an action that changes nothing reports still_offline")
+eq(bad.online, 0, "and reports zero online rather than claiming success")
+
+-- MIDI has no sample rate by nature and must not be counted as still offline.
+_G.reaper.GetMediaSourceType = function() return "MIDI" end
+local midi = h({})
+eq(midi.audio_sources, 0, "MIDI sources are excluded from the count entirely")
+eq(midi.still_offline, 0, "MIDI never reads as stranded offline")
+
+fired = nil
+local dry = h({ dry_run = true })
+eq(dry.dry_run, true, "dry_run is reported")
+eq(fired, nil, "dry_run fires no action")
+_G.reaper.GetMediaSourceType = function() return "WAVE" end
+_G.reaper.GetMediaSourceSampleRate = function() return 48000 end
+end)()
+
+;(function()
 -- set_media_offline_when_inactive (2026-09-01). The risk gate and the
 -- read-back are the safety story: this writes a persistent REAPER preference,
 -- not project state, so a silent no-op must never look like success.

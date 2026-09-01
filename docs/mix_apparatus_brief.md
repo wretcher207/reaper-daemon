@@ -130,11 +130,13 @@ enumerate an enum. Every probe is a real write, so scratch tracks only. The
   `get_context.media_offline_when_inactive` instead, which test the thing that
   actually matters. `get_capture_preflight` warns when the preference is on.
 
-  **The unloaded state is sticky.** Once media is offline it does NOT come back
-  from `ShowWindow`/`SetForegroundWindow` driven by another process, and not
-  from starting playback either. It needs a genuine user activation -- a real
-  click on REAPER. So an agent cannot reliably un-break this on its own; it can
-  only detect it and say so.
+  **The unloaded state is sticky, but it is fixable.** Once media is offline it
+  does NOT come back from `ShowWindow`/`SetForegroundWindow` driven by another
+  process, from starting playback, or from turning the preference back off --
+  all four measured on 2026-09-01. Nor, on that occasion, from a real click on
+  the window. What DOES clear it is REAPER action 40101, exposed as the
+  `set_all_media_online` command: 13/13 stranded items came back, confirmed by
+  re-reading the sources (48000 Hz, 27.73 s, matching the off-disk control).
 - **`RENDER_STATS` LUFS goes stale.** A repeated LUFS across different renders
   means the last stats-bearing render, not this one. Never treat LUFS equality
   as evidence of anything but staleness.

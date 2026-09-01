@@ -4663,6 +4663,45 @@ do
 -- Needs SWS (SNM_SetIntConfigVar); there is no native setter. Gated at risk
 -- level 3 because it changes a persistent application preference, not project
 -- state -- the same bar as save_project.
+-- Bring every offline media item in the project back online.
+-- 40101 = "Item: Set all media online" (project-wide, no selection needed;
+-- 40439 is the selected-items variant). Added 2026-09-01 because the daemon
+-- could detect stranded offline media but not clear it.
+--
+-- Why this is needed at all: once `offlineinact` has unloaded media, the state
+-- is sticky. Measured 2026-09-01 -- it does NOT come back from restoring or
+-- focusing the window from another process, from starting playback, or from
+-- turning the preference back off. It needs this action (or a real click).
+handlers.set_all_media_online = function(command)
+  if command.dry_run or (command.payload or {}).dry_run then
+    return { dry_run = true, would_run = "set_all_media_online",
+             action = 40101, note = "Item: Set all media online" }
+  end
+  reaper.Main_OnCommand(40101, 0)
+  -- Report what it achieved by re-reading a real source rather than trusting
+  -- the action: an action that silently does nothing is the failure mode worth
+  -- catching, and this whole area already produced one.
+  local checked, online = 0, 0
+  for t = 0, reaper.CountTracks(0) - 1 do
+    local track = reaper.GetTrack(0, t)
+    for i = 0, reaper.CountTrackMediaItems(track) - 1 do
+      local take = reaper.GetActiveTake(reaper.GetTrackMediaItem(track, i))
+      local src = take and reaper.GetMediaItemTake_Source(take)
+      if src then
+        local stype = reaper.GetMediaSourceType(src, "")
+        if stype ~= "MIDI" and stype ~= "MIDIPOOL" then
+          checked = checked + 1
+          if reaper.GetMediaSourceSampleRate(src) > 0 then online = online + 1 end
+        end
+      end
+    end
+  end
+  return {
+    action = 40101, audio_sources = checked, online = online,
+    still_offline = checked - online,
+  }
+end
+
 handlers.set_media_offline_when_inactive = function(command)
   local payload = command.payload or {}
   if payload.enabled == nil then
