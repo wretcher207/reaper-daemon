@@ -58,5 +58,9 @@ rendered-midi/
 # Nested worktree of the product-page repo (its own git history)
 hawksbill/
 
-# Brand assets pending a move to C:/brand or the DPD repo — not this repo's to ship
+# Brand assets are not this repo's to ship. The move happened 2026-09-01: the
+# reaper-daemon identity concept now lives in the site repo at
+# dead-pixel-design-v4/brand-kit/products/reaper-daemon/, junctioned from
+# C:\brand\products\reaper-daemon. The rule stays so a new brand/ does not
+# accumulate here again.
 brand/
