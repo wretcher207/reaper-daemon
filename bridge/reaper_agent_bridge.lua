@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.16.0
+-- @version 3.17.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -13,6 +13,22 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.17.0: The bridge script CHANGED this time -- ReaPack users get new
+--   commands, not just a version number. REAPER's "set media items offline
+--   when application is not active" preference unloads disk media whenever
+--   REAPER is not the active app, and a daemon is ALWAYS the background
+--   process, so every read saw unloaded media and a capture could measure
+--   sources that were not loaded. Virtual instruments were unaffected, which
+--   made the symptom look like a plugin bug. It is now visible and fixable:
+--   get_context reports media_offline_when_inactive plus offline/bypassed per
+--   FX, get_items reports a per-item source_state (loaded / offline /
+--   unresolved / midi, inferred and flagged as such -- REAPER exposes no API
+--   for it), get_capture_preflight warns, set_media_offline_when_inactive
+--   turns the preference off, and set_all_media_online clears media already
+--   stranded (the state is sticky: restoring the window, playback, and even
+--   turning the preference back off do not clear it). This also root-causes
+--   the long-standing "a minimized REAPER renders digital silence" trap --
+--   minimizing was never the trigger, losing active-app status was.
 --   3.16.0: The bridge script is unchanged; the version moves in lockstep with
 --   the repo. In the cloned repo: the part-writing path is now on MCP — three
 --   new tools, insert_riff (one humanized guitar/bass part), cut_band (the
