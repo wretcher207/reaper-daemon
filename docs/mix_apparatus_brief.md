@@ -100,12 +100,41 @@ enumerate an enum. Every probe is a real write, so scratch tracks only. The
 
 ## Traps that have already cost hours
 
-- **A minimized REAPER window renders digital silence.** Offline renders of
-  disk-media items come back at -180 dBFS while the main window is minimized,
-  proven in both directions. Virtual instruments still render, which is what
-  made one bug look like six. An agent-launched REAPER starts minimized. Check
-  `IsIconic` on the main window, or just look at the screen, before believing
-  any silent capture.
+- **Disk-media items render as silence when REAPER is not the active app.**
+  Originally recorded (2026-08-18) as "a minimized window renders digital
+  silence": -180 dBFS minimized, -14.1 restored, proven both directions, with
+  virtual instruments still rendering, which is what made one bug look like
+  six.
+
+  **Root cause found 2026-09-01: REAPER's "set media items offline when
+  application is not active" preference (`offlineinact`).** Minimizing is not
+  the trigger, it is just one way to stop being the active app. The preference
+  unloads disk media on deactivation; VSTi output has no media source to
+  unload, which is exactly the split the original note observed.
+
+  Measured on drones.rpp, same 5 s bounds, REAPER minimized throughout, the
+  only variable being whether the media was loaded:
+
+  | media state | LUFS-I | RMS |
+  | --- | --- | --- |
+  | loaded | -17.3 | -19.5 |
+  | offline | -22.3 | -23.2 |
+
+  A ~5 dB drop, being the two disk-media guitar tracks contributing nothing,
+  with 0% silence throughout because the Kontakt instruments still rendered.
+  The original -180 was the same mechanism on a render whose content was ALL
+  disk media -- inferred, not re-reproduced here.
+
+  **`IsIconic` is the wrong check.** It tests a symptom of one trigger. Read
+  `get_items.source_state` (`offline` vs `loaded`) or
+  `get_context.media_offline_when_inactive` instead, which test the thing that
+  actually matters. `get_capture_preflight` warns when the preference is on.
+
+  **The unloaded state is sticky.** Once media is offline it does NOT come back
+  from `ShowWindow`/`SetForegroundWindow` driven by another process, and not
+  from starting playback either. It needs a genuine user activation -- a real
+  click on REAPER. So an agent cannot reliably un-break this on its own; it can
+  only detect it and say so.
 - **`RENDER_STATS` LUFS goes stale.** A repeated LUFS across different renders
   means the last stats-bearing render, not this one. Never treat LUFS equality
   as evidence of anything but staleness.
