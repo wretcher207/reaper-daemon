@@ -600,7 +600,16 @@ local function get_tracks(include_fx)
         -- the documented shape keeps them out.
         if not (is_master and scope == "input") then
           local list = scope == "input" and info.input_fx or info.fx
-          list[#list + 1] = { index = fx, api_index = api_index, scope = scope, name = fx_name }
+          -- `offline` added 2026-09-01. An offline FX is loaded but not
+          -- processing: it renders silence and reports no parameters, which
+          -- previously looked identical to a working plugin from here.
+          -- TrackFX_GetOffline is the authoritative read; unlike media-item
+          -- offline state, REAPER does expose this one.
+          list[#list + 1] = {
+            index = fx, api_index = api_index, scope = scope, name = fx_name,
+            offline = reaper.TrackFX_GetOffline(track, api_index) and true or false,
+            bypassed = not reaper.TrackFX_GetEnabled(track, api_index),
+          }
         end
       end)
     end
@@ -4627,7 +4636,64 @@ handlers.get_items = function(command)
         local length, is_qn = reaper.GetMediaSourceLength(src)
         entry.source_length = length
         entry.source_length_is_qn = is_qn and true or false
+        -- Offline detection, added 2026-09-01. REAPER exposes NO ReaScript call
+        -- for media-item offline state -- the only *_GetOffline functions are
+        -- TrackFX/TakeFX, which are about plugins, not media. So this is
+        -- INFERRED, and the field names say so.
+        --
+        -- The signal, measured live on drones.rpp: an unloaded source reports
+        -- length 0 and sample rate 0 while its file is still perfectly
+        -- readable from inside REAPER's process. Positive control on the same
+        -- file with Python's wave module: 48000 Hz, 27.73 s. So 0/0 is REAPER
+        -- declining to load it, not a bad file.
+        --
+        -- source_readable is what separates the two ways a source reads 0/0:
+        -- offline (REAPER won't load a file that is right there) versus a
+        -- genuinely missing or unresolvable source. Do not collapse them.
+        entry.source_channels = reaper.GetMediaSourceNumChannels(src)
+        entry.source_sample_rate = reaper.GetMediaSourceSampleRate(src)
+        local ok_chunk, chunk = reaper.GetItemStateChunk(item, "", false)
+        if ok_chunk and chunk then
+          -- Just the SOURCE header line, not the whole chunk: it is the one
+          -- place a persisted offline marker could plausibly appear, and the
+          -- full chunk would swamp the reply on a 7-item track.
+          -- REAPER writes the header as `<SOURCE WAVE` -- the `<` opens a
+          -- nested chunk block. The optional `<` in the pattern is load-bearing;
+          -- without it this matched nothing on every real item.
+          entry.source_chunk_line = chunk:match("\n<?(SOURCE[^\n]*)")
+        end
+        -- The verdict. `source_state` is one of:
+        --   "loaded"   -- REAPER has the audio; length and rate are real
+        --   "offline"  -- 0/0 but the file opens: REAPER is not loading it
+        --   "unresolved" -- 0/0 and the file does not open: missing media
+        -- MIDI takes report a source too, but an in-project MIDI source has
+        -- no sample rate by nature, so they are excluded rather than being
+        -- permanently mislabelled offline.
+        local rate = entry.source_sample_rate or 0
+        local slen = entry.source_length or 0
+        if entry.source_type == "MIDI" or entry.source_type == "MIDIPOOL" then
+          entry.source_state = "midi"
+        elseif rate > 0 or slen > 0 then
+          entry.source_state = "loaded"
+        elseif entry.source_readable then
+          entry.source_state = "offline"
+        else
+          entry.source_state = "unresolved"
+        end
+        entry.source_state_inferred = true
       end
+      -- Take FX offline IS authoritative (TakeFX_GetOffline). Reported so a
+      -- silent take with an offline amp sim stops looking like a dead source.
+      local take_fx = {}
+      for fi = 0, reaper.TakeFX_GetCount(take) - 1 do
+        local _, tfx_name = reaper.TakeFX_GetFXName(take, fi, "")
+        take_fx[#take_fx + 1] = {
+          index = fi, name = tfx_name,
+          offline = reaper.TakeFX_GetOffline(take, fi) and true or false,
+          bypassed = not reaper.TakeFX_GetEnabled(take, fi),
+        }
+      end
+      entry.take_fx = take_fx
     end
     items[#items + 1] = entry
   end
@@ -4992,6 +5058,11 @@ if _G.REAPER_BRIDGE_SELFTEST then
     split_render_target = split_render_target,
     reload_verdict = reload_verdict,
     automation = automation,
+    -- Exported 2026-09-01 so handler-level reads can be covered offline. Until
+    -- now the seam carried only pure helpers, so `get_items` and the rest of
+    -- the diagnostic surface had NO lua coverage at all -- the offline probe
+    -- work is what surfaced that gap.
+    handlers = handlers,
   }
 end
 

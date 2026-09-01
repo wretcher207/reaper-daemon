@@ -122,6 +122,12 @@ stored in the project and reads back whether or not it is in force; when
 instead, so the number alone does not tell you what is playing. Check the flag
 before treating the rate as the session's.
 
+Each FX entry carries `offline` and `bypassed` alongside `name`, `index`,
+`api_index`, and `scope` (added 2026-09-01, from `TrackFX_GetOffline` and
+`TrackFX_GetEnabled` — both authoritative reads, unlike item offline state).
+An offline FX is loaded but not processing: it renders silence and reports no
+parameters, which used to look identical to a working plugin from here.
+
 ### get_fx_parameters
 ```json
 { "target_track_name": "Bass", "fx_name_contains": "EQ",
@@ -248,6 +254,26 @@ Item inventory for one track: per item `position`, `length`, `muted`,
 `source_length`, and `source_readable` — an `io.open` check made from INSIDE
 REAPER's process, which tests the file access REAPER actually has (an outside
 shell's check can pass while REAPER's fails, or vice versa).
+
+Also `source_channels`, `source_sample_rate`, `source_chunk_line` (just the
+`SOURCE` header line from the item chunk), and `take_fx` — every take FX with
+`offline` and `bypassed`, both read from `TakeFX_GetOffline`/`GetEnabled`.
+
+**`source_state` is INFERRED, not read.** REAPER exposes no ReaScript call for
+media-item offline state; the only `*_GetOffline` functions are `TrackFX_` and
+`TakeFX_`, which are about plugins. `source_state_inferred: true` ships beside
+it so nothing mistakes it for an API read. Values:
+
+| `source_state` | Means | Signal |
+| --- | --- | --- |
+| `loaded` | REAPER has the audio | sample rate or length is non-zero |
+| `offline` | REAPER is not loading media that is right there | rate 0 AND length 0, file readable |
+| `unresolved` | Missing or unreachable media | rate 0 AND length 0, file NOT readable |
+| `midi` | In-project MIDI, which has no sample rate by nature | `source_type` is MIDI/MIDIPOOL |
+
+`offline` and `unresolved` are deliberately separate: identical numbers, very
+different fixes. Measured live on drones.rpp 2026-09-01 — offline items report
+length 0 and rate 0 while the same file reads 48000 Hz / 27.73 s off disk.
 
 ### save_project
 Gated — requires `allow_risk_level_3: true` in `bridge_config.json`, or the

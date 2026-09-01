@@ -1398,5 +1398,118 @@ eq(ecf(dup_err, "MISSING"), "BAD_PAYLOAD", "duplicate envelope targets are refus
 eq(pcall(automation_transaction, { payload = { writes = {} } }), false,
    "empty transaction refuses")
 
+-- get_items offline probe (2026-09-01). REAPER exposes NO ReaScript call for
+-- media-item offline state -- the only *_GetOffline functions are TrackFX and
+-- TakeFX, which are about plugins. So get_items reports candidate indirect
+-- signals raw and never fabricates a boolean. These checks pin that contract:
+-- the probe fields are present and passed through untouched, and take-FX
+-- offline (which IS authoritative) is reported per FX.
+--
+-- This is also the first handler-level lua coverage in this file. Everything
+-- above tests pure helpers; `handlers` was added to the selftest seam because
+-- get_items had none, which is how the probe shipped untested the first time.
+-- Wrapped in a function, not a do-block: this file is at Lua's 200-local
+-- limit for the main chunk (the same wall reaper_agent_bridge.lua hit), and
+-- do-block locals still count against it. A function gets its own budget.
+;(function()
+  local fake_item, fake_take, fake_src = "item-0", "take-0", "src-0"
+  _G.reaper.GetMasterTrack = function() return "master-object" end
+  _G.reaper.CountTracks = function() return 1 end
+  _G.reaper.GetTrack = function(_, i) return i == 0 and "track-object" or nil end
+  _G.reaper.GetTrackName = function() return true, "L" end
+  _G.reaper.CountTrackMediaItems = function() return 1 end
+  _G.reaper.GetTrackMediaItem = function() return fake_item end
+  _G.reaper.GetActiveTake = function() return fake_take end
+  _G.reaper.IsMediaItemSelected = function() return false end
+  _G.reaper.GetMediaItemInfo_Value = function(_, key)
+    if key == "D_POSITION" then return 4.0 end
+    if key == "D_LENGTH" then return 2.5 end
+    if key == "B_MUTE" then return 0 end
+    if key == "D_VOL" then return 1.0 end
+    return 0
+  end
+  _G.reaper.GetSetMediaItemTakeInfo_String = function() return true, "guitar L" end
+  _G.reaper.GetMediaItemTake_Source = function() return fake_src end
+  _G.reaper.GetMediaSourceType = function() return "WAVE" end
+  _G.reaper.GetMediaSourceFileName = function() return "" end
+  _G.reaper.GetMediaSourceLength = function() return 2.5, false end
+  _G.reaper.GetMediaSourceNumChannels = function() return 2 end
+  _G.reaper.GetMediaSourceSampleRate = function() return 48000 end
+  _G.reaper.GetItemStateChunk = function()
+    return true, "<ITEM\nPOSITION 4\n<SOURCE WAVE\nFILE \"guitar-L.wav\"\n>\n>"
+  end
+  _G.reaper.TakeFX_GetCount = function() return 2 end
+  _G.reaper.TakeFX_GetFXName = function(_, i)
+    return true, i == 0 and "VST3: thall amp" or "VST3: mixIR3"
+  end
+  _G.reaper.TakeFX_GetOffline = function(_, i) return i == 1 end
+  _G.reaper.TakeFX_GetEnabled = function(_, i) return i == 0 end
+
+  local got = B.handlers.get_items({ payload = { target_track_name = "L" } })
+  eq(got.item_count, 1, "get_items counts the track's items")
+  eq(got.track.name, "L", "get_items reports the resolved track name")
+  local it = got.items[1]
+  eq(it.take_name, "guitar L", "get_items reports the take name")
+  eq(it.source_channels, 2, "offline probe reports source channel count")
+  eq(it.source_sample_rate, 48000, "offline probe reports source sample rate")
+  eq(it.source_chunk_line, "SOURCE WAVE",
+     "offline probe extracts only the SOURCE header line, not the whole chunk")
+  eq(#it.take_fx, 2, "get_items reports every take FX")
+  eq(it.take_fx[1].name, "VST3: thall amp", "take FX carries its plugin name")
+  eq(it.take_fx[1].offline, false, "an online take FX reports offline=false")
+  eq(it.take_fx[2].offline, true, "an offline take FX reports offline=true")
+  eq(it.take_fx[1].bypassed, false, "an enabled take FX reports bypassed=false")
+  eq(it.take_fx[2].bypassed, true, "a disabled take FX reports bypassed=true")
+  -- source_state is INFERRED (REAPER exposes no item-offline API), so every
+  -- branch is pinned. The live signal these encode, measured on drones.rpp:
+  -- an unloaded source reports length 0 and rate 0 while its file still opens.
+  eq(it.source_state, "loaded", "a source with a real rate reports loaded")
+  eq(it.source_state_inferred, true, "source_state is flagged as inferred, not read")
+
+  -- 0 rate + 0 length + a readable file is REAPER declining to load media
+  -- that is right there. That is offline, and it is the case David hit.
+  _G.reaper.GetMediaSourceSampleRate = function() return 0 end
+  _G.reaper.GetMediaSourceLength = function() return 0.0, false end
+  -- source_readable is a REAL io.open, so the readable case needs a real file.
+  -- That is the point: it tests the access REAPER's own process has.
+  local present = join(sandbox, "present-source.wav")
+  local pf = assert(io.open(present, "wb")); pf:write("RIFF"); pf:close()
+  _G.reaper.GetMediaSourceFileName = function() return present end
+  local off = B.handlers.get_items({ payload = { target_track_name = "L" } })
+  eq(off.items[1].source_state, "offline",
+     "0 rate + 0 length + a readable file infers offline")
+
+  -- Same 0/0 numbers, but the file does NOT open: that is missing media, a
+  -- different problem with a different fix. Collapsing the two would send
+  -- someone hunting a preference when their drive is unmounted.
+  _G.reaper.GetMediaSourceFileName = function() return "C:/gone/missing.wav" end
+  local gone = B.handlers.get_items({ payload = { target_track_name = "L" } })
+  eq(gone.items[1].source_readable, false, "a missing file is not readable")
+  eq(gone.items[1].source_state, "unresolved",
+     "0 rate + 0 length + an unreadable file is unresolved, NOT offline")
+
+  -- MIDI has no sample rate by nature and must never be called offline.
+  _G.reaper.GetMediaSourceType = function() return "MIDI" end
+  local midi = B.handlers.get_items({ payload = { target_track_name = "L" } })
+  eq(midi.items[1].source_state, "midi",
+     "an in-project MIDI source is excluded, not mislabelled offline")
+  _G.reaper.GetMediaSourceType = function() return "WAVE" end
+  _G.reaper.GetMediaSourceSampleRate = function() return 48000 end
+  _G.reaper.GetMediaSourceLength = function() return 2.5, false end
+  _G.reaper.GetMediaSourceFileName = function() return "" end
+
+  -- A source-less take (empty/MIDI item) must not crash the probe.
+  _G.reaper.GetMediaItemTake_Source = function() return nil end
+  local no_src = B.handlers.get_items({ payload = { target_track_name = "L" } })
+  eq(no_src.items[1].source_channels, nil, "a take with no source reports no channels")
+  eq(#no_src.items[1].take_fx, 2, "take FX are still reported without a source")
+
+  -- A take-less item (empty item) must not crash either.
+  _G.reaper.GetActiveTake = function() return nil end
+  local no_take = B.handlers.get_items({ payload = { target_track_name = "L" } })
+  eq(no_take.items[1].take_fx, nil, "an item with no take reports no take FX")
+  eq(no_take.items[1].position, 4.0, "an item with no take still reports its position")
+end)()
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))
