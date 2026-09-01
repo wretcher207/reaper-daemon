@@ -1532,5 +1532,75 @@ eq(pcall(automation_transaction, { payload = { writes = {} } }), false,
   eq(no_take.items[1].position, 4.0, "an item with no take still reports its position")
 end)()
 
+;(function()
+-- set_media_offline_when_inactive (2026-09-01). The risk gate and the
+-- read-back are the safety story: this writes a persistent REAPER preference,
+-- not project state, so a silent no-op must never look like success.
+local h = B.handlers.set_media_offline_when_inactive
+local function err(payload, dry)
+  local ok, e = pcall(h, { payload = payload, dry_run = dry })
+  eq(ok, false, "expected a refusal")
+  return tostring(e)
+end
+
+B.config.allow_risk_level_3 = true
+ok(err({}):find("BAD_PAYLOAD", 1, true) ~= nil,
+   "a missing `enabled` is refused rather than assumed")
+ok(err({ enabled = "false" }):find("BAD_PAYLOAD", 1, true) ~= nil,
+   "the string \"false\" is refused, not treated as a boolean")
+
+B.config.allow_risk_level_3 = false
+ok(err({ enabled = false }):find("PREFERENCE_BLOCKED", 1, true) ~= nil,
+   "writing a REAPER preference is gated at risk level 3")
+
+-- The gate is checked BEFORE dry_run on purpose: a dry run of a blocked
+-- operation must report that it is blocked, not preview a write that cannot
+-- happen.
+ok(err({ enabled = false }, true):find("PREFERENCE_BLOCKED", 1, true) ~= nil,
+   "dry_run does not bypass the gate")
+
+B.config.allow_risk_level_3 = true
+local saved_set = _G.reaper.SNM_SetIntConfigVar
+_G.reaper.SNM_SetIntConfigVar = nil
+ok(err({ enabled = false }):find("SWS_REQUIRED", 1, true) ~= nil,
+   "no SWS is a typed refusal, not a crash")
+
+-- offlineinact is treated as a whole value, not a bitfield: REAPER's encoding
+-- is not documented in the ReaScript surface, and an earlier cut that assumed
+-- bit 0 was the enable made the writer disagree with the reader. Off is 0.
+local written = nil
+local cfg = "3"
+_G.reaper.SNM_SetIntConfigVar = function(_, v) written = v; cfg = tostring(v) end
+_G.reaper.get_config_var_string = function() return true, cfg end
+local res = h({ payload = { enabled = false } })
+eq(written, 0, "turning it off writes 0, with no guess about a bit layout")
+eq(res.before, true, "the result reports the value it found")
+eq(res.after, false, "the result reports the value it read back")
+eq(res.raw_before, 3, "raw_before is returned so the prior value can be restored")
+-- Restoring by raw is what makes an off/on round trip lossless.
+local res2 = h({ payload = { enabled = true, raw = 3 } })
+eq(written, 3, "enabling with an explicit raw restores that exact value")
+eq(res2.after, true, "re-enabling reads back as on")
+local res3 = h({ payload = { enabled = false } })
+eq(res3.after, false, "off again")
+local res4 = h({ payload = { enabled = true } })
+eq(written, 1, "enabling from 0 with no raw falls back to 1")
+eq(res4.after, true, "the fallback still reads back as on")
+
+-- dry_run previews without writing.
+written = nil
+local dry = h({ payload = { enabled = false }, dry_run = true })
+eq(dry.dry_run, true, "dry_run is reported")
+eq(dry.would_set, false, "dry_run reports what it would set")
+eq(written, nil, "dry_run writes nothing")
+
+-- A setter that silently no-ops must be caught by the read-back, not returned
+-- as success. This is the failure the read-back exists for.
+_G.reaper.SNM_SetIntConfigVar = function() end
+ok(err({ enabled = false }):find("PREFERENCE_NOT_APPLIED", 1, true) ~= nil,
+   "a silent no-op setter is caught by reading the value back")
+_G.reaper.SNM_SetIntConfigVar = saved_set
+end)()
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))

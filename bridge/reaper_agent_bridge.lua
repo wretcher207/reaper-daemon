@@ -4326,6 +4326,11 @@ local NO_UNDO_BLOCK = {
   -- snapshot_track_state only reads project state; its write is a state file
   -- outside the project.
   snapshot_track_state = true,
+  -- Writes a REAPER application preference, not project state. Wrapping it in
+  -- an Undo block would put a spurious entry in the user's project history
+  -- that undoes nothing. It honors dry_run in its own handler instead, the
+  -- same arrangement reload_bridge uses.
+  set_media_offline_when_inactive = true,
   -- Panel support (P3-002): both are pure reads.
   get_selected_track = true,
   get_capture_preflight = true,
@@ -4645,6 +4650,81 @@ do
 -- "are these items offline / do their sources resolve" was unanswerable.
 -- source_readable is io.open FROM INSIDE REAPER'S PROCESS — it tests the
 -- file access REAPER actually has, which an outside shell cannot.
+-- Turn REAPER's "set media items offline when application is not active"
+-- preference (`offlineinact`) on or off. Added 2026-09-01, after that
+-- preference was found to make EVERY backgrounded bridge read see unloaded
+-- media -- and every bridge read is backgrounded, because the CLI, the MCP
+-- server and the console sidecar are all other processes.
+--
+-- Deliberately NOT a general set_config_var. An arbitrary "write any REAPER
+-- preference" command is a footgun with no upside here: one named preference
+-- with a known hazard is the whole requirement.
+--
+-- Needs SWS (SNM_SetIntConfigVar); there is no native setter. Gated at risk
+-- level 3 because it changes a persistent application preference, not project
+-- state -- the same bar as save_project.
+handlers.set_media_offline_when_inactive = function(command)
+  local payload = command.payload or {}
+  if payload.enabled == nil then
+    error("BAD_PAYLOAD: set_media_offline_when_inactive requires enabled: true|false")
+  end
+  if type(payload.enabled) ~= "boolean" then
+    error("BAD_PAYLOAD: enabled must be a boolean, not " .. type(payload.enabled))
+  end
+  if config.allow_risk_level_3 ~= true then
+    error("PREFERENCE_BLOCKED: changing REAPER preferences is gated; set "
+      .. "allow_risk_level_3 true in bridge_config.json")
+  end
+  if not reaper.SNM_SetIntConfigVar then
+    error("SWS_REQUIRED: SNM_SetIntConfigVar is unavailable. REAPER exposes no "
+      .. "native config-var setter, so this needs SWS installed.")
+  end
+
+  local before = media_offline_when_inactive()
+  local want = payload.enabled
+  if command.dry_run or payload.dry_run then
+    return {
+      dry_run = true, would_run = "set_media_offline_when_inactive",
+      before = before, would_set = want,
+    }
+  end
+
+  -- `offlineinact` is treated as a whole value, NOT as a bitfield. An earlier
+  -- cut of this assumed bit 0 was the enable and preserved the higher bits;
+  -- the read-back then disagreed with the reader (which calls any non-zero
+  -- "on"), because that bit layout was a guess. REAPER's exact encoding is
+  -- undocumented in the ReaScript surface, so nothing here pretends to know
+  -- it: off is 0, and `raw_before` is returned so the previous value can be
+  -- restored exactly.
+  --
+  -- Three returns, not two: pcall's own ok, then get_config_var_string's
+  -- retval boolean, THEN the string. Dropping one shifts `raw` to a boolean
+  -- and tonumber gives nil.
+  local _, _, raw = pcall(reaper.get_config_var_string, "offlineinact")
+  local current = tonumber(raw) or 0
+  -- Turning it back on restores the caller's exact prior value when they pass
+  -- one, so a round trip through off does not quietly change which media
+  -- REAPER unloads.
+  local next_value = 0
+  if want then next_value = tonumber(payload.raw) or (current ~= 0 and current) or 1 end
+  reaper.SNM_SetIntConfigVar("offlineinact", next_value)
+
+  -- Read it back rather than trusting the write. If SWS silently no-ops, the
+  -- caller must hear about it here, not discover it in a bad measurement.
+  local after = media_offline_when_inactive()
+  if after ~= want then
+    error("PREFERENCE_NOT_APPLIED: wrote offlineinact=" .. tostring(next_value)
+      .. " but it reads back as " .. tostring(after))
+  end
+  return {
+    preference = "offlineinact",
+    before = before, after = after,
+    raw_before = current, raw_after = next_value,
+    note = "Live now. REAPER persists preferences to reaper.ini on exit, so "
+      .. "this survives a clean quit; a crash before exit loses it.",
+  }
+end
+
 handlers.get_items = function(command)
   local track, track_index = find_track(command.payload or {})
   local items = {}
@@ -5097,6 +5177,9 @@ if _G.REAPER_BRIDGE_SELFTEST then
     split_render_target = split_render_target,
     reload_verdict = reload_verdict,
     automation = automation,
+    -- Exported 2026-09-01 so the risk gate on preference writes is testable
+    -- offline: the gate is the whole safety story for that command.
+    config = config,
     -- Exported 2026-09-01 so handler-level reads can be covered offline. Until
     -- now the seam carried only pure helpers, so `get_items` and the rest of
     -- the diagnostic surface had NO lua coverage at all -- the offline probe

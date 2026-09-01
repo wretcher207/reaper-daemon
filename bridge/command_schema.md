@@ -291,6 +291,38 @@ background, so it always catches them offline. Check
 `get_context.media_offline_when_inactive` before treating `source_state:
 "offline"` as a property of the media rather than of the preference.
 
+### set_media_offline_when_inactive
+Gated — requires `allow_risk_level_3: true`, or the reply is
+`PREFERENCE_BLOCKED`. Needs SWS (`SNM_SetIntConfigVar`); REAPER exposes no
+native config-var setter, so without it the reply is `SWS_REQUIRED`.
+```json
+{ "enabled": false }
+```
+Turns REAPER's "set media items offline when application is not active"
+preference (`offlineinact`) on or off. `enabled` is required and must be a real
+boolean — a missing or string value is `BAD_PAYLOAD`, never an assumption.
+
+This is deliberately NOT a general config-var setter. One named preference with
+a known hazard is the whole requirement; an arbitrary "write any REAPER
+preference" command is a footgun with no upside.
+
+The value is treated as a whole, not a bitfield: off writes 0, and the reply
+carries `raw_before` so the previous value can be restored exactly via
+`{ "enabled": true, "raw": <raw_before> }`. REAPER's encoding for this key is
+not documented in the ReaScript surface, and an earlier cut that assumed bit 0
+was the enable made the writer disagree with the reader.
+
+The write is always read back. If SWS silently no-ops, the reply is
+`PREFERENCE_NOT_APPLIED` rather than a false success.
+
+Not wrapped in an Undo block: it changes an application preference, not project
+state, so an undo entry would be a spurious history item that undoes nothing.
+It honors `dry_run` in its own handler instead, and reports `before` alongside
+`would_set`.
+
+**Preferences persist to `reaper.ini` on exit**, so a change survives a clean
+quit and is lost by a crash before one.
+
 ### save_project
 Gated — requires `allow_risk_level_3: true` in `bridge_config.json`, or the
 reply is `SAVE_BLOCKED`. No payload.
