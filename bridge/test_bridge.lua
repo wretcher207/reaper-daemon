@@ -577,6 +577,27 @@ v = pv(false, false, nil)
 eq(v.capture_allowed, false, "gated + no SWS: blocked")
 ok(#v.blockers == 2 and #v.warnings == 0, "gated + no SWS: both blockers")
 
+-- offlineinact (2026-09-01). REAPER unloading media when it loses focus makes
+-- every backgrounded read see unloaded sources -- and EVERY bridge command is
+-- backgrounded, because the CLI, the MCP server and the console sidecar are
+-- all other processes. It warns rather than blocks: it is proven to affect
+-- reads, not proven to break a render.
+v = pv(true, true, true, true)
+eq(v.capture_allowed, true, "offline-when-inactive warns, it does not block")
+eq(v.warnings[1].code, "media_offline_when_inactive",
+   "offline-when-inactive warning is typed")
+v = pv(true, true, true, false)
+eq(#v.warnings, 0, "preference off: no warning")
+-- Unreadable must not masquerade as off. nil is 'we do not know', and a
+-- reassuring silence there is exactly the failure this field exists to stop.
+v = pv(true, true, true, nil)
+eq(#v.warnings, 0, "unknown preference stays silent rather than guessing")
+-- The warning survives alongside a blocker; it is not swallowed by one.
+v = pv(false, true, true, true)
+eq(v.capture_allowed, false, "a blocker still blocks with the warning present")
+eq(v.warnings[1].code, "media_offline_when_inactive",
+   "the warning is reported even when capture is blocked")
+
 -- Folder subtree resolution. A folder parent has zero media items, so it takes
 -- the item-less isolation path; soloing it ALONE mutes the children that feed
 -- it and the bus renders digital silence at every cursor position. Measured on

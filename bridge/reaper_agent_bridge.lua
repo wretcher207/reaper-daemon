@@ -654,6 +654,27 @@ local function get_markers_regions()
   return markers, regions
 end
 
+-- REAPER's "set media items offline when application is not active"
+-- preference (reaper.ini key `offlineinact`). Added 2026-09-01 after David's
+-- guitar items were found reading source_state=offline: every bridge command
+-- arrives while REAPER is in the BACKGROUND (the CLI, the MCP server and the
+-- console sidecar all run in another process), so with this preference on,
+-- every read and every render the daemon takes sees unloaded media. That is
+-- not a cosmetic detail -- it is a measurement hazard for the whole surface.
+--
+-- pcall + a nil guard because get_config_var_string is not in every REAPER
+-- build's ReaScript surface. Unknown is reported as nil, never as false: a
+-- missing reading must not look like a reassuring answer.
+local function media_offline_when_inactive()
+  local ok, _, value = pcall(reaper.get_config_var_string, "offlineinact")
+  if not ok or value == nil or value == "" then return nil end
+  local n = tonumber(value)
+  if n == nil then return nil end
+  -- Bit 0 is the enable. Non-zero means REAPER unloads media when it loses
+  -- focus; the higher bits pick which media, which does not change the hazard.
+  return n ~= 0
+end
+
 local function command_get_context(command)
   local payload = command.payload or {}
   local cursor = reaper.GetCursorPosition()
@@ -668,6 +689,7 @@ local function command_get_context(command)
     -- rate instead, so the number alone does not say what is playing.
     sample_rate = reaper.GetSetProjectInfo(0, "PROJECT_SRATE", 0, false),
     sample_rate_overridden = reaper.GetSetProjectInfo(0, "PROJECT_SRATE_USE", 0, false) == 1,
+    media_offline_when_inactive = media_offline_when_inactive(),
     cursor = { seconds = cursor, bar = bar_from_time(cursor) },
     time_selection = get_time_selection(),
     transport = get_transport(),
@@ -3607,8 +3629,24 @@ end
 -- render_preferences is true only when both modal-prevention bits are already
 -- enabled, false when SWS can read and force them, and nil when SWS cannot
 -- guarantee a non-blocking render. Unknown preferences fail closed.
-local function preflight_verdict(allow_risk, sws_installed, render_preferences)
+-- media_offline_inactive is REAPER's `offlineinact` preference: true when it
+-- unloads media on losing focus, nil when unreadable. It is a WARNING, not a
+-- blocker -- measured on 2026-09-01 it demonstrably makes every backgrounded
+-- READ see unloaded sources, but no render has yet been proven to fail because
+-- of it, and this repo does not gate on unproven causes.
+local function preflight_verdict(allow_risk, sws_installed, render_preferences,
+                                 media_offline_inactive)
   local blockers, warnings = {}, {}
+  if media_offline_inactive == true then
+    warnings[#warnings + 1] = {
+      code = "media_offline_when_inactive",
+      message = "REAPER's \"set media items offline when application is not "
+        .. "active\" preference is ON. Every bridge command arrives while "
+        .. "REAPER is in the background, so reads report source_state=offline "
+        .. "and a capture may measure unloaded media. Turn it off in "
+        .. "Preferences > Audio if a measurement looks empty or silent.",
+    }
+  end
   if not allow_risk then
     blockers[#blockers + 1] = {
       code = "capture_gated",
@@ -3691,7 +3729,8 @@ local function command_get_capture_preflight(command)
     end
   end
   local verdict = preflight_verdict(
-    config.allow_risk_level_3 == true, sws_installed, render_preferences)
+    config.allow_risk_level_3 == true, sws_installed, render_preferences,
+    media_offline_when_inactive())
 
   local target = nil
   if payload.target_track_name or payload.target_track_guid

@@ -122,6 +122,15 @@ stored in the project and reads back whether or not it is in force; when
 instead, so the number alone does not tell you what is playing. Check the flag
 before treating the rate as the session's.
 
+`media_offline_when_inactive` reports REAPER's "set media items offline when
+application is not active" preference (`offlineinact`). **When it is true,
+every bridge read sees unloaded media**, because every command arrives from
+another process (CLI, MCP server, console sidecar) while REAPER is in the
+background. Sources then report `source_state: "offline"` and a capture may
+measure unloaded media. `nil` means the preference could not be read, which is
+NOT the same as off. It is read live, not from `reaper.ini` — REAPER only
+writes that file on exit, so the on-disk copy is stale while REAPER runs.
+
 Each FX entry carries `offline` and `bypassed` alongside `name`, `index`,
 `api_index`, and `scope` (added 2026-09-01, from `TrackFX_GetOffline` and
 `TrackFX_GetEnabled` — both authoritative reads, unlike item offline state).
@@ -274,6 +283,13 @@ it so nothing mistakes it for an API read. Values:
 `offline` and `unresolved` are deliberately separate: identical numbers, very
 different fixes. Measured live on drones.rpp 2026-09-01 — offline items report
 length 0 and rate 0 while the same file reads 48000 Hz / 27.73 s off disk.
+
+**Reading `offline` usually says more about focus than about the project.**
+With `media_offline_when_inactive` on, items go offline the moment REAPER loses
+focus and come back when it regains it — and the bridge always reads from the
+background, so it always catches them offline. Check
+`get_context.media_offline_when_inactive` before treating `source_state:
+"offline"` as a property of the media rather than of the preference.
 
 ### save_project
 Gated — requires `allow_risk_level_3: true` in `bridge_config.json`, or the
