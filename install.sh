@@ -41,5 +41,9 @@ Done. (Re)start REAPER, then verify the bridge is live:
   $PY reaperd.py status
   $PY reaperd.py send commands/examples/get_context.json --wait
 
+Rendering, capture (so any measurement), saving the project, and writing
+REAPER preferences are off until you allow them (see the line above):
+  $PY setup/install.py --allow-disk-writes
+
 Agent docs: $INSTALL_DIR/AGENTS.md
 EOF

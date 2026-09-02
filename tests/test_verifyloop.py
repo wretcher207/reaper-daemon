@@ -61,7 +61,8 @@ def _write_wav(path, seconds=0.05, rate=8000, amplitude=0.5):
 
 PREFLIGHT_OK = {"ok": True, "type": "get_capture_preflight", "data": {
     "capture_allowed": True, "blockers": [], "warnings": [],
-    "risk_gate": {"allow_risk_level_3": True, "requires_restart_to_change": True},
+    "risk_gate": {"allow_risk_level_3": True, "requires_restart_to_change": False,
+                  "apply_change_with": "reload_bridge"},
     "sws_installed": True, "render_autoclose": True}}
 
 PREFLIGHT_GATED = {"ok": True, "type": "get_capture_preflight", "data": {
@@ -69,7 +70,8 @@ PREFLIGHT_GATED = {"ok": True, "type": "get_capture_preflight", "data": {
     "blockers": [{"code": "capture_gated",
                   "message": "allow_risk_level_3 is false"}],
     "warnings": [],
-    "risk_gate": {"allow_risk_level_3": False, "requires_restart_to_change": True},
+    "risk_gate": {"allow_risk_level_3": False, "requires_restart_to_change": False,
+                  "apply_change_with": "reload_bridge"},
     "sws_installed": True, "render_autoclose": True}}
 
 
@@ -120,16 +122,16 @@ def _capture_responder(lufs=-14.1, raw="LUFSI:-14.10;TRUEPEAK:-3.20;LRA:4.50",
 
 # --- refusals -------------------------------------------------------------
 
-def test_preflight_blocked_refuses_with_blocker_codes_and_restart_note(root):
+def test_preflight_blocked_refuses_with_blocker_codes_and_reload_note(root):
     fake_bridge_script(root, [PREFLIGHT_GATED])
     res = verifyloop.measure(_sender(root), "Bass",
                              _analyzer_loader=_no_analyzer)
     assert res["ok"] is False
     assert res["error"]["code"] == "CAPTURE_BLOCKED"
     assert [b["code"] for b in res["blockers"]] == ["capture_gated"]
-    assert res["risk_gate"]["requires_restart_to_change"] is True
-    assert "requires_restart_to_change" in res["error"]["details"]
-    assert "RESTART REAPER" in res["error"]["details"]
+    assert res["risk_gate"]["apply_change_with"] == "reload_bridge"
+    assert "--allow-disk-writes" in res["error"]["details"]
+    assert "reload_bridge" in res["error"]["details"]
 
 
 def test_preflight_transport_failure_is_reported(root):

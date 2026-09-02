@@ -557,6 +557,10 @@ local pv = B.preflight_verdict
 local v = pv(false, true, true)
 eq(v.capture_allowed, false, "risk gate off blocks capture")
 eq(v.blockers[1].code, "capture_gated", "risk gate blocker is typed")
+-- The message used to say "restart REAPER (there is no reload command)", which
+-- was wrong: reload_bridge re-reads bridge_config.json. Users acted on it.
+ok(v.blockers[1].message:find("reload_bridge", 1, true) ~= nil,
+   "the gate blocker points at reload_bridge, not only a REAPER restart")
 eq(#v.warnings, 0, "autoclose on: no warning")
 v = pv(true, true, true)
 eq(v.capture_allowed, true, "all green allows capture")

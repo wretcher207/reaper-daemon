@@ -13,11 +13,17 @@ Usage:
     python3 setup/install.py --uninstall # remove the managed block
     python3 setup/install.py --bridge-root /path/to/clone
 
+    python3 setup/install.py --allow-disk-writes  # let the agent render,
+                                                  # capture, save, and set
+                                                  # REAPER preferences
+    python3 setup/install.py --no-disk-writes     # turn that back off
+
 After installing, (re)start REAPER, then verify the bridge is live:
     python3 reaperd.py send commands/examples/get_context.json --wait
 """
 
 import argparse
+import json
 import os
 import platform
 import sys
@@ -124,6 +130,89 @@ def write(path, text):
     os.replace(tmp, path)
 
 
+# --- the disk-writes gate (bridge_config.json: allow_risk_level_3) ----------
+#
+# Four commands are gated: render, capture_track_audio, save_project, and
+# set_media_offline_when_inactive. They are grouped because each one writes to
+# disk (a rendered file, a WAV, the .rpp, reaper.ini) and so is the one class of
+# mutation REAPER's undo block cannot take back. Everything else the bridge does
+# is undoable and ungated.
+#
+# The flag lived only in a JSON file nothing in the install path mentioned, so
+# the first a user heard of it was a CAPTURE_BLOCKED error. These helpers let
+# the installer ask once and write the answer.
+
+def config_path(repo_root):
+    return os.path.join(os.path.abspath(repo_root), "bridge", "bridge_config.json")
+
+
+def read_config(repo_root):
+    """Parse bridge_config.json, or return None when it is absent/unreadable.
+
+    Absent is normal: the bridge writes the file itself on first load.
+    """
+    path = config_path(repo_root)
+    if not os.path.isfile(path):
+        return None
+    try:
+        parsed = json.loads(read(path))
+    except (OSError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def disk_writes_enabled(repo_root):
+    """True / False, or None when there is no config file to read yet."""
+    config = read_config(repo_root)
+    if config is None:
+        return None
+    return config.get("allow_risk_level_3") is True
+
+
+def set_disk_writes(repo_root, enabled, dry_run=False):
+    """Write allow_risk_level_3, preserving every other key in the file.
+
+    Mirrors the bridge's own defaults when the file does not exist yet, so a
+    pre-REAPER-launch install can still answer the question.
+    """
+    path = config_path(repo_root)
+    config = read_config(repo_root)
+    if config is None:
+        # The bridge re-derives bridge_root from its own location on load, so
+        # this value is a starting point, not a binding one.
+        config = {"bridge_root": os.path.abspath(repo_root),
+                  "poll_interval_seconds": 0.25}
+    config["allow_risk_level_3"] = bool(enabled)
+    if dry_run:
+        print(f"[dry-run] would set allow_risk_level_3={str(bool(enabled)).lower()} in {path}")
+        return
+    write(path, json.dumps(config))
+    print(f"Set allow_risk_level_3={str(bool(enabled)).lower()} in {path}")
+
+
+def print_gate_status(repo_root):
+    """Say where the gate stands and how to change it. Printed on every run."""
+    py = "python" if platform.system() == "Windows" else "python3"
+    state = disk_writes_enabled(repo_root)
+    print()
+    if state is True:
+        print("Rendering, capture, save, and preference writes: ALLOWED.")
+        print(f"  Turn back off with: {py} setup/install.py --no-disk-writes")
+    else:
+        if state is None:
+            print("Rendering, capture, save, and preference writes: off (the")
+            print("bridge writes bridge_config.json the first time it loads).")
+        else:
+            print("Rendering, capture, save, and preference writes: OFF.")
+        print("  That means render, capture_track_audio (so any measurement),")
+        print("  save_project, and set_media_offline_when_inactive are refused.")
+        print("  Track, FX, and automation commands work either way. They are")
+        print("  undoable; these four write to disk.")
+        print(f"  Allow them with: {py} setup/install.py --allow-disk-writes")
+    print("  A change applies when the bridge next loads: send the")
+    print("  reload_bridge command, or restart REAPER.")
+
+
 def strip_block(text):
     """Remove the managed BEGIN..END block, preserve everything else.
 
@@ -189,6 +278,7 @@ def install(repo_root, resource_dir, dry_run=False):
         print("---- block ----")
         print(block, end="")
         print("---- end block ----")
+        print_gate_status(repo_root)
         return 0
 
     write(startup, new_text)
@@ -201,6 +291,7 @@ def install(repo_root, resource_dir, dry_run=False):
     py = "python" if platform.system() == "Windows" else "python3"
     repo = os.path.abspath(repo_root)
     print(f'  cd "{repo}" && {py} reaperd.py send commands/examples/get_context.json --wait')
+    print_gate_status(repo_root)
     return 0
 
 
@@ -239,11 +330,24 @@ def main(argv=None):
                    help="remove the managed auto-start block")
     p.add_argument("--dry-run", action="store_true",
                    help="preview; change nothing")
+    gate = p.add_mutually_exclusive_group()
+    gate.add_argument("--allow-disk-writes", dest="disk_writes",
+                      action="store_true", default=None,
+                      help="let the agent render audio, capture a track for "
+                           "measurement, save the project, and change REAPER "
+                           "preferences (sets allow_risk_level_3 true)")
+    gate.add_argument("--no-disk-writes", dest="disk_writes",
+                      action="store_false",
+                      help="refuse those four commands (the default)")
     args = p.parse_args(argv)
 
     resource_dir = args.resource_dir or find_resource_dir()
     if args.uninstall:
         return uninstall(resource_dir, dry_run=args.dry_run)
+    # The gate flag is usable on its own: `--allow-disk-writes` with no other
+    # argument still refreshes the auto-loader, which is harmless and idempotent.
+    if args.disk_writes is not None:
+        set_disk_writes(args.bridge_root, args.disk_writes, dry_run=args.dry_run)
     return install(args.bridge_root, resource_dir, dry_run=args.dry_run)
 
 

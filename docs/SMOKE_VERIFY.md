@@ -10,9 +10,10 @@ says what "pass" looks like.
 1. Open a project with at least one track that actually plays something —
    ideally a bass or guitar stem with an EQ (ReaEQ is fine) already on it.
    Below, replace `Bass` with your track's real name.
-2. Make sure `bridge/bridge_config.json` has `"allow_risk_level_3": true`.
-   If you just changed it: **restart REAPER** — the bridge reads it once at
-   startup. This is the #1 gotcha.
+2. Make sure `bridge/bridge_config.json` has `"allow_risk_level_3": true`
+   (`python3 setup/install.py --allow-disk-writes` sets it).
+   If you just changed it: **send `reload_bridge`** (or restart REAPER) — the
+   bridge reads the file once per load. This is the #1 gotcha.
 3. Park the edit cursor somewhere the track is actually playing (or make a
    time selection over a good bar or two).
 4. Sanity check from a terminal in the repo folder:

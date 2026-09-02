@@ -1474,8 +1474,10 @@ TOOLS = [
                         "Only isolated_track with isolation_verified=true is per-track "
                         "audio; item-based tracks can report a full_mix fallback. "
                         "Gated: needs allow_risk_level_3=true in "
-                        "bridge/bridge_config.json AND a bridge restart (relaunch "
-                        "REAPER) after changing it. Synchronous — blocks the "
+                        "bridge/bridge_config.json (python3 setup/install.py "
+                        "--allow-disk-writes writes it) AND the change applied by "
+                        "the reload_bridge command, or a REAPER relaunch — the "
+                        "flag is read once per bridge load. Synchronous — blocks the "
                         "bridge for the render duration."),
         "inputSchema": _schema({
             **TRACK_PROPS,

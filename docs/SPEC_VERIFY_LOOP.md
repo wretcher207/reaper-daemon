@@ -46,8 +46,8 @@ Baseline verified 2026-07-23 on David's Windows 11 machine
 - Post Mortem repo is cloned at the sibling path `../post-mortem`, but the
   `postmortem` CLI is **not on PATH** on this machine. Phase 0 installs it.
 - Live REAPER testing requires REAPER running with the bridge loaded AND
-  `allow_risk_level_3: true` in `bridge/bridge_config.json` (read once at
-  startup — changing it requires a REAPER restart). Do NOT assume REAPER is
+  `allow_risk_level_3: true` in `bridge/bridge_config.json` (read once per
+  bridge load — apply a change with `reload_bridge`, or a REAPER restart). Do NOT assume REAPER is
   available; phases 1–3 must be fully testable against the fake bridge.
 
 ## Repo orientation (verified facts, with anchors)
@@ -136,8 +136,8 @@ inside `reaperd.py` if it stays under ~200 lines — your call, log it).
 Behavior:
 
 1. Preflight first: `get_capture_preflight` for the track; refuse with the
-   blocker list if `capture_allowed` is false. Surface `requires_restart_to_change`
-   verbatim when the risk gate is the blocker — users always trip on this.
+   blocker list if `capture_allowed` is false. Surface the risk-gate blocker's
+   message verbatim when the gate is what blocked — users always trip on this.
 2. Resolve capture bounds ONCE and pass them explicitly (`start_seconds`,
    `duration_seconds`) so a later `measure` of the same spot is identical.
    Default duration 10 s (Post Mortem's own single-track default), max 60 for

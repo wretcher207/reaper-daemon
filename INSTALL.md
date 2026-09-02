@@ -98,7 +98,33 @@ Finder/Explorer), then re-run as:
 REAPER_RESOURCE_PATH="<path the user gave>" python3 setup/install.py
 ```
 
-## Phase 5 — Restart REAPER (human step)
+## Phase 5 — Ask about rendering, capture and saving (human step)
+
+Four commands are off by default: `render`, `capture_track_audio` (which every
+measurement depends on), `save_project`, and `set_media_offline_when_inactive`.
+They are grouped because each writes to disk, which is the one thing REAPER's
+undo cannot take back. Everything else — tracks, FX, parameters, automation —
+works either way and is undoable.
+
+Ask the user verbatim:
+
+> Do you want the agent to be able to render audio, capture a track to measure
+> it, save the project over its `.rpp`, and change REAPER preferences? Track,
+> FX and automation commands work either way. These four are separate because
+> they write files to disk, so Ctrl+Z cannot undo them. You can change this
+> any time. Answer yes or no.
+
+- **yes** → run `python3 setup/install.py --allow-disk-writes`
+- **no** → change nothing. Tell them the command above turns it on later.
+
+Every `setup/install.py` run ends by printing where the gate stands, so the
+Phase 4 output already told you the starting state. Read it rather than
+guessing.
+
+Do not decide this for the user, and do not skip the question because the
+answer seems obvious.
+
+## Phase 6 — Restart REAPER (human step)
 
 Tell the user verbatim:
 
@@ -108,7 +134,7 @@ Tell the user verbatim:
 
 Wait for their reply before continuing. Do not assume.
 
-## Phase 6 — Verify the bridge is alive
+## Phase 7 — Verify the bridge is alive
 
 ```bash
 cd "$REPO"
@@ -117,7 +143,7 @@ python3 reaperd.py status
 
 Checkpoints:
 
-- `CONNECTED` → continue to Phase 7.
+- `CONNECTED` → continue to Phase 8.
 - `DEAD` (REAPER not running) → confirm REAPER is actually open; if not, ask
   the user to launch it. If it is open and still DEAD, tell the user to load
   the bridge manually one time:
@@ -128,7 +154,7 @@ Checkpoints:
   managed block in REAPER's `Scripts/__startup.lua`, then stop — something is
   off with the startup hook.
 
-## Phase 7 — Smoke test
+## Phase 8 — Smoke test
 
 ```bash
 cd "$REPO"
@@ -144,7 +170,7 @@ The reply is a single JSON object. Required:
 If `ok` is false or the command times out, surface the error to the user and
 stop. Do not retry — read the error first.
 
-## Phase 8 — Onboard the user
+## Phase 9 — Onboard the user
 
 Pull the project name and track count out of the smoke-test response and tell
 the user verbatim, filling in the values:

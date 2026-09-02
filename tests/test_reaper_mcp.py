@@ -475,13 +475,15 @@ def test_analyze_track_surfaces_postmortem_failure(monkeypatch):
 
 PRE_OK = {"ok": True, "data": {
     "capture_allowed": True, "blockers": [], "warnings": [],
-    "risk_gate": {"allow_risk_level_3": True, "requires_restart_to_change": True},
+    "risk_gate": {"allow_risk_level_3": True, "requires_restart_to_change": False,
+                  "apply_change_with": "reload_bridge"},
     "sws_installed": True, "render_autoclose": True}}
 PRE_GATED = {"ok": True, "data": {
     "capture_allowed": False,
     "blockers": [{"code": "capture_gated", "message": "risk gate off"}],
     "warnings": [],
-    "risk_gate": {"allow_risk_level_3": False, "requires_restart_to_change": True},
+    "risk_gate": {"allow_risk_level_3": False, "requires_restart_to_change": False,
+                  "apply_change_with": "reload_bridge"},
     "sws_installed": True, "render_autoclose": True}}
 CTX = {"ok": True, "data": {"cursor": {"seconds": 2.0, "bar": 1},
                             "time_selection": {"active": False, "start": 0,

@@ -244,12 +244,16 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
             "; ".join(f"{b.get('code')}: {b.get('message')}" for b in blockers)
             or "no blocker detail from preflight")
         if any(b.get("code") == "capture_gated" for b in blockers):
-            # Users always trip on this: the flag is read once at startup.
+            # Users always trip on this: the flag is read once per bridge load,
+            # so writing the file is only half the fix. reload_bridge applies it
+            # without a REAPER restart (risk_gate.apply_change_with names it).
             details += (
-                " | risk_gate.requires_restart_to_change="
-                f"{risk_gate.get('requires_restart_to_change')}: set "
-                "allow_risk_level_3 true in bridge/bridge_config.json, then "
-                "RESTART REAPER — the flag is read once at bridge startup.")
+                " | fix: python3 setup/install.py --allow-disk-writes (or set "
+                "allow_risk_level_3 true in bridge/bridge_config.json by hand), "
+                "then send "
+                f"{risk_gate.get('apply_change_with') or 'reload_bridge'} — the "
+                "flag is read once per bridge load. Restarting REAPER also "
+                "works.")
         return _error("CAPTURE_BLOCKED", details,
                       blockers=blockers, warnings=pdata.get("warnings") or [],
                       risk_gate=risk_gate)

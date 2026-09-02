@@ -309,8 +309,8 @@ mix data (LUFS, true peak, spectrum, stereo image, masking table) to
 diagnose. Mutations are undoable with Ctrl/Cmd+Z (single commands and
 batches are one undo step each; `tune_param` leaves one undo point per
 iteration set); destructive tools ask the model to confirm intent; audio
-capture stays behind the `allow_risk_level_3` config gate (restart REAPER
-after changing it).
+capture stays behind the `allow_risk_level_3` config gate (turn it on with
+`python3 setup/install.py --allow-disk-writes`, then send `reload_bridge`).
 
 FX discovery returns REAPER's real track and FX GUIDs alongside names and
 indices. Use the GUIDs as stable identity when planning a later change: names

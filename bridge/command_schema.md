@@ -205,6 +205,9 @@ Or `"length_bars": 8` instead of `end`. `{ "clear": true }` clears it.
 
 ### render
 Gated — requires `allow_risk_level_3: true` in `bridge_config.json`.
+(`python3 setup/install.py --allow-disk-writes` writes that for you. The flag
+is read once per bridge load, so apply a change with `reload_bridge`; a REAPER
+restart also works but is not required. Same for every gate below.)
 ```json
 { "output_file": "/path/to/out.wav", "bounds": "time_selection" }
 ```
@@ -432,8 +435,10 @@ carries that track's summary, `item_count`, and `expected_capture_scope`.
 Returns `capture_allowed` (false only for hard blockers), `blockers[]` and
 `warnings[]` (each `{ code, message }` — `capture_gated` blocks;
 `render_hang_risk` warns when auto-close can be neither observed on nor
-forced), `risk_gate` (`allow_risk_level_3`, `requires_restart_to_change`:
-the flag is read once at REAPER startup), `sws_installed`, and
+forced), `risk_gate` (`allow_risk_level_3`; `requires_restart_to_change`,
+now always `false`, kept for older callers; and `apply_change_with`,
+`"reload_bridge"` — the flag is read once per bridge load, and `reload_bridge`
+starts a fresh instance that re-reads the config), `sws_installed`, and
 `render_autoclose` (true/false, or null when unreadable without SWS).
 
 ---

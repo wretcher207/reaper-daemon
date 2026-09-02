@@ -3667,8 +3667,10 @@ local function preflight_verdict(allow_risk, sws_installed, render_preferences,
     blockers[#blockers + 1] = {
       code = "capture_gated",
       message = "allow_risk_level_3 is false in bridge_config.json. It is read "
-        .. "once at REAPER startup: enable it, then restart REAPER (there is "
-        .. "no reload command).",
+        .. "once when the bridge loads, so a change needs the running instance "
+        .. "replaced: enable it (setup/install.py --allow-disk-writes writes "
+        .. "the file for you), then send reload_bridge. A REAPER restart works "
+        .. "too but is not required.",
     }
   end
   local can_force = sws_installed and render_preferences ~= nil
@@ -3767,7 +3769,12 @@ local function command_get_capture_preflight(command)
     warnings = verdict.warnings,
     risk_gate = {
       allow_risk_level_3 = config.allow_risk_level_3 == true,
-      requires_restart_to_change = true,
+      -- The flag really is read once per load, but reload_bridge starts a
+      -- fresh instance that re-reads bridge_config.json, so a REAPER restart
+      -- was never the only way to apply a change. Kept as a key (now false)
+      -- rather than removed: verifyloop.py and the MCP server read it.
+      requires_restart_to_change = false,
+      apply_change_with = "reload_bridge",
     },
     sws_installed = sws_installed,
     render_autoclose = autoclose,
