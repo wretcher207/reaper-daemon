@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.17.0
+-- @version 3.18.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -13,6 +13,25 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.18.0: The bridge script CHANGED. The commands that write to disk are no
+--   longer one all-or-nothing switch. allow_risk_level_3 gated render, capture,
+--   save_project and the preference write together, so letting an agent MEASURE
+--   your mix meant also letting it overwrite your project file. Three keys now:
+--   allow_audio_writes (render, capture_track_audio -- writes new files where
+--   the caller asked), allow_project_save (overwrites the open .rpp), and
+--   allow_preference_writes (set_media_offline_when_inactive). Measuring needs
+--   the first alone. allow_risk_level_3 stays the FALLBACK for any key not in
+--   your config, so an existing bridge_config.json behaves exactly as it did
+--   and that key still means all of it; a specific key wins in both directions,
+--   and only a real boolean counts, so a hand-edited "true" string falls back
+--   rather than being coerced. Refusals now name the key that blocked them.
+--   get_capture_preflight's risk_gate carries the resolved gates plus
+--   capture_gate. Also a correction: it used to say the flag needed a REAPER
+--   restart and that no reload command existed. reload_bridge re-reads the
+--   config and always did, so requires_restart_to_change is now false and
+--   apply_change_with names reload_bridge. Clone-side, setup/install.py grew a
+--   flag per gate and now prints where all three stand on every run, and the
+--   install prompt asks instead of deciding for you.
 --   3.17.0: The bridge script CHANGED this time -- ReaPack users get new
 --   commands, not just a version number. REAPER's "set media items offline
 --   when application is not active" preference unloads disk media whenever
