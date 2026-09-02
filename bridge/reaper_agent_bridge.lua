@@ -212,6 +212,40 @@ local root = config.bridge_root
 local auth_token = (type(config.auth_token) == "string" and config.auth_token ~= "")
   and config.auth_token or nil
 
+-- The four gated commands, split three ways (2026-09-02). They were one flag
+-- because they share the property undo cannot reach them, but they are not one
+-- risk: writing a new audio file where the caller asked is not the same act as
+-- overwriting the open .rpp, which is not the same act as changing REAPER's own
+-- preferences. Measuring a mix needs only the first, so a user who wants
+-- measurement had to grant project overwrites to get it.
+--
+--   allow_audio_writes      render, capture_track_audio
+--   allow_project_save      save_project
+--   allow_preference_writes set_media_offline_when_inactive
+--
+-- allow_risk_level_3 remains the fallback for every one of them, so an existing
+-- config keeps behaving exactly as it did and the published key still means
+-- "all of it". A specific key wins over the fallback when present, in both
+-- directions: it can open one gate on an otherwise-closed config, or close one
+-- on an open config.
+local gate = {}
+
+function gate.allows(key)
+  local specific = config[key]
+  if type(specific) == "boolean" then return specific end
+  return config.allow_risk_level_3 == true
+end
+
+-- One phrasing for every refusal, so the fix is never guesswork. `key` is the
+-- specific gate; the fallback is named too because that is what most configs
+-- actually carry.
+function gate.hint(key)
+  return key .. " (or allow_risk_level_3) is false in bridge_config.json. "
+    .. "Set it with: python3 setup/install.py --"
+    .. key:gsub("^allow_", "allow-"):gsub("_", "-")
+    .. ", then send reload_bridge (a REAPER restart also works)."
+end
+
 local paths = {
   inbox = join(root, "inbox"),
   processing = join(root, "processing"),
@@ -3666,11 +3700,13 @@ local function preflight_verdict(allow_risk, sws_installed, render_preferences,
   if not allow_risk then
     blockers[#blockers + 1] = {
       code = "capture_gated",
-      message = "allow_risk_level_3 is false in bridge_config.json. It is read "
-        .. "once when the bridge loads, so a change needs the running instance "
-        .. "replaced: enable it (setup/install.py --allow-disk-writes writes "
-        .. "the file for you), then send reload_bridge. A REAPER restart works "
-        .. "too but is not required.",
+      -- Capture is gated on audio writes alone: it writes a new WAV where the
+      -- caller asked. It does NOT need project-save or preference-write rights,
+      -- and saying so is the point of the split.
+      message = gate.hint("allow_audio_writes")
+        .. " The config is read once when the bridge loads, which is why the "
+        .. "reload matters. Capture needs this gate only; saving the project "
+        .. "and writing REAPER preferences are separate.",
     }
   end
   local can_force = sws_installed and render_preferences ~= nil
@@ -3747,7 +3783,7 @@ local function command_get_capture_preflight(command)
     end
   end
   local verdict = preflight_verdict(
-    config.allow_risk_level_3 == true, sws_installed, render_preferences,
+    gate.allows("allow_audio_writes"), sws_installed, render_preferences,
     media_offline_when_inactive())
 
   local target = nil
@@ -3768,6 +3804,8 @@ local function command_get_capture_preflight(command)
     blockers = verdict.blockers,
     warnings = verdict.warnings,
     risk_gate = {
+      -- The legacy fallback, reported raw (not resolved) so a caller can tell
+      -- "the old key is on" from "a specific gate is on".
       allow_risk_level_3 = config.allow_risk_level_3 == true,
       -- The flag really is read once per load, but reload_bridge starts a
       -- fresh instance that re-reads bridge_config.json, so a REAPER restart
@@ -3775,6 +3813,15 @@ local function command_get_capture_preflight(command)
       -- rather than removed: verifyloop.py and the MCP server read it.
       requires_restart_to_change = false,
       apply_change_with = "reload_bridge",
+      -- Resolved per-gate answers (specific key, else the fallback). capture
+      -- rides on audio_writes; the other two are reported so a caller never has
+      -- to infer one gate's state from another's.
+      gates = {
+        audio_writes = gate.allows("allow_audio_writes"),
+        project_save = gate.allows("allow_project_save"),
+        preference_writes = gate.allows("allow_preference_writes"),
+      },
+      capture_gate = "allow_audio_writes",
     },
     sws_installed = sws_installed,
     render_autoclose = autoclose,
@@ -3795,8 +3842,8 @@ local function split_render_target(output_file)
 end
 
 local function command_render(command)
-  if not config.allow_risk_level_3 then
-    error("RENDER_BLOCKED: render is gated; set allow_risk_level_3 true in bridge_config.json")
+  if not gate.allows("allow_audio_writes") then
+    error("RENDER_BLOCKED: render is gated; " .. gate.hint("allow_audio_writes"))
   end
   local payload = command.payload or {}
   if payload.output_file and payload.output_file ~= "" then
@@ -3863,8 +3910,8 @@ end
 -- Saving overwrites the user's .rpp on disk, which no undo block can take back,
 -- so it rides the same gate as render and capture rather than one of its own.
 local function command_save_project()
-  if not config.allow_risk_level_3 then
-    error("SAVE_BLOCKED: save_project is gated; set allow_risk_level_3 true in bridge_config.json")
+  if not gate.allows("allow_project_save") then
+    error("SAVE_BLOCKED: save_project is gated; " .. gate.hint("allow_project_save"))
   end
   -- EnumProjects(-1) is the active project; its filename is "" until the project
   -- has been saved once. get_project_name's "Untitled" fallback reads the same
@@ -3885,8 +3932,9 @@ end
 -- this mutates (track selection, render settings) is restored afterwards, even
 -- when the render throws — hence no undo block (nothing left to Ctrl+Z).
 local function command_capture_track_audio(command)
-  if not config.allow_risk_level_3 then
-    error("CAPTURE_BLOCKED: capture_track_audio is gated; set allow_risk_level_3 true in bridge_config.json")
+  if not gate.allows("allow_audio_writes") then
+    error("CAPTURE_BLOCKED: capture_track_audio is gated; "
+      .. gate.hint("allow_audio_writes"))
   end
   local payload = command.payload or {}
   local track, track_index = find_track(payload)
@@ -4733,9 +4781,9 @@ handlers.set_media_offline_when_inactive = function(command)
   if type(payload.enabled) ~= "boolean" then
     error("BAD_PAYLOAD: enabled must be a boolean, not " .. type(payload.enabled))
   end
-  if config.allow_risk_level_3 ~= true then
-    error("PREFERENCE_BLOCKED: changing REAPER preferences is gated; set "
-      .. "allow_risk_level_3 true in bridge_config.json")
+  if not gate.allows("allow_preference_writes") then
+    error("PREFERENCE_BLOCKED: changing REAPER preferences is gated; "
+      .. gate.hint("allow_preference_writes"))
   end
   if not reaper.SNM_SetIntConfigVar then
     error("SWS_REQUIRED: SNM_SetIntConfigVar is unavailable. REAPER exposes no "
@@ -5242,6 +5290,9 @@ if _G.REAPER_BRIDGE_SELFTEST then
     -- Exported 2026-09-01 so the risk gate on preference writes is testable
     -- offline: the gate is the whole safety story for that command.
     config = config,
+    -- Exported 2026-09-02 with the three-way gate split: precedence between a
+    -- specific key and the allow_risk_level_3 fallback is the whole contract.
+    gate = gate,
     -- Exported 2026-09-01 so handler-level reads can be covered offline. Until
     -- now the seam carried only pure helpers, so `get_items` and the rest of
     -- the diagnostic surface had NO lua coverage at all -- the offline probe

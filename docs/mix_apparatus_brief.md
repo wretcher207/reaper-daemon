@@ -68,7 +68,8 @@ heartbeat. The mix-relevant surface:
   startup. This is the mechanism for "try it, listen, keep or drop it", and the
   first supervised mixes should run through it.
 - **Measurement:** `capture_track_audio` (gated, needs
-  `allow_risk_level_3: true`) and `render`, plus `get_render_settings` /
+  `allow_audio_writes: true`, or the older `allow_risk_level_3` fallback) and
+  `render`, plus `get_render_settings` /
   `set_render_settings` so a render no longer clobbers David's output path.
 - **Reading the session:** `get_context` (include_fx), `get_items`,
   `get_selected_track`, `get_capture_preflight`.

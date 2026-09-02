@@ -42,8 +42,10 @@ Done. (Re)start REAPER, then verify the bridge is live:
   $PY reaperd.py send commands/examples/get_context.json --wait
 
 Rendering, capture (so any measurement), saving the project, and writing
-REAPER preferences are off until you allow them (see the line above):
-  $PY setup/install.py --allow-disk-writes
+REAPER preferences are off until you allow them (see the gate list above).
+Measuring needs only the first:
+  $PY setup/install.py --allow-audio-writes
+  $PY setup/install.py --allow-disk-writes   # all of them
 
 Agent docs: $INSTALL_DIR/AGENTS.md
 EOF

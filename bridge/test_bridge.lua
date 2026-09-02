@@ -552,6 +552,55 @@ eq(ecs(false, 0), "isolated_track", "item-less routing track isolates")
 eq(ecs(false, nil), "isolated_track", "nil item count treated as zero")
 eq(ecs(false, 3), "full_mix", "item track renders the full mix")
 
+-- The three-way gate split (2026-09-02). Precedence is the contract: a
+-- specific key wins in BOTH directions, and an absent one falls back to
+-- allow_risk_level_3 so every config written before the split behaves as it
+-- always did.
+;(function()
+local saved = {}
+for _, k in ipairs({ "allow_risk_level_3", "allow_audio_writes",
+                     "allow_project_save", "allow_preference_writes" }) do
+  saved[k] = B.config[k]
+  B.config[k] = nil
+end
+
+B.config.allow_risk_level_3 = true
+ok(B.gate.allows("allow_audio_writes"), "legacy key still opens audio writes")
+ok(B.gate.allows("allow_project_save"), "legacy key still opens project save")
+B.config.allow_risk_level_3 = false
+ok(not B.gate.allows("allow_audio_writes"), "legacy key off still closes it")
+
+-- The case David asked for: measure without granting project overwrites.
+B.config.allow_audio_writes = true
+ok(B.gate.allows("allow_audio_writes"), "capture can be allowed on its own")
+ok(not B.gate.allows("allow_project_save"),
+   "...without opening save_project")
+ok(not B.gate.allows("allow_preference_writes"),
+   "...or preference writes")
+
+-- And the reverse: one gate closed on an otherwise-open config.
+B.config.allow_risk_level_3 = true
+B.config.allow_audio_writes = nil
+B.config.allow_project_save = false
+ok(B.gate.allows("allow_audio_writes"), "fallback still opens the others")
+ok(not B.gate.allows("allow_project_save"),
+   "a specific false overrides an open fallback")
+
+-- Only booleans count. A string "true" in hand-edited JSON must not read as
+-- permission; it falls through to the fallback instead.
+B.config.allow_project_save = "true"
+ok(B.gate.allows("allow_project_save"),
+   "a non-boolean falls back rather than being coerced")
+B.config.allow_risk_level_3 = false
+ok(not B.gate.allows("allow_project_save"),
+   "...and the fallback is what decides it")
+
+ok(B.gate.hint("allow_audio_writes"):find("--allow-audio-writes", 1, true) ~= nil,
+   "the refusal hint names the installer flag that fixes it")
+
+for k, v in pairs(saved) do B.config[k] = v end
+end)()
+
 -- P3-002: preflight verdict covers every gate combination.
 local pv = B.preflight_verdict
 local v = pv(false, true, true)
@@ -1606,6 +1655,13 @@ ok(err({ enabled = false }):find("PREFERENCE_BLOCKED", 1, true) ~= nil,
 -- happen.
 ok(err({ enabled = false }, true):find("PREFERENCE_BLOCKED", 1, true) ~= nil,
    "dry_run does not bypass the gate")
+
+-- The 2026-09-02 split: a preference write must NOT come along for free with
+-- audio writes. This is the whole point of splitting the gate.
+B.config.allow_audio_writes = true
+ok(err({ enabled = false }):find("PREFERENCE_BLOCKED", 1, true) ~= nil,
+   "allowing audio writes does not allow preference writes")
+B.config.allow_audio_writes = nil
 
 B.config.allow_risk_level_3 = true
 local saved_set = _G.reaper.SNM_SetIntConfigVar

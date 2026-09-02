@@ -100,25 +100,39 @@ REAPER_RESOURCE_PATH="<path the user gave>" python3 setup/install.py
 
 ## Phase 5 — Ask about rendering, capture and saving (human step)
 
-Four commands are off by default: `render`, `capture_track_audio` (which every
-measurement depends on), `save_project`, and `set_media_offline_when_inactive`.
-They are grouped because each writes to disk, which is the one thing REAPER's
-undo cannot take back. Everything else — tracks, FX, parameters, automation —
-works either way and is undoable.
+Four commands are off by default, because each writes to disk and REAPER's undo
+cannot take those back. Everything else — tracks, FX, parameters, automation —
+works either way and is undoable. The four sit behind three separate gates:
+
+| Flag | Allows |
+| --- | --- |
+| `--allow-audio-writes` | `render` and `capture_track_audio`, so any measurement |
+| `--allow-project-save` | `save_project`, overwriting the open `.rpp` |
+| `--allow-preference-writes` | `set_media_offline_when_inactive` |
 
 Ask the user verbatim:
 
-> Do you want the agent to be able to render audio, capture a track to measure
-> it, save the project over its `.rpp`, and change REAPER preferences? Track,
-> FX and automation commands work either way. These four are separate because
-> they write files to disk, so Ctrl+Z cannot undo them. You can change this
-> any time. Answer yes or no.
+> Three things are off until you say otherwise, and you can pick them
+> separately:
+>
+> 1. **Render and capture audio.** Needed for any measurement, and for
+>    Post Mortem. Writes new audio files where I ask it to; touches nothing you
+>    already have.
+> 2. **Save the project.** Overwrites your `.rpp`. Ctrl+Z cannot undo it.
+> 3. **Change REAPER preferences.** Persistent, and outside the project.
+>
+> Which do you want on? "Just measuring" is a common and sensible answer.
 
-- **yes** → run `python3 setup/install.py --allow-disk-writes`
-- **no** → change nothing. Tell them the command above turns it on later.
+- **just measuring / 1 only** → `python3 setup/install.py --allow-audio-writes`
+- **all of it** → `python3 setup/install.py --allow-disk-writes`
+- **none** → change nothing.
+- **a mix** → combine, e.g.
+  `python3 setup/install.py --allow-audio-writes --allow-preference-writes`
 
-Every `setup/install.py` run ends by printing where the gate stands, so the
-Phase 4 output already told you the starting state. Read it rather than
+Each flag has a `--no-` form, so any of this is reversible later.
+
+Every `setup/install.py` run ends by printing where all three gates stand, so
+the Phase 4 output already told you the starting state. Read it rather than
 guessing.
 
 Do not decide this for the user, and do not skip the question because the

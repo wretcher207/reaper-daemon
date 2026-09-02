@@ -46,8 +46,9 @@ Baseline verified 2026-07-23 on David's Windows 11 machine
 - Post Mortem repo is cloned at the sibling path `../post-mortem`, but the
   `postmortem` CLI is **not on PATH** on this machine. Phase 0 installs it.
 - Live REAPER testing requires REAPER running with the bridge loaded AND
-  `allow_risk_level_3: true` in `bridge/bridge_config.json` (read once per
-  bridge load — apply a change with `reload_bridge`, or a REAPER restart). Do NOT assume REAPER is
+  `allow_audio_writes: true` in `bridge/bridge_config.json` (or the legacy
+  `allow_risk_level_3` fallback; read once per bridge load — apply a change
+  with `reload_bridge`, or a REAPER restart). Do NOT assume REAPER is
   available; phases 1–3 must be fully testable against the fake bridge.
 
 ## Repo orientation (verified facts, with anchors)
@@ -57,7 +58,7 @@ primitives this project builds on:
 
 | Primitive | Where | What it gives you |
 |---|---|---|
-| `capture_track_audio` | `bridge/reaper_agent_bridge.lua` (`command_capture_track_audio`, ~line 2485); schema in `bridge/command_schema.md` | Renders one track to WAV. Gated on `allow_risk_level_3`. Returns `file_path` (authoritative, from `RENDER_TARGETS`), `render_loudness_lufs` (LUFS-I parsed from `RENDER_STATS`, ~line 2631), `capture_scope` (`isolated_track` \| `full_mix` \| `master_output`), `isolation_verified`. Restores selection + all render settings even on error. Bounds: active time selection if any, else cursor + `duration_seconds`; `start_seconds` overrides. |
+| `capture_track_audio` | `bridge/reaper_agent_bridge.lua` (`command_capture_track_audio`, ~line 2485); schema in `bridge/command_schema.md` | Renders one track to WAV. Gated on `allow_audio_writes` (falls back to `allow_risk_level_3`). Returns `file_path` (authoritative, from `RENDER_TARGETS`), `render_loudness_lufs` (LUFS-I parsed from `RENDER_STATS`, ~line 2631), `capture_scope` (`isolated_track` \| `full_mix` \| `master_output`), `isolation_verified`. Restores selection + all render settings even on error. Bounds: active time selection if any, else cursor + `duration_seconds`; `start_seconds` overrides. |
 | `get_capture_preflight` | same file ~line 2393 | Everything that would block/degrade a capture WITHOUT rendering: `capture_allowed`, `blockers[]`, `warnings[]`, `risk_gate`, `sws_installed`, `render_autoclose`. Call before any capture sequence. |
 | `get_selected_track` | schema §get_selected_track | Reports `capture_source`, `capture_start_seconds`, `expected_capture_scope` for the selected track — the same resolution `capture_track_audio` uses. |
 | `set_fx_param` | bridge + schema §set_fx_param | Accepts `formatted_value` ("−16.00 dB"); bridge binary-searches normalized values to land the display. |

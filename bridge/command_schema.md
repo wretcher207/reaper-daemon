@@ -204,10 +204,26 @@ Or `"length_bars": 8` instead of `end`. `{ "clear": true }` clears it.
 `{ "bpm": 174 }`
 
 ### render
-Gated — requires `allow_risk_level_3: true` in `bridge_config.json`.
-(`python3 setup/install.py --allow-disk-writes` writes that for you. The flag
-is read once per bridge load, so apply a change with `reload_bridge`; a REAPER
-restart also works but is not required. Same for every gate below.)
+Gated — requires `allow_audio_writes: true` in `bridge_config.json`
+(`python3 setup/install.py --allow-audio-writes` writes it).
+
+**The gates, and how they resolve.** Four commands write to disk, which is the
+one class of mutation undo cannot reach, so each is gated:
+
+| Gate | Covers |
+| --- | --- |
+| `allow_audio_writes` | `render`, `capture_track_audio` — writes NEW files |
+| `allow_project_save` | `save_project` — overwrites the open `.rpp` |
+| `allow_preference_writes` | `set_media_offline_when_inactive` — REAPER's own prefs |
+
+A gate not present in the config falls back to `allow_risk_level_3`, which is
+why every config written before the 2026-09-02 split still behaves as it did
+and why that key still means "all of it". A specific key wins over the fallback
+in both directions, and only a real boolean counts — a string falls back.
+Measuring a mix needs `allow_audio_writes` alone.
+
+The config is read once per bridge load, so apply a change with `reload_bridge`;
+a REAPER restart also works but is not required.
 ```json
 { "output_file": "/path/to/out.wav", "bounds": "time_selection" }
 ```
@@ -314,8 +330,8 @@ above zero means the action did not do what it claims. MIDI sources are
 excluded from the count.
 
 ### set_media_offline_when_inactive
-Gated — requires `allow_risk_level_3: true`, or the reply is
-`PREFERENCE_BLOCKED`. Needs SWS (`SNM_SetIntConfigVar`); REAPER exposes no
+Gated — requires `allow_preference_writes: true` (or the `allow_risk_level_3`
+fallback), or the reply is `PREFERENCE_BLOCKED`. Needs SWS (`SNM_SetIntConfigVar`); REAPER exposes no
 native config-var setter, so without it the reply is `SWS_REQUIRED`.
 ```json
 { "enabled": false }
@@ -346,8 +362,8 @@ It honors `dry_run` in its own handler instead, and reports `before` alongside
 quit and is lost by a crash before one.
 
 ### save_project
-Gated — requires `allow_risk_level_3: true` in `bridge_config.json`, or the
-reply is `SAVE_BLOCKED`. No payload.
+Gated — requires `allow_project_save: true` in `bridge_config.json` (or the
+`allow_risk_level_3` fallback), or the reply is `SAVE_BLOCKED`. No payload.
 ```json
 {}
 ```
@@ -367,7 +383,8 @@ project once by hand and it works from then on. (`get_context`'s `project_name`
 reads `Untitled` in the same situation.)
 
 ### capture_track_audio
-Gated — requires `allow_risk_level_3: true` in `bridge_config.json`.
+Gated — requires `allow_audio_writes: true` in `bridge_config.json` (or the
+`allow_risk_level_3` fallback). It does NOT need save or preference rights.
 ```json
 { "target_track_name": "Rhythm L", "duration_seconds": 30,
   "output_file": "/tmp/reaper-diagnosis/rhythm-l-20260702T143000.wav",
@@ -435,10 +452,13 @@ carries that track's summary, `item_count`, and `expected_capture_scope`.
 Returns `capture_allowed` (false only for hard blockers), `blockers[]` and
 `warnings[]` (each `{ code, message }` — `capture_gated` blocks;
 `render_hang_risk` warns when auto-close can be neither observed on nor
-forced), `risk_gate` (`allow_risk_level_3`; `requires_restart_to_change`,
-now always `false`, kept for older callers; and `apply_change_with`,
-`"reload_bridge"` — the flag is read once per bridge load, and `reload_bridge`
-starts a fresh instance that re-reads the config), `sws_installed`, and
+forced), `risk_gate` (`allow_risk_level_3`, reported raw as the fallback's own
+value; `gates` — the RESOLVED `audio_writes` / `project_save` /
+`preference_writes` answers; `capture_gate`, naming which one capture rides on;
+`requires_restart_to_change`, now always `false`, kept for older callers; and
+`apply_change_with`, `"reload_bridge"` — the config is read once per bridge
+load, and `reload_bridge` starts a fresh instance that re-reads it),
+`sws_installed`, and
 `render_autoclose` (true/false, or null when unreadable without SWS).
 
 ---

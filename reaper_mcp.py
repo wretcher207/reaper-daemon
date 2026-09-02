@@ -244,8 +244,20 @@ def tool_get_status(args):
         with open(cfg_path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
         info["allow_risk_level_3"] = bool(cfg.get("allow_risk_level_3"))
+        # Resolved the way the bridge resolves them: a specific key wins, an
+        # absent one falls back to allow_risk_level_3. Reported so a caller can
+        # see that capture is open while save is shut, which is the normal
+        # shape after the 2026-09-02 split.
+        info["gates"] = {
+            short: (cfg[key] if isinstance(cfg.get(key), bool)
+                    else bool(cfg.get("allow_risk_level_3")))
+            for short, key in (("audio_writes", "allow_audio_writes"),
+                               ("project_save", "allow_project_save"),
+                               ("preference_writes", "allow_preference_writes"))
+        }
     except (OSError, ValueError):
         info["allow_risk_level_3"] = None
+        info["gates"] = None
     if not alive:
         info["fix"] = ("Start REAPER (the bridge auto-loads via __startup.lua), "
                        "or run the bridge action manually. See README.")
@@ -1473,9 +1485,11 @@ TOOLS = [
         "description": ("Render a track capture to WAV and return its evidence scope. "
                         "Only isolated_track with isolation_verified=true is per-track "
                         "audio; item-based tracks can report a full_mix fallback. "
-                        "Gated: needs allow_risk_level_3=true in "
+                        "Gated: needs allow_audio_writes=true (or the legacy "
+                        "allow_risk_level_3 fallback) in "
                         "bridge/bridge_config.json (python3 setup/install.py "
-                        "--allow-disk-writes writes it) AND the change applied by "
+                        "--allow-audio-writes writes it; capture does NOT need "
+                        "save_project or preference rights) AND the change applied by "
                         "the reload_bridge command, or a REAPER relaunch — the "
                         "flag is read once per bridge load. Synchronous — blocks the "
                         "bridge for the render duration."),
@@ -1723,7 +1737,7 @@ TOOLS = [
                         "measured either way; NOT rolled back; do NOT retry "
                         "blindly). Relay the "
                         "status honestly; never present UNVERIFIED as "
-                        "success. Needs allow_risk_level_3 (see "
+                        "success. Needs allow_audio_writes (see "
                         "capture_track_audio)."),
         "inputSchema": _schema({
             "track": {"type": "string",
@@ -1758,7 +1772,7 @@ TOOLS = [
                         "READ-BACK live parameter state. Requires ONE FX "
                         "selector (fx_name_contains or fx_index) AND one "
                         "parameter selector (param_index or "
-                        "param_name_contains). Needs allow_risk_level_3."),
+                        "param_name_contains). Needs allow_audio_writes."),
         "inputSchema": _schema({
             "track": {"type": "string",
                       "description": "Exact track name (case-insensitive)."},

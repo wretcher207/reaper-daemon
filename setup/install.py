@@ -13,10 +13,19 @@ Usage:
     python3 setup/install.py --uninstall # remove the managed block
     python3 setup/install.py --bridge-root /path/to/clone
 
-    python3 setup/install.py --allow-disk-writes  # let the agent render,
-                                                  # capture, save, and set
-                                                  # REAPER preferences
-    python3 setup/install.py --no-disk-writes     # turn that back off
+Four commands write to disk and are gated separately from everything else,
+because undo cannot reach them. The gates:
+
+    python3 setup/install.py --allow-audio-writes       # render + capture,
+                                                        # so any measurement
+    python3 setup/install.py --allow-project-save       # save over the .rpp
+    python3 setup/install.py --allow-preference-writes  # REAPER's own prefs
+    python3 setup/install.py --allow-disk-writes        # all three
+    python3 setup/install.py --no-disk-writes           # none (the default)
+
+Each has a --no- form, and a specific flag beats --allow-disk-writes on the
+same command line: --allow-disk-writes --no-project-save means "everything
+except overwriting my project".
 
 After installing, (re)start REAPER, then verify the bridge is live:
     python3 reaperd.py send commands/examples/get_context.json --wait
@@ -130,17 +139,34 @@ def write(path, text):
     os.replace(tmp, path)
 
 
-# --- the disk-writes gate (bridge_config.json: allow_risk_level_3) ----------
+# --- the write gates (bridge_config.json) -----------------------------------
 #
-# Four commands are gated: render, capture_track_audio, save_project, and
-# set_media_offline_when_inactive. They are grouped because each one writes to
-# disk (a rendered file, a WAV, the .rpp, reaper.ini) and so is the one class of
-# mutation REAPER's undo block cannot take back. Everything else the bridge does
-# is undoable and ungated.
+# Four commands are gated, because each one writes to disk and so is the one
+# class of mutation REAPER's undo block cannot take back. Everything else the
+# bridge does is undoable and ungated.
 #
-# The flag lived only in a JSON file nothing in the install path mentioned, so
-# the first a user heard of it was a CAPTURE_BLOCKED error. These helpers let
-# the installer ask once and write the answer.
+# They used to share a single flag, allow_risk_level_3, which meant measuring a
+# mix (capture) could not be allowed without also allowing the project file to
+# be overwritten. Split three ways on 2026-09-02:
+#
+#   allow_audio_writes       render, capture_track_audio   (writes NEW files)
+#   allow_project_save       save_project                  (overwrites the .rpp)
+#   allow_preference_writes  set_media_offline_when_inactive (REAPER's own prefs)
+#
+# allow_risk_level_3 stays the fallback for any gate not named in the file, so
+# every config written before the split behaves exactly as it did.
+
+# gate key -> (CLI flag stem, what it covers)
+GATES = (
+    ("allow_audio_writes", "audio-writes",
+     "render audio and capture a track (every measurement needs this)"),
+    ("allow_project_save", "project-save",
+     "save the project over its .rpp"),
+    ("allow_preference_writes", "preference-writes",
+     "change REAPER's own preferences"),
+)
+LEGACY_GATE = "allow_risk_level_3"
+
 
 def config_path(repo_root):
     return os.path.join(os.path.abspath(repo_root), "bridge", "bridge_config.json")
@@ -161,16 +187,22 @@ def read_config(repo_root):
     return parsed if isinstance(parsed, dict) else None
 
 
-def disk_writes_enabled(repo_root):
-    """True / False, or None when there is no config file to read yet."""
-    config = read_config(repo_root)
+def gate_state(config, key):
+    """Resolve one gate the way the bridge does: specific key, else fallback.
+
+    Returns None when there is no config file at all, so "off" and "not written
+    yet" stay distinguishable in what we print.
+    """
     if config is None:
         return None
-    return config.get("allow_risk_level_3") is True
+    specific = config.get(key)
+    if isinstance(specific, bool):
+        return specific
+    return config.get(LEGACY_GATE) is True
 
 
-def set_disk_writes(repo_root, enabled, dry_run=False):
-    """Write allow_risk_level_3, preserving every other key in the file.
+def set_gates(repo_root, updates, dry_run=False):
+    """Write gate keys, preserving every other key in the file.
 
     Mirrors the bridge's own defaults when the file does not exist yet, so a
     pre-REAPER-launch install can still answer the question.
@@ -182,33 +214,36 @@ def set_disk_writes(repo_root, enabled, dry_run=False):
         # this value is a starting point, not a binding one.
         config = {"bridge_root": os.path.abspath(repo_root),
                   "poll_interval_seconds": 0.25}
-    config["allow_risk_level_3"] = bool(enabled)
+    for key, value in updates.items():
+        config[key] = bool(value)
+    written = ", ".join(f"{k}={str(bool(v)).lower()}" for k, v in updates.items())
     if dry_run:
-        print(f"[dry-run] would set allow_risk_level_3={str(bool(enabled)).lower()} in {path}")
+        print(f"[dry-run] would set {written} in {path}")
         return
     write(path, json.dumps(config))
-    print(f"Set allow_risk_level_3={str(bool(enabled)).lower()} in {path}")
+    print(f"Set {written} in {path}")
 
 
 def print_gate_status(repo_root):
-    """Say where the gate stands and how to change it. Printed on every run."""
+    """Say where each gate stands and how to change it. Printed on every run."""
     py = "python" if platform.system() == "Windows" else "python3"
-    state = disk_writes_enabled(repo_root)
+    config = read_config(repo_root)
     print()
-    if state is True:
-        print("Rendering, capture, save, and preference writes: ALLOWED.")
-        print(f"  Turn back off with: {py} setup/install.py --no-disk-writes")
+    if config is None:
+        print("Write gates: all off (the bridge writes bridge_config.json the")
+        print("first time it loads, so there is nothing to read yet).")
     else:
-        if state is None:
-            print("Rendering, capture, save, and preference writes: off (the")
-            print("bridge writes bridge_config.json the first time it loads).")
+        print("Write gates:")
+    for key, flag, covers in GATES:
+        state = gate_state(config, key)
+        label = {True: "ALLOWED", False: "off", None: "off"}[state]
+        print(f"  {label:>7}  {covers}")
+        if state is not True:
+            print(f"           allow with: {py} setup/install.py --allow-{flag}")
         else:
-            print("Rendering, capture, save, and preference writes: OFF.")
-        print("  That means render, capture_track_audio (so any measurement),")
-        print("  save_project, and set_media_offline_when_inactive are refused.")
-        print("  Track, FX, and automation commands work either way. They are")
-        print("  undoable; these four write to disk.")
-        print(f"  Allow them with: {py} setup/install.py --allow-disk-writes")
+            print(f"           turn off with: {py} setup/install.py --no-{flag}")
+    print("  Track, FX, and automation commands work either way. They are")
+    print("  undoable; these four write to disk.")
     print("  A change applies when the bridge next loads: send the")
     print("  reload_bridge command, or restart REAPER.")
 
@@ -330,24 +365,40 @@ def main(argv=None):
                    help="remove the managed auto-start block")
     p.add_argument("--dry-run", action="store_true",
                    help="preview; change nothing")
-    gate = p.add_mutually_exclusive_group()
-    gate.add_argument("--allow-disk-writes", dest="disk_writes",
-                      action="store_true", default=None,
-                      help="let the agent render audio, capture a track for "
-                           "measurement, save the project, and change REAPER "
-                           "preferences (sets allow_risk_level_3 true)")
-    gate.add_argument("--no-disk-writes", dest="disk_writes",
-                      action="store_false",
-                      help="refuse those four commands (the default)")
+    everything = p.add_mutually_exclusive_group()
+    everything.add_argument("--allow-disk-writes", dest="disk_writes",
+                            action="store_true", default=None,
+                            help="open all three gates below at once")
+    everything.add_argument("--no-disk-writes", dest="disk_writes",
+                            action="store_false",
+                            help="close all three (the default)")
+    for key, flag, covers in GATES:
+        one = p.add_mutually_exclusive_group()
+        one.add_argument(f"--allow-{flag}", dest=key, action="store_true",
+                         default=None, help=f"allow the agent to {covers}")
+        one.add_argument(f"--no-{flag}", dest=key, action="store_false",
+                         help=f"refuse to {covers}")
     args = p.parse_args(argv)
 
     resource_dir = args.resource_dir or find_resource_dir()
     if args.uninstall:
         return uninstall(resource_dir, dry_run=args.dry_run)
-    # The gate flag is usable on its own: `--allow-disk-writes` with no other
-    # argument still refreshes the auto-loader, which is harmless and idempotent.
+    # Gate flags are usable on their own: any of them with no other argument
+    # still refreshes the auto-loader, which is harmless and idempotent.
+    #
+    # --disk-writes is applied first so a specific flag alongside it wins
+    # ("everything except save" is one command, not two).
+    updates = {}
     if args.disk_writes is not None:
-        set_disk_writes(args.bridge_root, args.disk_writes, dry_run=args.dry_run)
+        updates[LEGACY_GATE] = args.disk_writes
+        for key, _flag, _covers in GATES:
+            updates[key] = args.disk_writes
+    for key, _flag, _covers in GATES:
+        chosen = getattr(args, key)
+        if chosen is not None:
+            updates[key] = chosen
+    if updates:
+        set_gates(args.bridge_root, updates, dry_run=args.dry_run)
     return install(args.bridge_root, resource_dir, dry_run=args.dry_run)
 
 

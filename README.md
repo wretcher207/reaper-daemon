@@ -193,7 +193,7 @@ installed name from the VST/CLAP/AU cache before loading. `setparam` works on
 any plugin by parameter index, binary-searching the normalized value that
 produces a target display value, then verifying.
 
-`measure` captures one track once (behind the same `allow_risk_level_3` gate
+`measure` captures one track once (behind the same `allow_audio_writes` gate
 as `capture_track_audio`) and prints measured audio metrics: LUFS-I whenever
 REAPER reports it (digital silence reads as null and is flagged), plus — when
 [Post Mortem](https://github.com/wretcher207/post-mortem) is installed —
@@ -309,8 +309,10 @@ mix data (LUFS, true peak, spectrum, stereo image, masking table) to
 diagnose. Mutations are undoable with Ctrl/Cmd+Z (single commands and
 batches are one undo step each; `tune_param` leaves one undo point per
 iteration set); destructive tools ask the model to confirm intent; audio
-capture stays behind the `allow_risk_level_3` config gate (turn it on with
-`python3 setup/install.py --allow-disk-writes`, then send `reload_bridge`).
+capture stays behind the `allow_audio_writes` config gate (turn it on with
+`python3 setup/install.py --allow-audio-writes`, then send `reload_bridge`;
+saving the project and writing REAPER preferences are separate gates, so
+measuring never requires granting those).
 
 FX discovery returns REAPER's real track and FX GUIDs alongside names and
 indices. Use the GUIDs as stable identity when planning a later change: names

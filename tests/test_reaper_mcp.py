@@ -297,12 +297,18 @@ def test_get_status_reports_live_bridge_and_risk_gate(root, monkeypatch):
                    "project_name": "Song"}, f)
     with open(os.path.join(root, "bridge", "bridge_config.json"), "w",
               encoding="utf-8") as f:
-        json.dump({"allow_risk_level_3": False}, f)
+        json.dump({"allow_risk_level_3": False,
+                   "allow_audio_writes": True}, f)
     monkeypatch.setattr(reaper_mcp.reaperd, "reaper_running", lambda: True)
     resp = call("get_status")
     info = json.loads(result_text(resp))
     assert info["alive"] is True
     assert info["allow_risk_level_3"] is False
+    # The gate split: a specific key wins, the rest fall back to the legacy one.
+    # get_status has to show that shape or a caller cannot tell why capture
+    # works while save does not.
+    assert info["gates"] == {"audio_writes": True, "project_save": False,
+                             "preference_writes": False}
     assert info["heartbeat"]["project_name"] == "Song"
 
 

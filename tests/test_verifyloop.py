@@ -130,7 +130,10 @@ def test_preflight_blocked_refuses_with_blocker_codes_and_reload_note(root):
     assert res["error"]["code"] == "CAPTURE_BLOCKED"
     assert [b["code"] for b in res["blockers"]] == ["capture_gated"]
     assert res["risk_gate"]["apply_change_with"] == "reload_bridge"
-    assert "--allow-disk-writes" in res["error"]["details"]
+    assert "--allow-audio-writes" in res["error"]["details"]
+    # The split means the fix must NOT tell a user to grant save rights to
+    # measure something.
+    assert "--allow-disk-writes" not in res["error"]["details"]
     assert "reload_bridge" in res["error"]["details"]
 
 

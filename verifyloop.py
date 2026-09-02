@@ -248,8 +248,9 @@ def measure(sender, track, seconds=None, start_seconds=None, output_dir=None,
             # so writing the file is only half the fix. reload_bridge applies it
             # without a REAPER restart (risk_gate.apply_change_with names it).
             details += (
-                " | fix: python3 setup/install.py --allow-disk-writes (or set "
-                "allow_risk_level_3 true in bridge/bridge_config.json by hand), "
+                " | fix: python3 setup/install.py --allow-audio-writes (or set "
+                "allow_audio_writes true in bridge/bridge_config.json by hand; "
+                "capture does NOT need save or preference rights), "
                 "then send "
                 f"{risk_gate.get('apply_change_with') or 'reload_bridge'} — the "
                 "flag is read once per bridge load. Restarting REAPER also "
