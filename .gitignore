@@ -64,3 +64,10 @@ hawksbill/
 # C:\brand\products\reaper-daemon. The rule stays so a new brand/ does not
 # accumulate here again.
 brand/
+
+# Release/snapshot state written by the daemon, not source
+state/
+
+# Stray archive drops
+*.zip
+.zip
