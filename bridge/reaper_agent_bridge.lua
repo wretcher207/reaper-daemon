@@ -4877,7 +4877,189 @@ local handlers = {}
 
 -- Commands that don't need an undo block: they read state, not project state.
 -- Everything else mutates the project and gets wrapped. Named for what it IS.
+fx_chain.performance = (function(reaper, find_track, find_fx, gate)
+  local M = {}
+  local function number(v, lo, hi, integer)
+    if type(v) ~= 'number' or v ~= v or v < lo or v > hi or
+        (integer and v % 1 ~= 0) then error('BAD_PAYLOAD: numeric value outside allowed range') end
+    return v
+  end
+  function M.get_midi_inputs()
+    local rows = {}
+    for i = 0, reaper.GetNumMIDIInputs() - 1 do
+      local ok, name = reaper.GetMIDIInputName(i, '')
+      if ok and name ~= "" then rows[#rows+1] = {index=i, name=name, available=ok, configurable=i < 64} end
+    end
+    return {inputs=rows, all_devices=63, virtual_keyboard=62}
+  end
+  function M.configure_midi_input(command)
+    local p = command.payload or {}
+    local track = find_track(p)
+    local device = number(p.device or 63, 0, 63, true)
+    local channel = number(p.channel or 0, 0, 16, true)
+    if device < 62 then
+      local available = reaper.GetMIDIInputName(device, '')
+      if not available then error('NO_MIDI_INPUT') end
+    end
+    for _, key in ipairs({'arm','monitor'}) do
+      if p[key] ~= nil and type(p[key]) ~= 'boolean' then error('BAD_PAYLOAD: boolean required') end
+    end
+    local input = 4096 + device * 32 + channel
+    reaper.SetMediaTrackInfo_Value(track, 'I_RECINPUT', input)
+    if p.arm ~= nil then reaper.SetMediaTrackInfo_Value(track, 'I_RECARM', p.arm and 1 or 0) end
+    if p.monitor ~= nil then reaper.SetMediaTrackInfo_Value(track, 'I_RECMON', p.monitor and 1 or 0) end
+    for key, field in pairs({arm='I_RECARM',monitor='I_RECMON'}) do
+      if p[key] ~= nil and reaper.GetMediaTrackInfo_Value(track,field) ~= (p[key] and 1 or 0) then error('VERIFY_FAILED: '..key) end
+    end
+    local actual = reaper.GetMediaTrackInfo_Value(track, 'I_RECINPUT')
+    if actual ~= input then error('VERIFY_FAILED: MIDI input') end
+    return {track_guid=reaper.GetTrackGUID(track), input=actual,
+      armed=reaper.GetMediaTrackInfo_Value(track,'I_RECARM'),
+      monitoring=reaper.GetMediaTrackInfo_Value(track,'I_RECMON')}
+  end
+  function M.validate_events(p)
+    number(p.start_seconds,0,1e8)
+    number(p.length_seconds,0.001,86400)
+    if type(p.events) ~= 'table' or #p.events == 0 or #p.events > 10000 then error('BAD_PAYLOAD: 1..10000 events required') end
+    for _, e in ipairs(p.events) do
+      number(e.time,0,p.length_seconds)
+      number(e.channel or 0,0,15,true)
+      if e.type == 'note' then
+        number(e.pitch,0,127,true); number(e.velocity,1,127,true)
+        number(e.duration,0.000001,p.length_seconds-e.time)
+      elseif e.type == 'cc' then
+        number(e.controller,0,127,true); number(e.value,0,127,true)
+      elseif e.type == 'pitch_bend' then number(e.value,0,16383,true)
+      elseif e.type == 'program_change' then number(e.value,0,127,true)
+      else error('BAD_PAYLOAD: unsupported event type') end
+    end
+    return true
+  end
+  function M.insert_midi_events(command)
+    local p = command.payload or {}
+    M.validate_events(p)
+    local track = find_track(p)
+    local item = reaper.CreateNewMIDIItemInProj(track,p.start_seconds,p.start_seconds+p.length_seconds,false)
+    if not item then error('CREATE_FAILED') end
+    local ok, result = pcall(function()
+      local take = reaper.GetActiveTake(item)
+      local notes, controls = 0,0
+      for _, e in ipairs(p.events) do
+        local ppq = reaper.MIDI_GetPPQPosFromProjTime(take,p.start_seconds+e.time)
+        local success
+        if e.type == 'note' then
+          success = reaper.MIDI_InsertNote(take,false,false,ppq,
+            reaper.MIDI_GetPPQPosFromProjTime(take,p.start_seconds+e.time+e.duration),
+            e.channel or 0,e.pitch,e.velocity,true)
+          notes = notes+1
+        else
+          local status, a, b = 176,e.controller,e.value
+          if e.type == 'pitch_bend' then status,a,b=224,e.value%128,math.floor(e.value/128)
+          elseif e.type == 'program_change' then status,a,b=192,e.value,0 end
+          success = reaper.MIDI_InsertCC(take,false,false,ppq,status,e.channel or 0,a,b)
+          controls = controls+1
+        end
+        if not success then error('INSERT_FAILED') end
+      end
+      reaper.MIDI_Sort(take)
+      local _, n, c = reaper.MIDI_CountEvts(take)
+      if n ~= notes or c ~= controls then error('VERIFY_FAILED: event count') end
+      return {track_guid=reaper.GetTrackGUID(track),notes=n,controls=c,
+        start_seconds=p.start_seconds,length_seconds=p.length_seconds}
+    end)
+    if not ok then reaper.DeleteTrackMediaItem(track,item); error(result) end
+    reaper.UpdateArrange()
+    return result
+  end
+  function M.save_project_as(command)
+    local p = command.payload or {}
+    if not gate.allows('allow_project_save') then error('SAVE_BLOCKED: allow_project_save required') end
+    if p.template ~= nil and type(p.template) ~= 'boolean' then error('BAD_PAYLOAD: template must be boolean') end
+    local path = p.path
+    if type(path) ~= 'string' or path:find('[\r\n%z]') or
+      not (path:match('^%a:[/\\]') or path:match('^/')) then error('BAD_PATH: absolute path required') end
+    local ext = p.template and '.rtracktemplate' or '.rpp'
+    if path:sub(-#ext):lower() ~= ext then error('BAD_PATH: expected '..ext) end
+    local existing = io.open(path,'rb')
+    if existing then existing:close(); error('FILE_EXISTS: choose a new path') end
+    local selected, targets = {}, {}
+    if p.template then
+      if p.track_guids ~= nil then
+        if type(p.track_guids) ~= 'table' or #p.track_guids == 0 then error('BAD_PAYLOAD: track_guids required') end
+        for _, guid in ipairs(p.track_guids) do targets[#targets+1] = find_track({target_track_guid=guid}) end
+      else targets[1] = find_track(p) end
+      for i=0,reaper.CountTracks(0)-1 do
+        local t=reaper.GetTrack(0,i)
+        selected[#selected+1]={t,reaper.IsTrackSelected(t)}
+        local wanted=false
+        for _, target in ipairs(targets) do if t==target then wanted=true end end
+        reaper.SetTrackSelected(t,wanted)
+      end
+    end
+    local ok, err=pcall(reaper.Main_SaveProjectEx,0,path,p.template and 1 or 8)
+    for _, row in ipairs(selected) do reaper.SetTrackSelected(row[1],row[2]) end
+    if not ok then error(err) end
+    local f=io.open(path,'rb')
+    if not f then error('SAVE_FAILED: no output file') end
+    local size=f:seek('end'); f:close()
+    if size==0 then error('SAVE_FAILED: empty output') end
+    return {path=path,bytes=size,template=p.template or false,media_included=not p.template}
+  end
+  function M.link_fx_midi_cc(command)
+    local p=command.payload or {}
+    local t,_,fx=find_fx(p)
+    local param=number(p.param_index,0,reaper.TrackFX_GetNumParams(t,fx)-1,true)
+    local cc=number(p.controller,0,127,true)
+    local channel=number(p.channel or 1,1,16,true)
+    local scale=number(p.scale or 1,-1,1)
+    local offset=number(p.offset or 0,-1,1)
+    local prefix='param.'..param..'.'
+    local values={['mod.active']='1',['mod.baseline']='0',
+      ['plink.active']='1',['plink.effect']='-100',['plink.param']='-1',
+      ['plink.scale']=tostring(scale),['plink.offset']=tostring(offset),
+      ['plink.midi_bus']='0',['plink.midi_chan']=tostring(channel),
+      ['plink.midi_msg']='176',['plink.midi_msg2']=tostring(cc)}
+    local captured,chunk=reaper.GetTrackStateChunk(t,'',false)
+    if not captured then error('SNAPSHOT_FAILED: MIDI link unchanged') end
+    local ok,err=pcall(function()
+      -- Native modulation fields do not exist until mod.active is initialized.
+      if not reaper.TrackFX_SetNamedConfigParm(t,fx,prefix..'mod.active','1') then error('UNSUPPORTED: MIDI parameter link') end
+      for key,value in pairs(values) do
+        if not reaper.TrackFX_SetNamedConfigParm(t,fx,prefix..key,value) then error('LINK_FAILED') end
+      end
+      for key,value in pairs(values) do
+        local supported,actual=reaper.TrackFX_GetNamedConfigParm(t,fx,prefix..key)
+        if not supported or tonumber(actual)~=tonumber(value) then error('VERIFY_FAILED: '..key) end
+      end
+    end)
+    if not ok then
+      if not reaper.SetTrackStateChunk(t,chunk,false) then error('ROLLBACK_FAILED: '..tostring(err)) end
+      error(err)
+    end
+    return {param_index=param,controller=cc,channel=channel,scale=scale,offset=offset,verified=true}
+  end
+  function M.get_fx_preset(command)
+    local t,_,fx=find_fx(command.payload or {})
+    local ok,name=reaper.TrackFX_GetPreset(t,fx,'')
+    local index,count=reaper.TrackFX_GetPresetIndex(t,fx)
+    return {name=name,valid=ok,index=index,count=count,
+      scope='REAPER host presets; proprietary preset files may require plugin UI'}
+  end
+  function M.set_fx_preset(command)
+    local p=command.payload or {}
+    if type(p.name)~='string' or p.name=='' then error('BAD_PAYLOAD: exact host preset name required') end
+    local t,_,fx=find_fx(p)
+    if not reaper.TrackFX_SetPreset(t,fx,p.name) then error('PRESET_NOT_FOUND: use host preset name or add_fx_chain') end
+    local result=M.get_fx_preset(command)
+    if not result.valid or result.name~=p.name then error('VERIFY_FAILED: preset changed but name did not match; undo available') end
+    return result
+  end
+  return M
+end)(reaper, find_track, find_fx, gate)
+
 local NO_UNDO_BLOCK = {
+  get_midi_inputs = true,
+  get_fx_preset = true,
   capture_mix_recipe = true, rebuild_mix_recipe = true,
   get_mix_snapshot = true, get_context = true, get_fx_parameters = true, scan_fx = true,
   get_fx_param_automation = true,
@@ -5036,6 +5218,7 @@ handlers.set_time_selection = command_set_time_selection
 handlers.set_tempo = command_set_tempo
 handlers.render = command_render
 handlers.save_project = command_save_project
+for _, name in ipairs({"link_fx_midi_cc", "get_midi_inputs", "configure_midi_input", "insert_midi_events", "save_project_as", "get_fx_preset", "set_fx_preset"}) do handlers[name] = fx_chain.performance[name] end
 handlers.capture_track_audio = command_capture_track_audio
 handlers.get_track_routing = command_get_track_routing
 
@@ -5790,6 +5973,7 @@ end
 -- loop starts (no live REAPER needed). One global check; no production cost.
 if _G.REAPER_BRIDGE_SELFTEST then
   return {
+    performance = fx_chain.performance,
     parse_display_number = parse_display_number,
     numeric_bracket = numeric_bracket,
     atomic_write_json = atomic_write_json,

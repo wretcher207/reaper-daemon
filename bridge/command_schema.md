@@ -1,3 +1,7 @@
+# Keyboard performance additions
+
+See [keyboard-performance.md](../docs/keyboard-performance.md) for MIDI input, direct MIDI events, CC parameter links, host presets, and save_project_as payloads.
+
 # Command Schema
 
 Every command is a JSON file in `inbox/`. Every result is a JSON file in

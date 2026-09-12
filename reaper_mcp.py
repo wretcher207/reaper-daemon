@@ -1896,6 +1896,54 @@ TOOLS = [
     },
 ]
 
+# Performance operations share the same bridge handlers as reaperd.py cmd.
+for _name, _description, _props, _required in [
+    ("link_fx_midi_cc", "Map MIDI CC to a scanned FX parameter and verify native parameter-link readback.",
+     {"param_index": {"type": "integer"}, "controller": {"type": "integer"}, "channel": {"type": "integer"}, "scale": {"type": "number"}, "offset": {"type": "number"}}, ["param_index", "controller"]),
+    ("get_midi_inputs", "List MIDI input device names and indices.", {}, []),
+    ("configure_midi_input", "Set a track's MIDI input, record arm and monitoring; return readback.",
+     {"device": {"type": "integer"}, "channel": {"type": "integer", "description": "0 all, 1..16 specific"}, "arm": {"type": "boolean"}, "monitor": {"type": "boolean"}}, []),
+    ("insert_midi_events", "Create a MIDI item from notes, CC, pitch bend and program changes. Times are seconds relative to item start; channels are 0..15. For drums, enforce drum-apparatus goldenrule before sending.",
+     {"start_seconds": {"type": "number"}, "length_seconds": {"type": "number"}, "events": {"type": "array", "items": {"type": "object"}}}, ["start_seconds", "length_seconds", "events"]),
+    ("save_project_as", "Save to a NEW absolute .rpp path, or export explicitly named tracks as a media-free .RTrackTemplate. Existing files are refused. Requires project save gate.",
+     {"path": {"type": "string"}, "template": {"type": "boolean"}, "track_guids": {"type": "array", "items": {"type": "string"}}}, ["path"]),
+    ("get_fx_preset", "Read the loaded FX host preset name, index and count.", {}, []),
+    ("set_fx_preset", "Load an exact REAPER host preset name and verify readback. Proprietary preset files may require plugin UI; saved chains use add_fx_chain.", {"name": {"type": "string"}}, ["name"]),
+]:
+    _props = {**_props, "fx_guid": {"type": "string"}, "fx_name_contains": {"type": "string"}, "fx_index": {"type": "integer"}, "fx_scope": {"type": "string"}}
+    TOOLS.append({"name": _name, "description": _description,
+                  "inputSchema": _schema({**TRACK_PROPS, **DRY_RUN_PROP, **_props}, _required),
+                  "handler": lambda args, name=_name, keys=tuple(_props): _forward(name, args, keys, track=True, dry_run=True)})
+
+
+def tool_instrument_inventory(args):
+    from instrument_inventory import inventory
+    try:
+        return _text(json.dumps(inventory(content_roots=args.get("content_roots", []),
+                                         query=args.get("query", ""), limit=args.get("limit", 200))))
+    except (OSError, ValueError) as exc:
+        return _text(str(exc), is_error=True)
+
+
+TOOLS.append({"name": "instrument_inventory", "description": "Discover plugin cache entries and local preset files. Results do not prove plugins load or samples are available.",
+              "inputSchema": _schema({"query": {"type": "string"}, "content_roots": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer"}}),
+              "handler": tool_instrument_inventory})
+
+
+
+def tool_insert_performance_audition(args):
+    from performance_audition import payload
+    try:
+        data = payload(args["target_track_guid"], args.get("start_seconds", 0), args.get("pitch", 69))
+        return _reply_result(_send("insert_midi_events", data, dry_run=bool(args.get("dry_run"))))
+    except (KeyError, ValueError) as exc:
+        return _text(str(exc), is_error=True)
+
+
+TOOLS.append({"name": "insert_performance_audition", "description": "Insert a repeatable 15-second melodic test of expression, modulation, sustain and octave range. Use a separate audition project. Render with capture_track_audio and audition; MIDI success does not prove controller response.",
+              "inputSchema": _schema({"target_track_guid": {"type": "string"}, "start_seconds": {"type": "number"}, "pitch": {"type": "integer"}, **DRY_RUN_PROP}, ["target_track_guid"]),
+              "handler": tool_insert_performance_audition})
+
 _TOOL_BY_NAME = {t["name"]: t for t in TOOLS}
 
 

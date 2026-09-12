@@ -1974,4 +1974,49 @@ do
   reaper=saved
 end
 
+;(function()
+  local function payload(event)
+    return {start_seconds=0,length_seconds=2,events={event}}
+  end
+  ok(B.performance.validate_events(payload({type='note',time=0,duration=1,pitch=60,velocity=90})), 'valid note')
+  for _,event in ipairs({
+    {type='note',time=0,duration=3,pitch=60,velocity=90},
+    {type='note',time=0,duration=1,pitch=60,velocity=0},
+    {type='cc',time=0,controller=128,value=1},
+    {type='pitch_bend',time=0,value=16384},
+    {type='program_change',time=0,value=2,channel=16},
+    {type='cc',time=0/0,controller=11,value=40},
+    {type='unknown',time=0},
+  }) do
+    eq(pcall(B.performance.validate_events,payload(event)),false,'invalid event rejected before creation')
+  end
+  ok(B.performance.validate_events(payload({type='pitch_bend',time=2,value=8192})), 'center bend accepted')
+end)()
+;(function()
+  local old={}
+  for k,v in pairs(reaper) do old[k]=v end
+  local state={restored=false,values={}}
+  reaper.GetMasterTrack=function() return 'track' end
+  reaper.TrackFX_GetCount=function() return 1 end
+  reaper.TrackFX_GetFXName=function() return true,'test' end
+  reaper.TrackFX_GetNumParams=function() return 1 end
+  reaper.GetTrackStateChunk=function() return true,'original' end
+  reaper.SetTrackStateChunk=function(_,chunk) state.restored=chunk=='original'; return true end
+  reaper.TrackFX_SetNamedConfigParm=function(_,_,key,value) state.values[key]=value; return true end
+  reaper.TrackFX_GetNamedConfigParm=function(_,_,key) return true,state.values[key] end
+  local p={target_track_name='master',fx_index=0,fx_scope='track',param_index=0,controller=11}
+  ok(B.performance.link_fx_midi_cc({payload=p}).verified,'CC link readback passes')
+  reaper.TrackFX_SetNamedConfigParm=function() return false end
+  eq(pcall(B.performance.link_fx_midi_cc,{payload=p}),false,'failed MIDI link reports failure')
+  eq(state.restored,true,'failed MIDI link restores original chunk')
+  reaper.TrackFX_SetPreset=function() return true end
+  reaper.TrackFX_GetPreset=function() return true,'Host sound' end
+  reaper.TrackFX_GetPresetIndex=function() return 0,1 end
+  p.name='Host sound'
+  eq(B.performance.set_fx_preset({payload=p}).name,'Host sound','host preset readback verified')
+  p.name='Different sound'
+  eq(pcall(B.performance.set_fx_preset,{payload=p}),false,'preset mismatch reports failure')
+  for k in pairs(reaper) do reaper[k]=nil end
+  for k,v in pairs(old) do reaper[k]=v end
+end)()
 print(("test_bridge: OK (%d checks)"):format(checks))

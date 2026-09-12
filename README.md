@@ -95,3 +95,5 @@ folder local and off shared drives. Details in [docs/security.md](docs/security.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Keyboard performance setup, MIDI/controller tests and template saving are documented in [the performance workflow](docs/keyboard-performance.md).

@@ -59,6 +59,8 @@ jobs:
           reaperd.py
           reaper_mcp.py
           mix_recipes.py
+          instrument_inventory.py
+          performance_audition.py
           console_sidecar.py
           setup/install.py
           skills/drum-apparatus/groovegen.py
@@ -69,6 +71,8 @@ jobs:
           reaperd.py
           reaper_mcp.py
           mix_recipes.py
+          instrument_inventory.py
+          performance_audition.py
           console_sidecar.py
           setup
           skills/drum-apparatus
