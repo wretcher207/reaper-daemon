@@ -24,6 +24,13 @@ Claude Desktop, in `claude_desktop_config.json`:
 
 Use `python` instead of `python3` on Windows if that is what is on PATH.
 
+Claude Desktop extension: download `reaper-daemon.mcpb` from the
+[latest release](https://github.com/wretcher207/reaper-daemon/releases/latest),
+open it, and pick your Reaper Daemon folder when asked. The bundle is a small
+launcher for the install you already have, so clone and install first. The
+same bundle is listed in the official MCP registry as
+`io.github.wretcher207/reaper-daemon`, built from `packaging/mcpb/`.
+
 Then ask: "add a ReaEQ to the bass and carve 2 dB at 300 Hz", "what plugins
 are on the master?", "program a d-beat groove at bar 33".
 
