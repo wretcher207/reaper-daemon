@@ -4,13 +4,15 @@
 
 # Reaper Daemon
 
-Drive REAPER from an AI agent. No socket, no server, no extensions.
+Reaper Daemon is a REAPER MCP server and file bridge for driving REAPER from
+an AI agent, including mixing your session with Claude or any other agent.
+No network socket, no port, no extensions.
 
 The agent drops a JSON command file in a folder. A Lua script inside REAPER
-runs it and writes a JSON result back. That is the whole protocol. It works
+runs it and writes a JSON result back. That's the whole protocol. It works
 with Claude Code, Codex, Cursor, or anything else that can read and write
-files, and an optional MCP server exposes the same bridge as tools for
-Claude Desktop and other MCP clients.
+files, and an optional stdio MCP server, `reaper_mcp.py`, exposes the same
+bridge as tools for Claude Desktop and any other MCP client.
 
 macOS, Windows, Linux. Pure Lua inside REAPER, plain Python 3 outside, no
 pip packages. Every change runs inside a REAPER undo block, so Ctrl+Z
@@ -31,6 +33,25 @@ python3 reaperd.py status
 ```
 
 Prefer ReaPack, or want to load the bridge by hand? See [docs/install.md](docs/install.md).
+
+## Mix with an AI agent
+
+Point Claude, or any agent talking to Reaper Daemon, at your open REAPER
+session and ask it to work on the mix. It reads every plugin and parameter
+with `scan_fx`, sets FX values in real units like `"-2.5 dB"`, and writes
+automation. `verify_change` captures the track before and after a move and
+reports what changed in the audio, so you are not taking its word for it.
+Every move sits inside a REAPER undo block, and your ears make the call.
+
+Example prompts:
+
+- "The bass is muddy around 300 Hz, pull it down."
+- "Bring the vocal down so it sits with the mix instead of on top."
+- "Tune the bass until its LUFS is down 3 dB."
+- "What plugins are on the drum bus, and what are they set to?"
+
+See [MCP server](docs/mcp.md) for setup and [Verify](docs/verify.md) for
+what the measurements do and do not prove.
 
 ## What it does
 
