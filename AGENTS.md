@@ -69,3 +69,5 @@ failed. Do not retry blindly. Report it as unverified and explain that one REAPE
 reverts the attempted change.
 
 Current status and release facts belong in `HANDOFF.md`. Public documentation and UI copy require the appropriate voice-profile pass from the shared working agreement; live music operations do not require a writing workflow.
+
+If REAPER is closed and it needs to be open for testing or anything related to the work in this project; open it. 
