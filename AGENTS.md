@@ -31,6 +31,14 @@ to the `insert_riff`/`cut_band`/`humanize_take` MCP tools (`insert_groove` cover
 
 ## Action boundary
 
+Public-facing Reaper Daemon content uses the canonical visual kit at
+`C:/media/reaper-daemon-visuals/`. Read its `AGENTS.md`, `extracted/IDENTITY.md`,
+and `WHERE-IT-GOES.md` before creating or changing visual content. All visual
+edits and new variants originate in that folder. Repository/site assets are
+delivery copies; follow the kit's synchronized update process so affected
+formats and the current package stay consistent. Do not invent a separate
+identity for a README, website, social post, thumbnail, or video.
+
 - For a request to inspect, explain, diagnose, or review, use read-only discovery and
   report the result. Do not mutate the REAPER project.
 - For a request to change the live project, check bridge status, inspect context, make
