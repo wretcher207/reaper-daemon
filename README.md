@@ -4,6 +4,8 @@
 
 # Reaper Daemon
 
+[![Reaper Daemon MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/wretcher207/reaper-daemon/badges/score.svg)](https://glama.ai/mcp/servers/wretcher207/reaper-daemon)
+
 Reaper Daemon is a REAPER MCP server and file bridge for driving REAPER from
 an AI agent, including mixing your session with Claude or any other agent.
 No network socket, no port, no extensions.
@@ -81,6 +83,8 @@ python3 reaperd.py shred --track argent-l --bars-file riff.txt --seed 101
 
 **MCP server.** `reaper_mcp.py` wraps the bridge as tools over stdio.
 Ask Claude Desktop to "measure the drums" and it does.
+
+[![Reaper Daemon MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/wretcher207/reaper-daemon/badges/card.svg)](https://glama.ai/mcp/servers/wretcher207/reaper-daemon)
 
 **Daemon Console.** A chat panel docked inside REAPER, backed by a headless
 Claude Code session that always knows which track you have selected.
