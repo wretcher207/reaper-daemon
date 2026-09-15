@@ -1349,7 +1349,9 @@ TOOLS = [
                         "it is the whole point). Do NOT precheck with scan_fx, do NOT "
                         "hedge about whether it's installed, do NOT narrate a plan. "
                         "Target the master with track:\"master\". The user may be "
-                        "recording live; extra steps and preamble ruin the take."),
+                        "recording live; extra steps and preamble ruin the take. "
+                        "To change a parameter on an FX already in the chain use "
+                        "set_fx_param."),
         "inputSchema": _schema({
             "action": {"type": "string", "enum": list(_FX_ACTIONS)},
             **TRACK_PROPS, **DRY_RUN_PROP,
@@ -1462,7 +1464,10 @@ TOOLS = [
         "name": "insert_midi_file",
         "description": ("Insert a .mid file from disk onto a track at a position. "
                         "Write the MIDI yourself, then insert. Never overwrites "
-                        "existing items unless replace_existing_in_range is true."),
+                        "existing items unless replace_existing_in_range is true. "
+                        "Use this when a .mid file already exists; to build MIDI "
+                        "from a list of notes use insert_midi_events, for humanized "
+                        "drums insert_groove, for guitar or bass insert_riff."),
         "inputSchema": _schema({
             **TRACK_PROPS, **DRY_RUN_PROP,
             "midi_path": {"type": "string", "description": "Absolute path to the .mid file."},
@@ -1505,7 +1510,14 @@ TOOLS = [
         "description": ("Run several bridge commands as ONE undo block and one "
                         "round-trip. commands: [{type, payload}]. Use for "
                         "multi-step edits (e.g. several set_fx_param calls) so a "
-                        "failure stops cleanly and one Ctrl+Z reverts everything."),
+                        "failure stops cleanly and one Ctrl+Z reverts everything. "
+                        "Nested batches are refused. Returns {results: [per-command "
+                        "result], all_ok, failed_index, completed, total, stopped, "
+                        "rolled_back}. With stop_on_error (default) a failure stops "
+                        "the batch and the call errors with the failing command's "
+                        "code and index, unless return_partial_results is true, "
+                        "which returns the object above with stopped=true instead. "
+                        "Commands already run are NOT rolled back; undo the block."),
         "inputSchema": _schema({
             **DRY_RUN_PROP,
             "commands": {"type": "array", "items": {"type": "object"},
@@ -1847,7 +1859,9 @@ TOOLS = [
     },
     {
         "name": "analyze_track",
-        "description": ("Post Mortem: capture one verified-isolated track and "
+        "description": ("Post Mortem (the separate post-mortem audio-analysis "
+                        "CLI that renders a track and measures it): capture one "
+                        "verified-isolated track and "
                         "return MEASURED mix data (FX chain with values, routing, "
                         "LUFS, true peak, crest, 1/3-octave spectrum, stereo "
                         "image, silence fraction) for YOU to diagnose. Requires "
@@ -1868,7 +1882,9 @@ TOOLS = [
                         "and return their spectra plus a contested-band masking "
                         "table for YOU to diagnose. Full-mix fallbacks are refused. "
                         "Same requirements as "
-                        "analyze_track."),
+                        "analyze_track. Use analyze_track for one track's own mix "
+                        "problems; use this when two parts fight for the same "
+                        "frequencies."),
         "inputSchema": _schema({
             "tracks": {"type": "array", "items": {"type": "string"},
                        "description": "Two or more track names."},
@@ -1943,8 +1959,32 @@ for _name, _description, _props, _required, _track, _fx, _mutates in [
       "arm": {"type": "boolean", "description": "true arms the track for recording, false disarms; omit to leave as is."},
       "monitor": {"type": "boolean", "description": "true turns input monitoring on, false off; omit to leave as is."}},
      [], True, False, True),
-    ("insert_midi_events", "Create a MIDI item from notes, CC, pitch bend and program changes. Times are seconds relative to item start; channels are 0..15. For drums, enforce drum-apparatus goldenrule before sending.",
-     {"start_seconds": {"type": "number"}, "length_seconds": {"type": "number"}, "events": {"type": "array", "items": {"type": "object"}}}, ["start_seconds", "length_seconds", "events"], True, False, True),
+    ("insert_midi_events",
+     ("Create a new MIDI item on one track from a list of raw events (notes, CC, pitch bend, "
+      "program change), with no humanizing. Use this for exact, hand-specified MIDI; use "
+      "insert_midi_file when a .mid already exists, insert_groove for humanized drums, "
+      "insert_riff for humanized guitar or bass, cut_band for a whole four-track jam. Event "
+      "times are seconds from the item start. For drums, keep the golden rule yourself: no drum "
+      "hits the same velocity twice in a row. Returns {track_guid, notes, controls, "
+      "start_seconds, length_seconds}. Errors: BAD_PAYLOAD (an event is out of range; nothing "
+      "is written), INSERT_FAILED / VERIFY_FAILED (the new item is deleted again). Undoable."),
+     {"start_seconds": {"type": "number", "minimum": 0,
+                        "description": "Project time in seconds where the new item starts."},
+      "length_seconds": {"type": "number", "minimum": 0.001, "maximum": 86400,
+                         "description": "Item length in seconds; every event must fit inside it."},
+      "events": {"type": "array", "minItems": 1, "maxItems": 10000,
+                 "description": "1..10000 events. Each needs type and time; the other fields depend on type.",
+                 "items": {"type": "object", "required": ["type", "time"], "properties": {
+                     "type": {"type": "string", "enum": ["note", "cc", "pitch_bend", "program_change"]},
+                     "time": {"type": "number", "minimum": 0, "description": "Seconds from item start."},
+                     "channel": {"type": "integer", "minimum": 0, "maximum": 15, "description": "0-based MIDI channel, default 0."},
+                     "pitch": {"type": "integer", "minimum": 0, "maximum": 127, "description": "note only: MIDI note number (60 = middle C)."},
+                     "velocity": {"type": "integer", "minimum": 1, "maximum": 127, "description": "note only."},
+                     "duration": {"type": "number", "description": "note only: seconds; must end inside the item."},
+                     "controller": {"type": "integer", "minimum": 0, "maximum": 127, "description": "cc only: controller number."},
+                     "value": {"type": "integer", "minimum": 0, "maximum": 16383,
+                               "description": "cc and program_change: 0..127. pitch_bend: 0..16383, 8192 = centre."}}}}},
+     ["start_seconds", "length_seconds", "events"], True, False, True),
     ("save_project_as", "Save to a NEW absolute .rpp path, or export explicitly named tracks as a media-free .RTrackTemplate. Existing files are refused. Requires project save gate.",
      {"path": {"type": "string"}, "template": {"type": "boolean"}, "track_guids": {"type": "array", "items": {"type": "string"}}}, ["path"], True, True, True),
     ("get_fx_preset",
