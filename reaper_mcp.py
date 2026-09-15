@@ -189,15 +189,22 @@ def _track_payload(args):
     }
 
 
+# Supply one track selector. If several are given, the bridge uses the first
+# present in this order and ignores the rest: target_track_guid, track,
+# track_contains, use_selected_track.
 TRACK_PROPS = {
     "target_track_guid": {"type": "string",
-                          "description": "Stable REAPER track GUID; preferred when available."},
+                          "description": "Stable REAPER track GUID; preferred when available. "
+                                         "Wins over every other track selector."},
     "track": {"type": "string",
-              "description": "Exact track name (case-insensitive)."},
+              "description": "Exact track name (case-insensitive); \"master\" targets the master track. "
+                             "Used when no GUID is given; errors if two tracks share the name."},
     "track_contains": {"type": "string",
-                       "description": "Case-insensitive substring; errors if it matches more than one track."},
+                       "description": "Case-insensitive substring; used only when no GUID or exact name is given. "
+                                      "Errors if it matches more than one track."},
     "use_selected_track": {"type": "boolean",
-                           "description": "Target the currently selected track instead of naming one."},
+                           "description": "Target the first selected track; ignored when any other track selector "
+                                          "is given. Errors if nothing is selected."},
 }
 DRY_RUN_PROP = {
     "dry_run": {"type": "boolean",
@@ -1897,23 +1904,69 @@ TOOLS = [
 ]
 
 # Performance operations share the same bridge handlers as reaperd.py cmd.
-for _name, _description, _props, _required in [
+FX_PROPS = {
+    "fx_guid": {"type": "string",
+                "description": "Stable FX GUID; wins over fx_index and fx_name_contains."},
+    "fx_index": {"type": "integer",
+                 "description": "0-based position in the chain; requires fx_scope \"track\" or \"input\". "
+                                "Used when no fx_guid is given."},
+    "fx_name_contains": {"type": "string",
+                         "description": "Case-insensitive FX name substring; used only when neither fx_guid nor "
+                                        "fx_index is given. Errors if it matches more than one FX."},
+    "fx_scope": {"type": "string", "enum": ["all", "track", "input"],
+                 "description": "Which chain to search: \"track\" (normal FX), \"input\" (record-input FX) "
+                                "or \"all\" (default for GUID and name searches)."},
+}
+
+# (name, description, props, required, targets_track, targets_fx, mutates)
+for _name, _description, _props, _required, _track, _fx, _mutates in [
     ("link_fx_midi_cc", "Map MIDI CC to a scanned FX parameter and verify native parameter-link readback.",
-     {"param_index": {"type": "integer"}, "controller": {"type": "integer"}, "channel": {"type": "integer"}, "scale": {"type": "number"}, "offset": {"type": "number"}}, ["param_index", "controller"]),
-    ("get_midi_inputs", "List MIDI input device names and indices.", {}, []),
-    ("configure_midi_input", "Set a track's MIDI input, record arm and monitoring; return readback.",
-     {"device": {"type": "integer"}, "channel": {"type": "integer", "description": "0 all, 1..16 specific"}, "arm": {"type": "boolean"}, "monitor": {"type": "boolean"}}, []),
+     {"param_index": {"type": "integer"}, "controller": {"type": "integer"}, "channel": {"type": "integer"}, "scale": {"type": "number"}, "offset": {"type": "number"}}, ["param_index", "controller"], True, True, True),
+    ("get_midi_inputs",
+     ("Read-only: list the MIDI input devices REAPER can see. Takes no arguments. Returns "
+      "{inputs: [{index, name, available, configurable}], all_devices: 63, virtual_keyboard: 62}. "
+      "Call this before configure_midi_input to find a device index; configurable is false for "
+      "indices above 63, which configure_midi_input cannot set."),
+     {}, [], False, False, False),
+    ("configure_midi_input",
+     ("Set one track's record input to a MIDI device and channel, optionally record-arm it and "
+      "turn input monitoring on or off, then read the values back. Omitted arm/monitor are left "
+      "unchanged; the record input is always set (device 63, channel 0 when omitted). Returns "
+      "{track_guid, input, armed, monitoring}, where input is REAPER's I_RECINPUT code "
+      "(4096 + device*32 + channel). Errors: NO_MIDI_INPUT (device index not present), BAD_PAYLOAD "
+      "(value out of range), VERIFY_FAILED (REAPER did not keep the setting), NO_TARGET_TRACK / "
+      "AMBIGUOUS_TARGET_TRACK. Undoable. Use get_midi_inputs first to find the device index."),
+     {"device": {"type": "integer", "minimum": 0, "maximum": 63,
+                 "description": "Device index from get_midi_inputs; 62 = virtual MIDI keyboard, 63 = all devices (default)."},
+      "channel": {"type": "integer", "minimum": 0, "maximum": 16,
+                  "description": "MIDI channel to record: 0 = all channels (default), 1..16 = that channel only."},
+      "arm": {"type": "boolean", "description": "true arms the track for recording, false disarms; omit to leave as is."},
+      "monitor": {"type": "boolean", "description": "true turns input monitoring on, false off; omit to leave as is."}},
+     [], True, False, True),
     ("insert_midi_events", "Create a MIDI item from notes, CC, pitch bend and program changes. Times are seconds relative to item start; channels are 0..15. For drums, enforce drum-apparatus goldenrule before sending.",
-     {"start_seconds": {"type": "number"}, "length_seconds": {"type": "number"}, "events": {"type": "array", "items": {"type": "object"}}}, ["start_seconds", "length_seconds", "events"]),
+     {"start_seconds": {"type": "number"}, "length_seconds": {"type": "number"}, "events": {"type": "array", "items": {"type": "object"}}}, ["start_seconds", "length_seconds", "events"], True, False, True),
     ("save_project_as", "Save to a NEW absolute .rpp path, or export explicitly named tracks as a media-free .RTrackTemplate. Existing files are refused. Requires project save gate.",
-     {"path": {"type": "string"}, "template": {"type": "boolean"}, "track_guids": {"type": "array", "items": {"type": "string"}}}, ["path"]),
-    ("get_fx_preset", "Read the loaded FX host preset name, index and count.", {}, []),
-    ("set_fx_preset", "Load an exact REAPER host preset name and verify readback. Proprietary preset files may require plugin UI; saved chains use add_fx_chain.", {"name": {"type": "string"}}, ["name"]),
+     {"path": {"type": "string"}, "template": {"type": "boolean"}, "track_guids": {"type": "array", "items": {"type": "string"}}}, ["path"], True, True, True),
+    ("get_fx_preset",
+     ("Read-only: report which REAPER host preset is loaded on one FX. Pick the track with one "
+      "track selector and the FX with one FX selector (fx_guid, else fx_index + fx_scope, else "
+      "fx_name_contains). Returns {name, valid, index, count, scope}; valid is false when the "
+      "plugin reports no named preset. Only sees REAPER host presets, not a plugin's own "
+      "preset browser. Errors: NO_FX / AMBIGUOUS_FX / AMBIGUOUS_SCOPE / NO_FX_SELECTOR, "
+      "NO_TARGET_TRACK / AMBIGUOUS_TARGET_TRACK. Use set_fx_preset to change it."),
+     {}, [], True, True, False),
+    ("set_fx_preset", "Load an exact REAPER host preset name and verify readback. Proprietary preset files may require plugin UI; saved chains use add_fx_chain.", {"name": {"type": "string"}}, ["name"], True, True, True),
 ]:
-    _props = {**_props, "fx_guid": {"type": "string"}, "fx_name_contains": {"type": "string"}, "fx_index": {"type": "integer"}, "fx_scope": {"type": "string"}}
-    TOOLS.append({"name": _name, "description": _description,
-                  "inputSchema": _schema({**TRACK_PROPS, **DRY_RUN_PROP, **_props}, _required),
-                  "handler": lambda args, name=_name, keys=tuple(_props): _forward(name, args, keys, track=True, dry_run=True)})
+    if _fx:
+        _props = {**_props, **FX_PROPS}
+    _schema_props = {**(TRACK_PROPS if _track else {}), **(DRY_RUN_PROP if _mutates else {}), **_props}
+    _tool = {"name": _name, "description": _description,
+             "inputSchema": _schema(_schema_props, _required),
+             "handler": lambda args, name=_name, keys=tuple(_props), track=_track, dry_run=_mutates:
+                 _forward(name, args, keys, track=track, dry_run=dry_run)}
+    if not _mutates:
+        _tool["annotations"] = {"readOnlyHint": True}
+    TOOLS.append(_tool)
 
 
 def tool_instrument_inventory(args):
@@ -1982,7 +2035,9 @@ def handle_message(msg):
         return _rpc_result(mid, {})
     if method == "tools/list":
         tools = [{"name": t["name"], "description": t["description"],
-                  "inputSchema": t["inputSchema"]} for t in TOOLS]
+                  "inputSchema": t["inputSchema"],
+                  **({"annotations": t["annotations"]} if "annotations" in t else {})}
+                 for t in TOOLS]
         return _rpc_result(mid, {"tools": tools})
     if method == "tools/call":
         params = msg.get("params") or {}
