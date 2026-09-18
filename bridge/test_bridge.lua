@@ -2019,4 +2019,5 @@ end)()
   for k in pairs(reaper) do reaper[k]=nil end
   for k,v in pairs(old) do reaper[k]=v end
 end)()
+dofile(join(here,"test_transcription.lua"))(B,ok,eq)
 print(("test_bridge: OK (%d checks)"):format(checks))

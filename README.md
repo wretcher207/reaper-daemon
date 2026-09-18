@@ -65,6 +65,7 @@ what the measurements do and do not prove.
 | FX | add, remove, bypass, reorder, set parameters, write automation, save chains |
 | Markers, regions, media items | full read and write |
 | MIDI | insert MIDI files, plus a drum DSL with humanization |
+| Transcription | turn an audio item into drum MIDI with an optional local analysis runtime |
 | Guitar and bass | `shred` renders a humanized riff, `band` cuts a whole rhythm section |
 | Discovery | `scan_fx` dumps every plugin and parameter; `discover_drum_map` reads any kit's note map |
 | Verify | measure loudness, spectrum and dynamics before and after a mix move |
@@ -98,6 +99,7 @@ Claude Code session that always knows which track you have selected.
 | [MCP server](docs/mcp.md) | setup for Claude Desktop and other clients |
 | [Daemon Console](docs/CONSOLE.md) | the in-REAPER chat panel |
 | [Drums](docs/drums.md) | kit discovery, stem profiling, humanize |
+| [Drum transcription](docs/transcription.md) | audio to MIDI, background jobs, kit mapping |
 | [Guitar and bass](docs/guitar-bass.md) | `shred` and `band` |
 | [Mix recipes](docs/mix-recipes.md) | capture, compare and rebuild a mix setup |
 | [Verify](docs/verify.md) | closed-loop mix moves with measured proof |

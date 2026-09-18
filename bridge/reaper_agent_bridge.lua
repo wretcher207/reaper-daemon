@@ -5092,6 +5092,7 @@ local NO_UNDO_BLOCK = {
   -- membership here bypasses run_command's dry_run short-circuit.
   reload_bridge = true,
   get_items = true,
+  get_transcription_source = true,
   get_render_settings = true,
   -- set_render_settings mutates state that lives OUTSIDE the undo history, so
   -- a block would only add an empty undo point. Own dry_run branch, like
@@ -5117,6 +5118,9 @@ local function run_command(command, in_batch)
   -- inversion available (caught live 2026-08-18: a payload dry_run on
   -- reload_bridge really reloaded). Honor it in either position.
   local payload_dry = type(command.payload) == "table" and command.payload.dry_run
+  if command.type == "insert_drum_transcription" and (command.dry_run or payload_dry or (command.payload or {}).validate_only) then
+    return handler(command)
+  end
   if (command.dry_run or payload_dry) and is_mutating(command.type) then
     return { dry_run = true, would_run = command.type, payload = command.payload or {} }
   end
@@ -5630,6 +5634,162 @@ handlers.get_items = function(command)
   end
   local _, track_name = reaper.GetTrackName(track, "")
   return { track = { index = track_index, name = track_name }, item_count = #items, items = items }
+end
+
+-- Drum transcription analyzes files in a separate Python process. Freeze only
+-- the source identity/timing here; verify it again in the same native call that
+-- inserts notes, so a minutes-long job cannot write against a moved item or tab.
+do
+  local T = {}
+  local function item_string(item, key)
+    local ok, value = reaper.GetSetMediaItemInfo_String(item, key, "", false)
+    if not ok or not value or value == "" then error("SOURCE_ID_UNAVAILABLE: " .. key) end
+    return value
+  end
+  function T.source(p)
+    local track, index, item
+    if p.item_guid then
+      for ti = 0, reaper.CountTracks(0)-1 do
+        local tr = reaper.GetTrack(0,ti)
+        for ii = 0, reaper.CountTrackMediaItems(tr)-1 do
+          local it = reaper.GetTrackMediaItem(tr,ii)
+          if item_string(it,"GUID") == p.item_guid then
+            if item then error("AMBIGUOUS_ITEM: duplicate item GUID") end
+            track,index,item=tr,ti+1,it
+          end
+        end
+      end
+      if not item then error("NO_MEDIA_ITEM: source item no longer exists") end
+    elseif p.target_track_guid or p.target_track_name then
+      track,index=find_track(p)
+      local count=reaper.CountTrackMediaItems(track)
+      local ii=p.item_index
+      if ii == nil then
+        if count ~= 1 then error("AMBIGUOUS_ITEM: choose an item_index on this track") end
+        ii=0
+      end
+      if type(ii)~="number" or ii%1~=0 or ii<0 or ii>=count then error("NO_MEDIA_ITEM: invalid item_index") end
+      item=reaper.GetTrackMediaItem(track,ii)
+    else
+      if reaper.CountSelectedMediaItems(0)~=1 then error("AMBIGUOUS_ITEM: select one audio item or name its track") end
+      item=reaper.GetSelectedMediaItem(0,0)
+      track=reaper.GetMediaItemTrack(item)
+      index=math.floor(reaper.GetMediaTrackInfo_Value(track,"IP_TRACKNUMBER"))
+    end
+    local take=reaper.GetActiveTake(item)
+    if not take or reaper.TakeIsMIDI(take) then error("NOT_AUDIO: select an audio take") end
+    local source=reaper.GetMediaItemTake_Source(take)
+    if not source then error("NO_SOURCE: audio take has no source") end
+    local kind=reaper.GetMediaSourceType(source,"")
+    if kind=="SECTION" or reaper.GetMediaSourceParent(source) then error("UNSUPPORTED_SOURCE: reversed or section sources are not supported") end
+    local path=reaper.GetMediaSourceFileName(source,"")
+    if not path or path=="" then error("NO_SOURCE_FILE: a local audio file is required") end
+    local rate=reaper.GetMediaItemTakeInfo_Value(take,"D_PLAYRATE")
+    local pitch=reaper.GetMediaItemTakeInfo_Value(take,"D_PITCH")
+    if rate~=1 or pitch~=0 or reaper.GetTakeNumStretchMarkers(take)>0 or reaper.CountTakeEnvelopes(take)>0 or reaper.TakeFX_GetCount(take)>0 then
+      error("UNSUPPORTED_SOURCE: use an unprocessed take at original speed and pitch")
+    end
+    local length=reaper.GetMediaItemInfo_Value(item,"D_LENGTH")
+    local offset=reaper.GetMediaItemTakeInfo_Value(take,"D_STARTOFFS")
+    local source_length=reaper.GetMediaSourceLength(source)
+    if length<=0 or length>600 or offset<0 then error("BAD_SOURCE_RANGE: choose up to 600 seconds with a nonnegative source offset") end
+    if source_length>0 and offset+length>source_length+0.002 then error("UNSUPPORTED_SOURCE: item extends or loops past the source file") end
+    local ok,take_guid=reaper.GetSetMediaItemTakeInfo_String(take,"GUID","",false)
+    if not ok or not take_guid or take_guid=="" then error("SOURCE_ID_UNAVAILABLE: take GUID") end
+    local project,project_path=reaper.EnumProjects(-1,"")
+    local _,name=reaper.GetTrackName(track,"")
+    return {project_token=tostring(project),project_path=project_path or "",track_guid=reaper.GetTrackGUID(track),
+      track_name=name,item_guid=item_string(item,"GUID"),take_guid=take_guid,source_file=path,
+      source_type=kind,position=reaper.GetMediaItemInfo_Value(item,"D_POSITION"),length=length,
+      source_offset=offset,playrate=rate,pitch=pitch,
+      scope="Source file before item fades/gain and track FX"}
+  end
+  handlers.get_transcription_source=function(command) return T.source(command.payload or {}) end
+  handlers.insert_drum_transcription=function(command)
+    local p=command.payload or {}
+    if reaper.GetPlayState()~=0 then error("TRANSPORT_ACTIVE: stop playback before inserting transcription") end
+    if type(p.source)~="table" or type(p.source.item_guid)~="string" then error("BAD_PAYLOAD: source snapshot required") end
+    local current=T.source({item_guid=p.source.item_guid})
+    for _,key in ipairs({"project_token","project_path","track_guid","item_guid","take_guid","source_file","source_type","position","length","source_offset","playrate","pitch"}) do
+      local equal=current[key]==p.source[key]
+      -- JSON round trips shorten REAPER's doubles. Ten nanoseconds of wire
+      -- rounding must not look like the user trimmed the source item.
+      if type(current[key])=="number" and type(p.source[key])=="number" then
+        equal=math.abs(current[key]-p.source[key])<=1e-8
+      end
+      if not equal then error("SOURCE_CHANGED: "..key.." changed during transcription") end
+    end
+    if type(p.job_id)~="string" or not p.job_id:match("^[%w_-]+$") or #p.job_id>100 then error("BAD_PAYLOAD: invalid job_id") end
+    local track=find_track(p)
+    if track==reaper.GetMasterTrack(0) or reaper.GetTrackGUID(track)==current.track_guid then error("BAD_TARGET: choose a separate drum track") end
+    -- A job marker makes retries safe even when the client missed the reply.
+    for ti=0,reaper.CountTracks(0)-1 do
+      local tr=reaper.GetTrack(0,ti)
+      for ii=0,reaper.CountTrackMediaItems(tr)-1 do
+        local it=reaper.GetTrackMediaItem(tr,ii)
+        local _,job=reaper.GetSetMediaItemInfo_String(it,"P_EXT:reaper_daemon_transcription","",false)
+        if job==p.job_id then error("ALREADY_INSERTED: this job already has a MIDI item") end
+      end
+    end
+    if #range_has_items(track,current.position,current.position+current.length)>0 then error("RANGE_OCCUPIED: destination overlaps an existing item") end
+    local events_payload={target_track_guid=reaper.GetTrackGUID(track),start_seconds=current.position,length_seconds=current.length,events=p.events}
+    fx_chain.performance.validate_events(events_payload)
+    for _,event in ipairs(p.events) do if event.type~="note" then error("BAD_PAYLOAD: transcription accepts notes only") end end
+    if type(p.expected_note_names)~="table" then error("BAD_PAYLOAD: expected_note_names required") end
+    for pitch,name in pairs(p.expected_note_names) do
+      local n=tonumber(pitch)
+      if not n or n%1~=0 or n<0 or n>127 or type(name)~="string" then error("BAD_PAYLOAD: invalid note name") end
+      if reaper.GetTrackMIDINoteNameEx(0,track,n,0)~=name then error("KIT_CHANGED: drum note names changed") end
+    end
+    if command.dry_run or p.dry_run or p.validate_only then return {dry_run=true,validated=true,notes=#p.events} end
+    local seen={}
+    for ii=0,reaper.CountTrackMediaItems(track)-1 do seen[reaper.GetTrackMediaItem(track,ii)]=true end
+    local created
+    local ok,result=pcall(function()
+      local data=fx_chain.performance.insert_midi_events({payload=events_payload})
+      for ii=0,reaper.CountTrackMediaItems(track)-1 do
+        local it=reaper.GetTrackMediaItem(track,ii)
+        if not seen[it] then created=it; break end
+      end
+      if not created then error("VERIFY_FAILED: new item not found") end
+      local take=reaper.GetActiveTake(created)
+      local wanted={}
+      for _,e in ipairs(p.events) do wanted[#wanted+1]=e end
+      table.sort(wanted,function(a,b) if a.time~=b.time then return a.time<b.time end; return a.pitch<b.pitch end)
+      local actual=read_midi_notes(take)
+      table.sort(actual,function(a,b) if a.ppq~=b.ppq then return a.ppq<b.ppq end; return a.pitch<b.pitch end)
+      -- Compare multisets in seconds rather than PPQ ordering: adjacent times
+      -- can round to the same PPQ tick at very slow tempos.
+      local used={}
+      for _,e in ipairs(wanted) do
+        local ppq=reaper.MIDI_GetPPQPosFromProjTime(take,current.position+e.time)
+        local ending=reaper.MIDI_GetPPQPosFromProjTime(take,current.position+e.time+e.duration)
+        local found
+        for j,n in ipairs(actual) do
+          if not used[j] and n.pitch==e.pitch and n.velocity==e.velocity and n.channel==(e.channel or 0) and not n.muted
+            and math.abs(n.ppq-ppq)<=1 and math.abs(n.end_ppq-ending)<=1 then found=j; break end
+        end
+        if not found then error("VERIFY_FAILED: inserted note differs") end
+        used[found]=true
+      end
+      local previous={}
+      for _,n in ipairs(actual) do
+        if previous[n.pitch]==n.velocity then error("VERIFY_FAILED: consecutive repeated drum velocity") end
+        previous[n.pitch]=n.velocity
+      end
+      reaper.SetMediaItemInfo_Value(created,"B_LOOPSRC",0)
+      if not reaper.GetSetMediaItemInfo_String(created,"P_EXT:reaper_daemon_transcription",p.job_id,true) then error("VERIFY_FAILED: job marker") end
+      reaper.GetSetMediaItemTakeInfo_String(take,"P_NAME","Drum transcription",true)
+      data.item_guid=item_string(created,"GUID")
+      data.verified=true; data.job_id=p.job_id
+      return data
+    end)
+    if not ok then
+      if created and not reaper.DeleteTrackMediaItem(track,created) then error("ROLLBACK_FAILED: "..tostring(result)) end
+      error(result)
+    end
+    return result
+  end
 end
 
 -- Read-only view of the project's render configuration. Exists because render

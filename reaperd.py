@@ -1618,11 +1618,6 @@ def _skill_path(bridge_root):
     p = os.path.join(bridge_root, "skills", "drum-apparatus")
     if p not in sys.path:
         sys.path.insert(0, p)
-    s = sub.add_parser("recipe", help="capture, compare or rebuild a mix setup")
-    s.add_argument("action", choices=("capture", "diff", "rebuild"))
-    s.add_argument("path", help="local recipe JSON file")
-    s.add_argument("--dry-run", action="store_true", help="preview rebuild without creating a tab")
-    s.set_defaults(func=cmd_recipe)
     return p
 
 
@@ -2010,6 +2005,8 @@ def build_parser():
     s.add_argument("path", help="local recipe JSON file")
     s.add_argument("--dry-run", action="store_true", help="preview rebuild without creating a tab")
     s.set_defaults(func=cmd_recipe)
+    from drum_transcription import add_parser as add_transcription_parser
+    add_transcription_parser(sub)
     return p
 
 

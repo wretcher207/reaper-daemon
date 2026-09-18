@@ -23,6 +23,7 @@ and Linux.
 | `groove <beat.dsl> --track Drums [--position SEC] [--map NAME]` | render a drum DSL to a track |
 | `jam` | drum DSL from stdin to the selected track |
 | `humanize --track Drums [--amount 0-100] [--follow-lead] [--dry-run]` | humanize an existing drum take |
+| `transcribe start\|status\|insert\|configure` | [transcribe an audio item into drum MIDI](transcription.md) using an optional local runtime |
 | `shred --track T [--part guitar\|bass] [--bars-file riff.txt] [--seed N]` | render a guitar or bass riff |
 | `band` | two guitars, bass, and drums in one command |
 | `list-maps` | available drum-kit maps |

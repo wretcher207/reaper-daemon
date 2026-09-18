@@ -1,5 +1,8 @@
 # Drums
 
+To recreate drums from a song recording, use [audio-to-MIDI transcription](transcription.md).
+It reads an audio item from the live session and maps the detected hits to your kit.
+
 The drum engine lives in `skills/drum-apparatus/`. It ships in the cloned
 repo, not via ReaPack. Three jobs: map any kit, profile a stem before writing
 drums, and humanize a take that already exists.

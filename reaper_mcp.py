@@ -2037,6 +2037,55 @@ TOOLS.append({"name": "insert_performance_audition", "description": "Insert a re
               "inputSchema": _schema({"target_track_guid": {"type": "string"}, "start_seconds": {"type": "number"}, "pitch": {"type": "integer"}, **DRY_RUN_PROP}, ["target_track_guid"]),
               "handler": tool_insert_performance_audition})
 
+def tool_transcribe_drums(args):
+    import drum_transcription as transcription
+    try:
+        data = transcription.start(BRIDGE_ROOT, _send, source_track=args.get("source_track"),
+                                   item_index=args.get("item_index"), source_item_guid=args.get("source_item_guid"),
+                                   separate=args.get("separate", True), device=args.get("device", "cpu"),
+                                   threads=args.get("threads", 4))
+        return _reply_result({"ok": True, "data": data})
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        return _reply_result({"ok": False, "error": {"code": "TRANSCRIPTION_FAILED", "details": str(exc)}})
+
+
+def tool_get_drum_transcription(args):
+    import drum_transcription as transcription
+    try:
+        data = transcription.status(BRIDGE_ROOT, args["job_id"])
+        return _reply_result({"ok": True, "data": data})
+    except (OSError, ValueError, KeyError) as exc:
+        return _reply_result({"ok": False, "error": {"code": "TRANSCRIPTION_FAILED", "details": str(exc)}})
+
+
+def tool_insert_drum_transcription(args):
+    import drum_transcription as transcription
+    try:
+        data = transcription.insert(BRIDGE_ROOT, lambda kind, payload: _send(kind, payload, timeout_ms=60000),
+                                    args["job_id"], track=args["track"], map_name=args.get("map_name"),
+                                    dry_run=bool(args.get("dry_run", False)))
+        return _reply_result({"ok": True, "data": data})
+    except (OSError, ValueError, KeyError) as exc:
+        return _reply_result({"ok": False, "error": {"code": "TRANSCRIPTION_FAILED", "details": str(exc)}})
+
+
+TOOLS.extend([
+    {"name": "transcribe_drums",
+     "description": "Start local audio-to-drum-MIDI analysis in a background worker. Uses one selected audio item or a named source track/item. Returns a job_id; poll get_drum_transcription, then use insert_drum_transcription. Needs the optional transcription environment and ffmpeg. May download model weights on first use; audio stays local. Does not change the project. Tom and cymbal articulations are estimates.",
+     "inputSchema": _schema({"source_track": {"type": "string"}, "source_item_guid": {"type": "string"},
+                              "item_index": {"type": "integer", "minimum": 0}, "separate": {"type": "boolean", "default": True},
+                              "device": {"type": "string", "enum": ["cpu", "cuda"]},
+                              "threads": {"type": "integer", "minimum": 1, "maximum": 16}}),
+     "handler": tool_transcribe_drums},
+    {"name": "get_drum_transcription", "description": "Read a drum transcription job's progress, failure, output files and insertion receipt. A completed analysis has not inserted anything into REAPER.",
+     "inputSchema": _schema({"job_id": {"type": "string"}}, ["job_id"]),
+     "annotations": {"readOnlyHint": True}, "handler": tool_get_drum_transcription},
+    {"name": "insert_drum_transcription", "description": "Map a completed transcription to a drum kit and insert verified notes into REAPER. Requires the original source item and an empty destination range. Refuses source changes, duplicate jobs and active transport. Auto-discovers note names or accepts a catalog map_name. dry_run validates without writing. Keeps original audio, track mute state and project tempo unchanged. One undo reverts insertion.",
+     "inputSchema": _schema({"job_id": {"type": "string"}, "track": {"type": "string"},
+                              "map_name": {"type": "string"}, **DRY_RUN_PROP}, ["job_id", "track"]),
+     "handler": tool_insert_drum_transcription},
+])
+
 _TOOL_BY_NAME = {t["name"]: t for t in TOOLS}
 
 

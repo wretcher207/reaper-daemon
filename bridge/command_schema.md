@@ -792,6 +792,9 @@ deletes across every track.
 
 ## MIDI
 
+For get_transcription_source and insert_drum_transcription, see
+[Drum transcription bridge commands](../docs/transcription-protocol.md).
+
 ### insert_midi_file
 ```json
 { "midi_path": "/path/to/groove.mid", "target_track_name": "Drums",

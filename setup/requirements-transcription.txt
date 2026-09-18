@@ -1,0 +1,9 @@
+# Optional environment only. The bridge and MCP server remain stdlib-only.
+demucs==4.1.0
+torch==2.14.0
+librosa==0.11.0
+numpy==2.4.6
+scipy==1.17.1
+soundfile==0.14.0
+mido==1.3.3
+adtof-pytorch @ git+https://github.com/xavriley/ADTOF-pytorch.git@85c192e78f716ea0b111cc8a5ee4a8f6a3a4f8a9

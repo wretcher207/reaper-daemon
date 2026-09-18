@@ -36,7 +36,7 @@ are on the master?", "program a d-beat groove at bar 33".
 
 ## Tools
 
-29 tools, grouped:
+Tools, grouped:
 
 | Group | Tools |
 | --- | --- |
@@ -46,6 +46,7 @@ are on the master?", "program a d-beat groove at bar 33".
 | Batch | `batch` runs several commands in one undo block |
 | Capture | post-FX stem capture |
 | Drums | `profile_track`, `riff_grid`, `insert_groove` |
+| Drum transcription | `transcribe_drums`, `get_drum_transcription`, `insert_drum_transcription` (optional [local runtime](transcription.md)) |
 | Parts | `insert_riff` (one guitar or bass part), `cut_band` (the four-track jam, per-leg results), `humanize_take` (dynamics and micro-timing on an existing take, `--follow-lead` included) |
 | Closed loop | `verify_change` (one mutation with measured pre/post proof, see [Verify](verify.md)), `tune_param` (search a parameter until a measured target like "bass LUFS-I down 3 dB" is hit) |
 | Analysis | `analyze_track`, `compare_tracks` (need [Post Mortem](https://github.com/wretcher207/post-mortem)) |
