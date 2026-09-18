@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.20.0
+-- @version 3.21.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -18,6 +18,7 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.21.0: Audio-to-drum MIDI source snapshots and verified insertion.
 --   Mix recipes: capture track state without media, compare locally, rebuild in a new tab.
 --   3.20.0: save_fx_chain, the inverse of add_fx_chain: lift a track's live FX
 --   chain (plugin state included) into a .RfxChain recipe file.

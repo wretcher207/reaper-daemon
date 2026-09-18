@@ -53,7 +53,7 @@ first run.
 2. Paste `https://github.com/wretcher207/reaper-daemon/raw/main/index.xml`
 3. `Extensions > ReaPack > Browse packages`, find **Reaper Daemon**, install.
 
-The ReaPack package (3.19.0) contains both bridge Lua files, the two workflow
+The ReaPack package (3.21.0) contains both bridge Lua files, the two workflow
 skills, and the MIDI note writer. Three things to know:
 
 - **It does not auto-start.** ReaPack installs the bridge as an Action. Run it
@@ -61,7 +61,8 @@ skills, and the MIDI note writer. Three things to know:
   does that for you.
 - **It is not the whole package.** The CLI, `commands/examples/`, and the drum
   engine in `skills/drum-apparatus/` are not in ReaPack. Clone the repo for
-  those and point your agent at the clone. ReaPack keeps the bridge and the
+  those and point your agent at the clone. Audio-to-drum MIDI also needs the
+  [optional transcription environment](transcription.md). ReaPack keeps the bridge and the
   bundled skills updated.
 - **Point your agent at the install folder.** ReaPack installs to
   `<REAPER resource>/Scripts/reaper-daemon/`. Right-click the package in

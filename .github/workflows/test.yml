@@ -58,6 +58,8 @@ jobs:
           python -m py_compile
           reaperd.py
           reaper_mcp.py
+          drum_transcription.py
+          transcription_worker.py
           mix_recipes.py
           instrument_inventory.py
           performance_audition.py
@@ -70,6 +72,8 @@ jobs:
           python -m compileall -q
           reaperd.py
           reaper_mcp.py
+          drum_transcription.py
+          transcription_worker.py
           mix_recipes.py
           instrument_inventory.py
           performance_audition.py

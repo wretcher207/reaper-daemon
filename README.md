@@ -17,7 +17,9 @@ files, and an optional stdio MCP server, `reaper_mcp.py`, exposes the same
 bridge as tools for Claude Desktop and any other MCP client.
 
 macOS, Windows, Linux. Pure Lua inside REAPER, plain Python 3 outside, no
-pip packages. Every change runs inside a REAPER undo block, so Ctrl+Z
+pip packages for the core bridge and MCP server.
+[Audio-to-drum MIDI transcription](docs/transcription.md) uses a separate optional
+model environment. Every change runs inside a REAPER undo block, so Ctrl+Z
 reverts anything an agent does.
 
 ## Install
