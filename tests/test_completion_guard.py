@@ -83,3 +83,24 @@ def test_normal_completed_action_and_educational_answer_pass(tmp_path):
     assert guard.handle(event(tmp_path,'Stop',last_assistant_message='Applied and verified all notes.'),storage,tmp_path)=={}
     guard.handle(event(tmp_path,'UserPromptSubmit',prompt='Explain how this works'),storage,tmp_path)
     assert guard.handle(event(tmp_path,'Stop',last_assistant_message='I need to check this example to explain it.'),storage,tmp_path)=={}
+
+
+def test_global_guard_covers_unrelated_workspaces_and_isolates_state(tmp_path):
+    storage = tmp_path/'central'
+    first = tmp_path/'unrelated one'; first.mkdir()
+    second = tmp_path/'unrelated two'; second.mkdir()
+    guard.handle_global(event(first, 'UserPromptSubmit', prompt='Fix it'), storage)
+    stop = lambda root: event(root, 'Stop', last_assistant_message="I'll fix it.")
+    assert guard.handle_global(stop(first), storage)['decision'] == 'block'
+    assert guard.handle_global(stop(second), storage) == {}
+    guard.handle_global(event(second, 'UserPromptSubmit', prompt='Build it'), storage)
+    assert guard.handle_global(stop(second), storage)['decision'] == 'block'
+    guard.handle_global(event(first, 'Interrupt'), storage)
+    assert guard.handle_global(stop(first), storage) == {}
+    assert guard.handle_global(stop(second), storage)['decision'] == 'block'
+    assert not (first/'state').exists()
+    assert not (second/'state').exists()
+
+
+def test_global_requires_explicit_cwd(tmp_path):
+    assert guard.handle_global({'session_id':'x','hook_event_name':'Stop'}, tmp_path) == {}

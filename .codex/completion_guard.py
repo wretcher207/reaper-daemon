@@ -6,6 +6,7 @@ user stops and interrupts suspend the action gate. This is not a semantic judge.
 """
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -149,10 +150,20 @@ def handle(event, storage=STATE, root=ROOT):
     return result
 
 
+def handle_global(event, storage=None):
+    """User-level installation: isolate each workspace and session centrally."""
+    if not event.get('cwd'):
+        return {}
+    root = Path(event['cwd']).resolve()
+    base = storage if storage is not None else Path(os.environ.get('CODEX_HOME', str(Path.home()/'.codex'))) / 'state' / 'completion-guard'
+    workspace = hashlib.sha256(os.path.normcase(str(root)).encode()).hexdigest()[:24]
+    return handle(event, base / workspace, root)
+
+
 def main():
     try:
         event = json.load(sys.stdin)
-        print(json.dumps(handle(event)))
+        print(json.dumps(handle_global(event) if '--global' in sys.argv else handle(event)))
     except Exception as exc:
         # Never trap the user in a continuation loop because the guard itself broke.
         print(json.dumps({'systemMessage': 'Completion guard error: ' + str(exc)}))
