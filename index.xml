@@ -6,6 +6,16 @@
       <metadata>
         <link rel="website" href="https://github.com/wretcher207/reaper-daemon">Reaper Daemon on GitHub</link>
       </metadata>
+      <version name="3.22.0" author="Dead Pixel Design" time="2026-09-21T16:20:17Z">
+        <changelog><![CDATA[Offline drum composition workshop through the repository CLI and MCP: prepare candidate requests, compare authored MIDI patterns, and keep feedback scoped to its request. MIDI output preserves exact duration. ReaPack packages the bridge and existing workflow helpers; the workshop requires the repository installation.]]></changelog>
+        <source main="main">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.0/bridge/reaper_agent_bridge.lua</source>
+        <source file="json.lua">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.0/bridge/json.lua</source>
+        <source file="../skills/arrangement-midi/SKILL.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.0/skills/arrangement-midi/SKILL.md</source>
+        <source file="../skills/arrangement-midi/references/midi-plan.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.0/skills/arrangement-midi/references/midi-plan.md</source>
+        <source file="../skills/arrangement-midi/scripts/midi_plan.py">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.0/skills/arrangement-midi/scripts/midi_plan.py</source>
+        <source file="../skills/drum-humanize/SKILL.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.0/skills/drum-humanize/SKILL.md</source>
+        <source file="../skills/drum-humanize/references/planning.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.0/skills/drum-humanize/references/planning.md</source>
+      </version>
       <version name="3.21.0" author="Dead Pixel Design" time="2026-09-18T06:03:07Z">
         <changelog><![CDATA[Transcribe drums from an audio item into MIDI, with source trim and timeline position preserved. Background separation and transcription run through the CLI or MCP. The bridge verifies source state, kit mapping and inserted notes, and refuses occupied ranges or duplicate insertion attempts. ReaPack includes the updated bridge; transcription requires the repository installation and optional Python 3.11 model environment. Cymbal types, hi-hat openness and individual tom pitches are estimates.]]></changelog>
         <source main="main">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.21.0/bridge/reaper_agent_bridge.lua</source>

@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "reaper-daemon",
   "display_name": "Reaper Daemon",
-  "version": "3.21.0",
+  "version": "3.22.0",
   "description": "REAPER MCP server: let Claude read your session, set FX, write automation and measure mix moves.",
-  "long_description": "Connects Claude to an existing Reaper Daemon install. Reaper Daemon drives REAPER over a local file bridge with no network port: read every plugin and parameter, set FX values, write automation, and verify a mix move with before and after measurements. Every change runs inside a REAPER undo block.\n\nInstall Reaper Daemon first (git clone https://github.com/wretcher207/reaper-daemon, then python3 setup/install.py, then restart REAPER), and point this extension at that folder.\n\nVersion 3.21.0 adds local audio-to-drum MIDI transcription through an optional Python 3.11 model environment. Start a background job, check progress, then insert the notes onto a drum kit. Source timing is preserved; individual cymbal and tom articulations remain estimates.",
+  "long_description": "Connects Claude to an existing Reaper Daemon install. Reaper Daemon drives REAPER over a local file bridge with no network port: read every plugin and parameter, set FX values, write automation, and verify a mix move with before and after measurements. Every change runs inside a REAPER undo block.\n\nInstall Reaper Daemon first (git clone https://github.com/wretcher207/reaper-daemon, then python3 setup/install.py, then restart REAPER), and point this extension at that folder.\n\nVersion 3.22.0 adds an offline drum composition workshop through the CLI and MCP. Prepare candidate requests, compare authored MIDI patterns, and record feedback for a specific request. The workshop requires the repository installation.",
   "author": {
     "name": "Dead Pixel Design",
     "url": "https://www.deadpixeldesign.com/workflows/reaper-daemon/"

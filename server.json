@@ -3,7 +3,7 @@
   "name": "io.github.wretcher207/reaper-daemon",
   "title": "Reaper Daemon",
   "description": "REAPER MCP server: let Claude read your session, set FX, write automation and measure mix moves.",
-  "version": "3.21.0",
+  "version": "3.22.0",
   "websiteUrl": "https://www.deadpixeldesign.com/workflows/reaper-daemon/",
   "repository": {
     "url": "https://github.com/wretcher207/reaper-daemon",
@@ -12,9 +12,9 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/wretcher207/reaper-daemon/releases/download/v3.21.0/reaper-daemon.mcpb",
-      "version": "3.21.0",
-      "fileSha256": "578742baa29263c9d09f85d116540ea9f5d06917e50c67327b48c6b8f8ec4948",
+      "identifier": "https://github.com/wretcher207/reaper-daemon/releases/download/v3.22.0/reaper-daemon.mcpb",
+      "version": "3.22.0",
+      "fileSha256": "b96f40691b87fb30197232833eb2a9f2803cb89cf2b6b6371c604b089f7fe571",
       "transport": {
         "type": "stdio"
       }
