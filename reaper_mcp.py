@@ -2086,6 +2086,28 @@ TOOLS.extend([
      "handler": tool_insert_drum_transcription},
 ])
 
+def tool_drum_workshop(args):
+    from drum_workshop import run
+    try:
+        result = run(args.get("action"), args.get("path"),
+                     args.get("output"), args.get("feedback"))
+        return _text(json.dumps(result), is_error=not result["ok"])
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        return _text(json.dumps({"ok": False, "error": str(exc)}), is_error=True)
+
+
+TOOLS.append({
+    "name": "drum_workshop",
+    "description": "Prepare separate composition requests, compare authored drum DSL candidates, export MIDI, or record explicit user audition feedback. Local files only; never changes REAPER. Fresh and wildcard requests omit reference patterns. The calling agent writes candidate.dsl and intent.json before evaluate. Comparisons measure structural similarity, not musical quality. No model is invoked and no winner is selected.",
+    "inputSchema": _schema({
+        "action": {"type": "string", "enum": ["prepare", "evaluate", "feedback"]},
+        "path": {"type": "string", "description": "Brief JSON for prepare; workshop folder otherwise"},
+        "output": {"type": "string", "description": "New workshop folder for prepare"},
+        "feedback": {"type": "object", "description": "Explicit user feedback: candidate_id, report, usefulness, novelty, reason, optional scope and confirmed"},
+    }, ["action", "path"]),
+    "handler": tool_drum_workshop,
+})
+
 _TOOL_BY_NAME = {t["name"]: t for t in TOOLS}
 
 

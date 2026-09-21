@@ -2007,6 +2007,8 @@ def build_parser():
     s.set_defaults(func=cmd_recipe)
     from drum_transcription import add_parser as add_transcription_parser
     add_transcription_parser(sub)
+    from drum_workshop import add_parser as add_workshop_parser
+    add_workshop_parser(sub)
     return p
 
 

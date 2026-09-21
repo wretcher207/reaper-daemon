@@ -8,7 +8,7 @@ def _vlq(n):
     return bytes(b)
 
 
-def write_smf(events, ppq=480, tempo=120):
+def write_smf(events, ppq=480, tempo=120, end_tick=None):
     if tempo <= 0:
         raise ValueError(f"tempo must be positive, got {tempo}")
     us_per_qn = int(round(60_000_000 / tempo))
@@ -34,7 +34,9 @@ def write_smf(events, ppq=480, tempo=120):
         dt = tick - prev; prev = tick
         status = (0x90 if kind else 0x80)  # channel 0
         trk += _vlq(dt) + bytes([status, pitch, vel])
-    trk += _vlq(0) + bytes([0xFF, 0x2F, 0x00])
+    if end_tick is not None and (type(end_tick) is not int or end_tick < prev):
+        raise ValueError("end_tick must be an integer at or after the last note-off")
+    trk += _vlq(0 if end_tick is None else end_tick - prev) + bytes([0xFF, 0x2F, 0x00])
 
     header = b"MThd" + struct.pack(">IHHH", 6, 0, 1, ppq)
     return header + b"MTrk" + struct.pack(">I", len(trk)) + bytes(trk)

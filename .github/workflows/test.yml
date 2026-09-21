@@ -59,6 +59,7 @@ jobs:
           reaperd.py
           reaper_mcp.py
           drum_transcription.py
+          drum_workshop.py
           transcription_worker.py
           mix_recipes.py
           instrument_inventory.py
@@ -73,6 +74,7 @@ jobs:
           reaperd.py
           reaper_mcp.py
           drum_transcription.py
+          drum_workshop.py
           transcription_worker.py
           mix_recipes.py
           instrument_inventory.py

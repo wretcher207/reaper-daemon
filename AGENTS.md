@@ -11,6 +11,11 @@ the zero-dependency `reaperd.py` CLI.
 - `bridge/command_schema.md`: authoritative command payloads and result shapes. Open
   the relevant command section instead of loading the entire catalog by default.
 - `skills/drum-apparatus/`: drum DSL and kit-map behavior when that workflow is used.
+- `docs/drum-workshop.md`: use for drums-first inspiration and comparisons of new
+  compositions. Keep fresh composition inputs separate from reference patterns,
+  preserve a wildcard, and evaluate authored candidates before audition. A request
+  for creative inspiration authorizes composing kick/snare ideas; it does not
+  require the user to dictate the rhythm. Scoped corrections aren't global bans.
 - `skills/guitar-apparatus/`: riff notation, tuning/keyswitch maps, and the performance
   engine behind `shred` and `band`. Read it before writing or editing a riff file.
 - `docs/CONSOLE.md`: the Daemon Console (in-REAPER panel + `console_sidecar.py`) —

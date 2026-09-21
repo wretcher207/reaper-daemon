@@ -101,6 +101,7 @@ Claude Code session that always knows which track you have selected.
 | [MCP server](docs/mcp.md) | setup for Claude Desktop and other clients |
 | [Daemon Console](docs/CONSOLE.md) | the in-REAPER chat panel |
 | [Drums](docs/drums.md) | kit discovery, stem profiling, humanize |
+| [Drum workshop](docs/drum-workshop.md) | separate composition briefs, MIDI comparisons, scoped audition feedback |
 | [Drum transcription](docs/transcription.md) | audio to MIDI, background jobs, kit mapping |
 | [Guitar and bass](docs/guitar-bass.md) | `shred` and `band` |
 | [Mix recipes](docs/mix-recipes.md) | capture, compare and rebuild a mix setup |
