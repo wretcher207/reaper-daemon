@@ -190,8 +190,8 @@ def _kit_map(root, send, track_guid, map_name):
             raise ValueError("Unknown kit map: " + map_name)
         kit = maps[map_name]
     else:
-        # Exact named-note matches beat fuzzy classification for known kits.
-        # Monarch uses short hat/floor names that the general matcher cannot infer.
+        # Exact named-note matches beat fuzzy classification for known kits:
+        # Monarch keeps its hand-built map and the rimshot snare voicing below.
         if all(names.get(p) == name for p, name in {24: "Kick", 28: "Snare Rimshot", 38: "Rack 1", 45: "Small Open", 54: "Right Crash"}.items()):
             map_name, kit = "RS Monarch", maps["RS Monarch"]
         else:

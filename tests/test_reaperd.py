@@ -791,3 +791,60 @@ def test_snapshot_chains_reports_existing_as_skipped_and_exits_1(monkeypatch, ro
     out = capsys.readouterr().out
     assert "skipped 'Kick - stem' -> kick.RfxChain exists" in out
     assert out.count("saved") == 2
+
+
+# --- discover-map: RS Monarch's live .midnam (2026-09-22) -------------------
+#
+# The same live discover_drum_map dump as the classifier tests in
+# skills/drum-apparatus/tests/test_mapdetect.py, sent in the bridge's reply
+# shape and out of pitch order. A map saved from it must never put a choke key
+# (a mute trigger) on a hit role: that silenced crash_l, china_l and splash_l.
+
+MONARCH_MIDNAM = {
+    24: "Kick", 26: "Snare Center", 27: "Snare Flam", 28: "Snare Rimshot",
+    29: "Snare Rimshot Flam", 30: "Side Stick", 33: "Floor R2",
+    35: "Floor R1", 36: "Floor L", 37: "Rack 2", 38: "Rack 1",
+    40: "Pedal Hat", 41: "Tight Closed Tip", 42: "Tight Closed Shoulder",
+    43: "Normal Closed Tip", 44: "Normal Closed Shoulder", 45: "Small Open",
+    46: "Medium Open", 47: "Large Open", 49: "Left Crash",
+    50: "Left Crash Choke", 51: "Splash", 52: "Mini Stack", 53: "Mini Bell",
+    54: "Right Crash", 55: "Right Crash Choke", 56: "China",
+    57: "China Choke", 58: "Far Left Crash", 59: "Far Left Crash Choke",
+    60: "Stack", 61: "Ride Bell Shoulder", 62: "Ride Bow Tip",
+    63: "Ride Bell Tip", 64: "Splash Choke", 65: "Mini Bell Choke",
+    69: "Pedal Splash",
+}
+
+
+def test_discover_map_saves_a_playable_monarch_map(monkeypatch, root, capsys):
+    monkeypatch.syspath_prepend(os.path.join(REPO, "skills", "drum-apparatus"))
+    notes = {str(p): {"name": MONARCH_MIDNAM[p], "channel": 0}
+             for p in sorted(MONARCH_MIDNAM, reverse=True)}
+    sent = []
+
+    def fake(cmd_type, payload, **kw):
+        sent.append(cmd_type)
+        return {"ok": True, "data": {"track": {"name": "Monarch"},
+                                     "fx": ["Kontakt 7"], "notes": notes,
+                                     "has_note_names": True}}
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    args = argparse.Namespace(track="Monarch", guid=None, channels="0",
+                              max_pitch=127, save="Monarch Discovered",
+                              bridge_root=root)
+    assert reaperd.cmd_discover_map(args) == 0
+    assert sent == ["discover_drum_map"]
+    path = os.path.join(root, "skills", "drum-apparatus", "maps",
+                        "Monarch Discovered.json")
+    with open(path, encoding="utf-8") as f:
+        saved = json.load(f)
+    chokes = {p for p, name in MONARCH_MIDNAM.items() if "Choke" in name}
+    for role, pitch in saved.items():
+        assert (pitch in chokes) == role.endswith("_CHOKE"), role
+    assert saved["CRASH_L"] == 49 and saved["CRASH_R"] == 54
+    assert saved["BIG_CRASH"] == 58 and saved["CHINA_L"] == 56
+    assert saved["SPLASH_L"] == 51 and saved["HH_PEDAL"] == 40
+    assert [saved["TOM_%d" % n] for n in (1, 2, 3, 4)] == [38, 37, 36, 35]
+    assert saved["HH_CLOSED_TIP"] == 41 and saved["HH_OPEN_1"] == 45
+    assert (saved["CRASH_CHOKE"], saved["CHINA_CHOKE"],
+            saved["SPLASH_CHOKE"]) == (55, 57, 64)
+    assert "WARNING: partial map" not in capsys.readouterr().out
