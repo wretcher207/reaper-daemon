@@ -6,6 +6,16 @@
       <metadata>
         <link rel="website" href="https://github.com/wretcher207/reaper-daemon">Reaper Daemon on GitHub</link>
       </metadata>
+      <version name="3.22.1" author="Dead Pixel Design" time="2026-09-22T21:58:01Z">
+        <changelog><![CDATA[Drum kit-map discovery fixes in the repository CLI: choke keys map to choke roles instead of cymbal hits, Rack and Floor toms, left and right cymbals and hi-hat strokes named without "hat" are recognized, and a side stick is never taken for the main snare. The built-in RS Monarch map now includes its choke notes. The ReaPack package only changes version.]]></changelog>
+        <source main="main">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.1/bridge/reaper_agent_bridge.lua</source>
+        <source file="json.lua">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.1/bridge/json.lua</source>
+        <source file="../skills/arrangement-midi/SKILL.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.1/skills/arrangement-midi/SKILL.md</source>
+        <source file="../skills/arrangement-midi/references/midi-plan.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.1/skills/arrangement-midi/references/midi-plan.md</source>
+        <source file="../skills/arrangement-midi/scripts/midi_plan.py">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.1/skills/arrangement-midi/scripts/midi_plan.py</source>
+        <source file="../skills/drum-humanize/SKILL.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.1/skills/drum-humanize/SKILL.md</source>
+        <source file="../skills/drum-humanize/references/planning.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.1/skills/drum-humanize/references/planning.md</source>
+      </version>
       <version name="3.22.0" author="Dead Pixel Design" time="2026-09-21T16:20:17Z">
         <changelog><![CDATA[Offline drum composition workshop through the repository CLI and MCP: prepare candidate requests, compare authored MIDI patterns, and keep feedback scoped to its request. MIDI output preserves exact duration. ReaPack packages the bridge and existing workflow helpers; the workshop requires the repository installation.]]></changelog>
         <source main="main">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.22.0/bridge/reaper_agent_bridge.lua</source>
