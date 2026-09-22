@@ -183,9 +183,9 @@ def test_monarch_discovered_map():
     m, rep = match_roles(MONARCH_NOTES)
     assert rep["complete"], rep
     assert m == MONARCH_DISCOVERED
-    # Every note is accounted for: mapped, recognized but spare, or unknown.
-    assert set(rep["unused"]) == {29, 33, 43, 44, 50, 52, 59, 65, 69}
-    assert rep["ignored"] == {30: "Side Stick"}
+    # Every note is accounted for: mapped, or recognized but spare.
+    assert set(rep["unused"]) == {29, 30, 33, 43, 44, 50, 52, 59, 65, 69}
+    assert rep["ignored"] == {}
 
 
 def test_monarch_discovery_agrees_with_the_catalog_map():
@@ -286,6 +286,23 @@ def test_lone_left_cymbal_still_plays_the_right_hand_role():
     m, rep = match_roles(notes)
     assert rep["complete"]
     assert m["CRASH_R"] == 49 and m["CRASH_L"] == 49
+
+
+def test_side_stick_is_never_the_snare():
+    # GM-style layout (SD3/EZdrummer): the side stick sits below the center.
+    for name in ("Snare Sidestick", "Side Stick", "Snare Cross Stick",
+                 "Cross-Stick"):
+        assert classify(name) == ("snare", "sidestick", None), name
+    notes = {36: "Kick", 37: "Snare Sidestick", 38: "Snare Center",
+             40: "Snare Rimshot", 46: "Open Hat", 49: "Crash"}
+    m, rep = match_roles(notes)
+    assert m["SNARE"] == 38 and m["SNARE_RIM"] == 40
+    assert m["SNARE_GHOST"] == 38   # a ghost is a soft center hit, not a click
+    assert rep["unused"] == {37: "Snare Sidestick"}
+    # A kit whose only snare note is the side stick has no snare to map.
+    m, rep = match_roles({36: "Kick", 37: "Side Stick", 46: "Open Hat",
+                          49: "Crash"})
+    assert "SNARE" not in m and not rep["complete"]
 
 
 def test_tom_rim_stroke_does_not_take_a_tom_slot():

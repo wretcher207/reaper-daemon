@@ -46,7 +46,9 @@ FAMILY_PATTERNS = [
                 r"\bpedal\b", r"\bfoot\s*hat\b"]),
     # "Rack 2" and "Floor R1" (RS Monarch) are toms without the word "tom".
     ("tom",    [r"\btom\b", r"\brack\b", r"\bfloor\b", r"\bft\b", r"\brt\b"]),
-    ("snare",  [r"\bsnare\b", r"\bsd\b", r"\bsnr\b"]),
+    # A side (cross) stick is a snare stroke even when "snare" is left out.
+    ("snare",  [r"\bsnare\b", r"\bsd\b", r"\bsnr\b", r"\bsidestick\b",
+                r"\b(?:side|cross)\s*-?\s*stick\b", r"\bxstick\b"]),
     ("kick",   [r"\bkick\b", r"\bbd\b", r"\bbass\s*drum\b", r"\bbdrum\b"]),
     ("bell",   [r"\bbell\b", r"\bcowbell\b"]),
 ]
@@ -63,6 +65,7 @@ MODIFIERS = {
     "pedal":   r"\bpedal\b",
     "bell":    r"\bbell\b",
     "crash":   r"\bcrash\b|\bedge\b|\bshank\b|\bshoulder\b",
+    "sidestick": r"\bsidestick\b|\b(?:side|cross)\s*-?\s*stick\b|\bxstick\b",
     # A choke key grabs a ringing cymbal. It is a mute trigger, never a hit.
     "choke":   r"\bchoke[ds]?\b",
 }
@@ -163,7 +166,10 @@ def classify(name):
                 break
 
     elif family == "snare":
-        if _has(MODIFIERS["ghost"], t):
+        # A stick laid across the rim clicks; it is never the snare's main hit.
+        if _has(MODIFIERS["sidestick"], t):
+            modifier = "sidestick"
+        elif _has(MODIFIERS["ghost"], t):
             modifier = "ghost"
         elif _has(MODIFIERS["flam"], t):
             modifier = "flam"
@@ -334,7 +340,7 @@ def match_roles(notes):
         direct["KICK_L"] = ks[-1]["pitch"] if len(ks) > 1 else ks[0]["pitch"]
 
     # --- snare (+ghost/flam/rim) -----------------------------------------
-    snares = buckets["snare"]
+    snares = [d for d in buckets["snare"] if d["mod"] != "sidestick"]
     if snares:
         mains = [d for d in snares if d["mod"] is None]
         direct["SNARE"] = _best(mains or snares)["pitch"]
