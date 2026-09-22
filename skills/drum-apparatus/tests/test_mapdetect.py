@@ -162,9 +162,9 @@ MONARCH_NOTES = {
     69: "Pedal Splash",
 }
 
-# The hand-built catalog map plus the kit's three choke roles. SNARE_GHOST is
-# the one role that differs: the catalog plays ghosts on the Side Stick by
-# choice, and the kit has no ghost articulation to discover.
+# The hand-built catalog map, choke roles included. SNARE_GHOST is the one
+# role that differs: the catalog plays ghosts on the Side Stick by choice, and
+# the kit has no ghost articulation to discover.
 MONARCH_DISCOVERED = {
     "KICK_R": 24, "KICK_L": 24, "SNARE": 26, "SNARE_FLAM": 27,
     "SNARE_RIM": 28, "SNARE_GHOST": 26,
@@ -192,7 +192,8 @@ def test_monarch_discovery_agrees_with_the_catalog_map():
     maps = Path(__file__).resolve().parent.parent / "catalog" / "maps.json"
     catalog = json.loads(maps.read_text())["RS Monarch"]
     m, _ = match_roles(MONARCH_NOTES)
-    roles = [r for r in ROLE_KEYS if r != "SNARE_GHOST"]
+    assert set(m) == set(catalog)
+    roles = [r for r in catalog if r != "SNARE_GHOST"]
     assert {r: m[r] for r in roles} == {r: catalog[r] for r in roles}
 
 

@@ -76,8 +76,8 @@ ROLE_FALLBACKS = {
     "STACK":           ["CHINA_R", "CRASH_R"],
     # Choke articulations (hit-and-grab) are OPTIONAL roles — not in
     # ROLE_KEYS, so maps aren't required to have them. A map without choke
-    # notes (GM, the built-in RS Monarch map, ...) degrades to the open
-    # cymbal instead of dropping the hit.
+    # notes (GM, ...) degrades to the open cymbal instead of dropping the
+    # hit.
     "CHINA_CHOKE":     ["CHINA_R"],
     "CRASH_CHOKE":     ["CRASH_R"],
     "SPLASH_CHOKE":    ["SPLASH_R"],

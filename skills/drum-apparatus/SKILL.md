@@ -100,9 +100,9 @@ anything, and it's usually several cymbals at once.
   Breakdowns below — they're not grooves.)
 - **Chokes:** `china_choke` / `crash_choke` / `splash_choke` lanes play the
   kit's choke articulation — the genre move on stabs, dead stops, and
-  endings. Optional roles: on a map without choke notes (GM, the built-in
-  RS Monarch map) they fall back to the open cymbal, so the DSL stays
-  portable. `discover-map` puts a kit's choke keys on these roles, never on
+  endings. Optional roles: on a map without choke notes (GM) they fall back
+  to the open cymbal, so the DSL stays portable. RS Monarch and MDL Tone map
+  their choke keys. `discover-map` puts a kit's choke keys on these roles, never on
   a cymbal hit.
   **Authoring rule (verified live on MDL Tone, 2026-07-28):** kit choke
   notes are MUTE TRIGGERS, not hits — fired alone they play nothing. Always
