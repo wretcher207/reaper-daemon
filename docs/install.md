@@ -21,7 +21,7 @@ pointing at this clone. It is idempotent. Re-run it any time you move the repo.
 | `--dry-run` | preview, change nothing |
 | `--uninstall` | remove the managed auto-start block |
 | `--bridge-root /path/to/clone` | point the auto-start at a different clone |
-| `REAPER_RESOURCE_PATH=/dir` (env) | override the resource directory |
+| `REAPER_RESOURCE_PATH=/dir` environment variable | override the resource directory |
 
 ## Check it
 

@@ -104,7 +104,7 @@ Use the shared engine plus index-addressed `apply_note_edits`, with explicit tra
 GUID/item, note count, and `allow_partial: false`. Combined velocity/timing edits
 on one take belong in one command. This supports stacked notes; the older
 position/pitch writer can reject them. Do not promise one undo for a multi-item
-pass unless it actually uses a single batch. A batch is not transactional rollback:
+edit that doesn't run as a single batch. A batch is not transactional rollback:
 earlier commands may have applied if a later one fails.
 
 Re-read all targeted notes. Check note count, pitch/channel, requested values,

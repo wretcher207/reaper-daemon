@@ -55,6 +55,12 @@ Tools, grouped:
 | Closed loop | `verify_change` (one mutation with measured pre/post proof, see [Verify](verify.md)), `tune_param` (search a parameter until a measured target like "bass LUFS-I down 3 dB" is hit) |
 | Analysis | `analyze_track`, `compare_tracks` (need [Post Mortem](https://github.com/wretcher207/post-mortem)) |
 
+Install Post Mortem for the analysis tools:
+
+```bash
+pipx install git+https://github.com/wretcher207/post-mortem.git
+```
+
 Things the tools tell you, so you do not have to guess:
 
 - `profile_track` and `riff_grid` read the saved `.rpp` on disk, not the

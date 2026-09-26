@@ -21,7 +21,7 @@ The bridge root defaults to this file's directory; override with the
 REAPER_DAEMON_ROOT environment variable.
 
 The analyze_track / compare_tracks tools additionally need Post Mortem
-(https://github.com/wretcher207/post-mortem) installed so the `postmortem`
+(install steps in docs/mcp.md) so the `postmortem`
 command is on PATH (or set POSTMORTEM_CMD). They return only verified-isolated
 payloads; the model on the client side does the diagnosing.
 """
@@ -1111,9 +1111,9 @@ def _run_postmortem(tracks, seconds, preamble, note=None):
     cmdline = _postmortem_cmdline()
     if not cmdline:
         return _text(
-            "Post Mortem is not installed (no `postmortem` on PATH). Install it:\n"
-            "  pipx install git+https://github.com/wretcher207/post-mortem.git\n"
-            "or set POSTMORTEM_CMD to its command line.", is_error=True)
+            "Post Mortem is not installed (no `postmortem` on PATH). Run the\n"
+            "pipx install command in Reaper Daemon's docs/mcp.md, or set\n"
+            "POSTMORTEM_CMD to its command line.", is_error=True)
     env = dict(os.environ, REAPER_DAEMON_ROOT=BRIDGE_ROOT)
     try:
         proc = subprocess.run(

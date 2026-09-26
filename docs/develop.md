@@ -21,6 +21,7 @@ gate, because CI does not launch the DAW. See
 | Path | What it is |
 | --- | --- |
 | `bridge/reaper_agent_bridge.lua` | the bridge. Runs inside REAPER, OS-neutral. |
+| `bridge/automation.lua` | FX-envelope automation, loaded by the bridge on every load |
 | `bridge/bridge_config.json` | machine-specific config, regenerated on first run |
 | `bridge/command_schema.md` | full command reference |
 | `bridge/reaper_daemon_console.lua` | Daemon Console panel (ReaImGui, clone-only) |
