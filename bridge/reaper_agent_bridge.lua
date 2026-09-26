@@ -4274,13 +4274,13 @@ fx_chain.performance = (function(reaper, find_track, find_fx, gate)
     local ok,name=reaper.TrackFX_GetPreset(t,fx,'')
     local index,count=reaper.TrackFX_GetPresetIndex(t,fx)
     return {name=name,valid=ok,index=index,count=count,
-      scope='REAPER host presets; proprietary preset files may require plugin UI'}
+      scope='REAPER presets from the FX preset menu; proprietary preset files may require plugin UI'}
   end
   function M.set_fx_preset(command)
     local p=command.payload or {}
-    if type(p.name)~='string' or p.name=='' then error('BAD_PAYLOAD: exact host preset name required') end
+    if type(p.name)~='string' or p.name=='' then error('BAD_PAYLOAD: exact REAPER preset name required') end
     local t,_,fx=find_fx(p)
-    if not reaper.TrackFX_SetPreset(t,fx,p.name) then error('PRESET_NOT_FOUND: use host preset name or add_fx_chain') end
+    if not reaper.TrackFX_SetPreset(t,fx,p.name) then error('PRESET_NOT_FOUND: use a REAPER preset name or add_fx_chain') end
     local result=M.get_fx_preset(command)
     if not result.valid or result.name~=p.name then error('VERIFY_FAILED: preset changed but name did not match; undo available') end
     return result
