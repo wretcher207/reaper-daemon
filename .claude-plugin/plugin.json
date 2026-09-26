@@ -10,6 +10,10 @@
   "homepage": "https://www.deadpixeldesign.com/workflows/reaper-daemon/",
   "repository": "https://github.com/wretcher207/reaper-daemon",
   "license": "MIT",
+  "documentationUrl": "https://github.com/wretcher207/reaper-daemon#docs",
+  "supportUrl": "https://github.com/wretcher207/reaper-daemon/issues",
+  "privacyPolicyUrl": "https://github.com/wretcher207/reaper-daemon#what-it-runs-and-sends",
+  "termsOfServiceUrl": "https://github.com/wretcher207/reaper-daemon/blob/main/LICENSE",
   "keywords": [
     "reaper",
     "daw",
