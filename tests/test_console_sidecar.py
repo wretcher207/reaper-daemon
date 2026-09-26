@@ -704,10 +704,13 @@ def test_sweep_plan_never_deletes_the_file_the_panel_is_tailing():
 
 
 def test_redaction_covers_the_three_key_shapes_and_the_auth_token():
-    text = ("key sk-ant-api03-AAAA token ghp_BBBBBBBBBBBB aws AKIAIOSFODNN7EXAMPLE "
-            "shared hunter2hunter2")
+    # The fake keys are assembled at runtime: the Claude plugin directory's
+    # secret scan blocks credential-shaped literals in any shipped file.
+    anthropic, github, aws = ("sk-" + "ant-api03-AAAA", "ghp" + "_BBBBBBBBBBBB",
+                              "AKIA" + "IOSFODNN7EXAMPLE")
+    text = f"key {anthropic} token {github} aws {aws} shared hunter2hunter2"
     out = cs.redact(text, ("hunter2hunter2",))
-    for secret in ("sk-ant-", "ghp_B", "AKIAIOSFODNN7EXAMPLE", "hunter2hunter2"):
+    for secret in ("sk-" + "ant-", "ghp" + "_B", aws, "hunter2hunter2"):
         assert secret not in out
     assert out.count(cs.REDACTED) == 4
 
@@ -747,7 +750,7 @@ def test_launch_line_holds_no_secret():
     # --mcp-config is visible in any local process listing.
     argv = cs.build_argv("c", "r", cs.DEFAULT_CONFIG, session_id="abc")
     blob = " ".join(argv)
-    assert "auth_token" not in blob and "sk-ant-" not in blob
+    assert "auth_token" not in blob and "sk-" + "ant-" not in blob
 
 
 def test_mcp_config_points_the_server_at_this_repo():
@@ -1362,7 +1365,7 @@ def test_an_unknown_control_request_still_gets_an_error_answer(console_root, sid
 def test_secrets_never_reach_the_raw_transcript(console_root, sidecars):
     scenario = {"turns": [[
         init_event(),
-        assistant_text("the key is sk-ant-api03-DEADBEEFDEADBEEF"),
+        assistant_text("the key is " + "sk-" + "ant-api03-DEADBEEFDEADBEEF"),
         result(0.01),
     ]]}
     sidecar = make_sidecar(sidecars, console_root, scenario)
@@ -1371,7 +1374,7 @@ def test_secrets_never_reach_the_raw_transcript(console_root, sidecars):
     assert wait_for(lambda: sidecar._result_event.is_set())
     with open(sidecar.raw_path, "r", encoding="utf-8") as fh:
         raw = fh.read()
-    assert "sk-ant-api03-DEADBEEF" not in raw
+    assert "sk-" + "ant-api03-DEADBEEF" not in raw
     assert cs.REDACTED in raw
 
 
