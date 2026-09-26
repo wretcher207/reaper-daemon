@@ -101,7 +101,7 @@
 --   3.13.1: Maintenance. The undocumented enum_installed_fx command is removed
 --   (never in the schema, untested, uncalled, and duplicated by the CLI's
 --   installed-plugin resolver). Repo-side: the unreachable site/ product page
---   is deleted (netlify.toml 301s everything to deadpixeldesign.com; the old
+--   is deleted (netlify.toml 301s everything to the Dead Pixel Design site; the old
 --   page lives in git history), one-time spike tooling and a self-consistency
 --   fixture test are removed, and the drumgen.profile argv builder is shared
 --   between the CLI and the MCP server so the two cannot drift. No behavior
