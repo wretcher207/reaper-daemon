@@ -10,6 +10,10 @@ from a named groove in the catalog — David does NOT think that way. He builds 
 beat from the riff up. The catalog is a vocabulary to reach into mid-build, not a
 menu to order from.
 
+Prefer the REAPER MCP tools when they're connected (`profile_track`, `riff_grid`,
+`insert_groove`, `humanize_take`). The `reaperd.py` commands below run from the
+Reaper Daemon folder, the clone that REAPER loads the bridge from.
+
 ## The procedure (in this order, always)
 
 ### 0. Profile the song first (multi-section work only)

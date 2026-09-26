@@ -1,0 +1,45 @@
+{
+  "name": "reaper-daemon",
+  "displayName": "Reaper Daemon",
+  "version": "3.22.1",
+  "description": "REAPER MCP server: let Claude read your session, set FX, write automation and measure mix moves.",
+  "author": {
+    "name": "Dead Pixel Design",
+    "url": "https://www.deadpixeldesign.com/workflows/reaper-daemon/"
+  },
+  "homepage": "https://www.deadpixeldesign.com/workflows/reaper-daemon/",
+  "repository": "https://github.com/wretcher207/reaper-daemon",
+  "license": "MIT",
+  "keywords": [
+    "reaper",
+    "daw",
+    "mixing",
+    "audio",
+    "music production",
+    "midi",
+    "automation"
+  ],
+  "userConfig": {
+    "install_dir": {
+      "type": "directory",
+      "title": "Reaper Daemon folder",
+      "description": "The folder you cloned Reaper Daemon into and ran setup/install.py from (it contains reaper_mcp.py).",
+      "default": "~/reaper-daemon"
+    },
+    "python": {
+      "type": "string",
+      "title": "Python command",
+      "description": "The command that runs Python 3. On Windows, use python or py if python3 isn't on your PATH.",
+      "default": "python3"
+    }
+  },
+  "mcpServers": {
+    "reaper": {
+      "command": "${user_config.python}",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/reaper_mcp.py"],
+      "env": {
+        "REAPER_DAEMON_ROOT": "${user_config.install_dir}"
+      }
+    }
+  }
+}

@@ -24,6 +24,10 @@ Claude Desktop, in `claude_desktop_config.json`:
 
 Use `python` instead of `python3` on Windows if that is what is on PATH.
 
+Claude plugin: the repository is also a Claude plugin that starts this
+server and points it at your Reaper Daemon folder. See
+[Claude plugin](../README.md#claude-plugin).
+
 Claude Desktop extension: download `reaper-daemon.mcpb` from the
 [latest release](https://github.com/wretcher207/reaper-daemon/releases/latest),
 open it, and pick your Reaper Daemon folder when asked. The bundle is a small

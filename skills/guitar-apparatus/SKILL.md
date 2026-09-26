@@ -1,3 +1,8 @@
+---
+name: guitar-apparatus
+description: Render humanized guitar and bass MIDI (palm mutes, power chords, instrument keyswitches) from riff notation and insert it onto REAPER tracks. Use when the user asks for a guitar or bass part, a riff played on a virtual guitar or bass, or a whole rhythm section jam (guitar, bass and drums together) with shred or band.
+---
+
 # Guitar apparatus — humanized virtual-guitar/bass MIDI
 
 The guitar-side counterpart to `drum-apparatus`. Renders believable, human-feeling
@@ -64,6 +69,10 @@ David's live UI (see `docs/instruments.md`).
   ready for mod-wheel maps; Argent does not need it).
 
 ## Commands
+
+Prefer the REAPER MCP tools when they're connected (`insert_riff`, `cut_band`,
+`humanize_take`). The `reaperd.py` commands below run from the Reaper Daemon
+folder, the clone that REAPER loads the bridge from.
 
 ```bash
 # THE one-liner: lay down / re-cut the whole 4-track jam (2 guitars + bass +

@@ -38,6 +38,30 @@ python3 reaperd.py status
 
 Prefer ReaPack, or want to load the bridge by hand? See [docs/install.md](docs/install.md).
 
+### Claude plugin
+
+The repository is also a Claude plugin. It bundles the MCP server with four
+skills: drum programming, drum humanizing, guitar and bass parts, and MIDI
+for an existing arrangement. The plugin drives the install above, so clone
+and run the installer first.
+
+When you add the plugin, Claude asks for two settings:
+
+- **Reaper Daemon folder**: where you cloned it. Default `~/reaper-daemon`.
+- **Python command**: default `python3`. On Windows, use `python` or `py` if
+  `python3` isn't on your PATH.
+
+Cowork doesn't ask, so it uses those defaults. To try the plugin in Claude
+Code straight from your clone:
+
+```bash
+claude --plugin-dir /path/to/reaper-daemon
+```
+
+The MCP server runs on your computer, next to REAPER. It works in Claude
+Code and in Cowork sessions on your machine. Chat on claude.ai loads the
+skills but can't reach REAPER.
+
 ## Mix with an AI agent
 
 Point Claude, or any agent talking to Reaper Daemon, at your open REAPER
@@ -121,6 +145,25 @@ drum humanization.
 
 Any process that can write to `inbox/` can drive REAPER. Keep the bridge
 folder local and off shared drives. Details in [docs/security.md](docs/security.md).
+
+## What it runs and sends
+
+Everything runs on your machine. The MCP server and CLI are plain Python
+with no network calls. The bridge is a Lua script inside REAPER. It trades
+JSON files with the server through the Reaper Daemon folder, which also
+holds logs and the MIDI files it generates. Renders and captures write
+audio files only if you turn on audio writes, which are off by default.
+Nothing leaves your computer.
+
+Three optional pieces do more, and only if you install them:
+
+- Drum transcription downloads its Python packages and model weights during
+  setup, and Demucs downloads its weights on the first separation job.
+  Audio stays local.
+- `analyze_track` and `compare_tracks` run
+  [Post Mortem](https://github.com/wretcher207/post-mortem) from your PATH.
+- The Daemon Console starts a Claude Code session on your machine, which
+  talks to Anthropic like any Claude Code session.
 
 ## License
 
