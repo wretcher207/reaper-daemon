@@ -235,9 +235,49 @@ def _forward(cmd_type, args, keys, timeout_ms=DEFAULT_TIMEOUT_MS,
                                else False))
 
 
+# The bridge Lua is what setup/install.py points REAPER at, so its presence is
+# what separates a cloned, installable folder from a wrong or missing one.
+_BRIDGE_SCRIPT = os.path.join("bridge", "reaper_agent_bridge.lua")
+
+
+def _install_problem():
+    """(code, fix) when BRIDGE_ROOT is not a Reaper Daemon clone, else None.
+
+    Checked before anything touches the folder: sending a command creates
+    inbox/ under BRIDGE_ROOT, and a stray inbox/ in the default ~/reaper-daemon
+    makes the README's git clone into that same folder fail."""
+    readme = os.path.join(SERVER_DIR, "README.md")
+    if not os.path.isdir(BRIDGE_ROOT):
+        return ("NOT_INSTALLED",
+                f"Reaper Daemon isn't installed at {BRIDGE_ROOT}. The plugin "
+                "only carries the MCP server; REAPER needs the bridge from a "
+                "clone of the reaper-daemon repository. Clone it into that "
+                "folder, run setup/install.py from the clone, and restart "
+                "REAPER (Install section of " + readme + "). If you cloned it "
+                "somewhere else, set the plugin's Reaper Daemon folder to that "
+                "path.")
+    if not os.path.isfile(os.path.join(BRIDGE_ROOT, _BRIDGE_SCRIPT)):
+        return ("WRONG_FOLDER",
+                f"{BRIDGE_ROOT} exists but isn't a Reaper Daemon clone (no "
+                f"{_BRIDGE_SCRIPT}). Set the plugin's Reaper Daemon folder to "
+                "the folder you cloned and ran setup/install.py from, or clone "
+                "it there (Install section of " + readme + ").")
+    return None
+
+
+def _not_installed_result(problem):
+    code, fix = problem
+    return _error_result(code, fix + " Nothing was sent to REAPER.")
+
+
 def tool_get_status(args):
+    problem = _install_problem()
+    if problem:
+        info = {"alive": False, "installed": False, "bridge_root": BRIDGE_ROOT,
+                "problem": problem[0], "fix": problem[1]}
+        return _text(json.dumps(info, indent=1), is_error=True)
     alive = reaperd.status_ok(bridge_root=BRIDGE_ROOT, quiet=True)
-    info = {"alive": bool(alive), "bridge_root": BRIDGE_ROOT}
+    info = {"alive": bool(alive), "installed": True, "bridge_root": BRIDGE_ROOT}
     hb_path = os.path.join(BRIDGE_ROOT, "bridge", "heartbeat.json")
     try:
         with open(hb_path, "r", encoding="utf-8") as f:
@@ -266,8 +306,20 @@ def tool_get_status(args):
         info["allow_risk_level_3"] = None
         info["gates"] = None
     if not alive:
-        info["fix"] = ("Start REAPER (the bridge auto-loads via __startup.lua), "
-                       "or run the bridge action manually. See README.")
+        if info["heartbeat"] is None:
+            # Cloned but the bridge has never written a heartbeat: either the
+            # installer never ran or REAPER hasn't restarted since it did.
+            running = reaperd.reaper_running()
+            info["problem"] = "BRIDGE_NEVER_LOADED"
+            info["fix"] = (
+                "The bridge has never run from this folder. Run "
+                f"setup/install.py in {BRIDGE_ROOT}, then "
+                + ("restart REAPER." if running else "start REAPER."))
+        else:
+            info["problem"] = "BRIDGE_NOT_RESPONDING"
+            info["fix"] = ("Start REAPER (the bridge auto-loads via "
+                           "__startup.lua), or run the bridge action manually. "
+                           "See README.")
     return _text(json.dumps(info, indent=1), is_error=not alive)
 
 
@@ -2110,6 +2162,11 @@ TOOLS.append({
 
 _TOOL_BY_NAME = {t["name"]: t for t in TOOLS}
 
+# Tools that never read or write the bridge folder, so they work before the
+# clone exists. get_status reports the install problem itself.
+_NO_BRIDGE_TOOLS = {"get_status", "drum_workshop", "instrument_inventory",
+                    "complete_postmortem_onboarding"}
+
 
 # ---------------------------------------------------------------------------
 # JSON-RPC over stdio
@@ -2156,6 +2213,10 @@ def handle_message(msg):
         if tool is None:
             return _rpc_error(mid, -32602, f"unknown tool: {params.get('name')!r}")
         args = params.get("arguments") or {}
+        if tool["name"] not in _NO_BRIDGE_TOOLS:
+            problem = _install_problem()
+            if problem:
+                return _rpc_result(mid, _not_installed_result(problem))
         try:
             return _rpc_result(mid, tool["handler"](args))
         except Exception as e:  # tool bug -> tool-level error, keep serving

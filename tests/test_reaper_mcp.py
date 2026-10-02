@@ -290,6 +290,52 @@ def test_get_status_reports_dead_bridge(root, monkeypatch):
     assert info["bridge_root"] == root
 
 
+def test_get_status_names_missing_install(tmp_path, monkeypatch):
+    missing = str(tmp_path / "reaper-daemon")
+    monkeypatch.setattr(reaper_mcp, "BRIDGE_ROOT", missing)
+    resp = call("get_status")
+    info = json.loads(result_text(resp))
+    assert resp["result"]["isError"] is True
+    assert info["installed"] is False
+    assert info["problem"] == "NOT_INSTALLED"
+    assert "setup/install.py" in info["fix"]
+    assert "Start REAPER" not in info["fix"]
+
+
+def test_get_status_names_wrong_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(reaper_mcp, "BRIDGE_ROOT", str(tmp_path))
+    info = json.loads(result_text(call("get_status")))
+    assert info["problem"] == "WRONG_FOLDER"
+
+
+def test_get_status_bridge_never_loaded(root, monkeypatch):
+    monkeypatch.setattr(reaper_mcp.reaperd, "reaper_running", lambda: True)
+    info = json.loads(result_text(call("get_status")))
+    assert info["installed"] is True
+    assert info["problem"] == "BRIDGE_NEVER_LOADED"
+    assert "restart REAPER" in info["fix"]
+
+
+def test_bridge_tool_without_install_fails_fast_and_creates_nothing(
+        tmp_path, monkeypatch):
+    # A send used to create inbox/ in the missing folder and wait out the
+    # timeout; the stray folder then broke a git clone into the same path.
+    missing = tmp_path / "reaper-daemon"
+    monkeypatch.setattr(reaper_mcp, "BRIDGE_ROOT", str(missing))
+    monkeypatch.setattr(reaper_mcp.reaperd, "send_type",
+                        lambda *a, **k: pytest.fail("command was sent"))
+    resp = call("get_context")
+    assert resp["result"]["isError"] is True
+    assert json.loads(result_text(resp))["error"]["code"] == "NOT_INSTALLED"
+    assert not missing.exists()
+
+
+def test_offline_tools_skip_the_install_check(tmp_path, monkeypatch):
+    monkeypatch.setattr(reaper_mcp, "BRIDGE_ROOT", str(tmp_path / "missing"))
+    resp = call("drum_workshop", {"action": "prepare"})
+    assert "NOT_INSTALLED" not in result_text(resp)
+
+
 def test_get_status_reports_live_bridge_and_risk_gate(root, monkeypatch):
     hb = os.path.join(root, "bridge", "heartbeat.json")
     with open(hb, "w", encoding="utf-8") as f:

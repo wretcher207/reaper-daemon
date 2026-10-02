@@ -24,6 +24,11 @@ reverts anything an agent does.
 
 ## Install
 
+Reaper Daemon has two halves, a Lua bridge that runs inside REAPER and the
+tools that talk to it. Both come from a clone of this repository on the
+computer REAPER runs on, so install here first, even if you found it through
+the Claude plugin directory.
+
 ```bash
 git clone https://github.com/wretcher207/reaper-daemon.git
 cd reaper-daemon
@@ -36,14 +41,26 @@ Restart REAPER, then check the bridge is alive:
 python3 reaperd.py status
 ```
 
+Rendering and audio capture are off until you allow them, and every
+measurement needs them, including `verify_change`. To do that, run:
+
+```bash
+python3 setup/install.py --allow-audio-writes
+```
+
+Saving the project and changing REAPER preferences have their own switches;
+see [docs/install.md](docs/install.md).
+
 Prefer ReaPack, or want to load the bridge by hand? See [docs/install.md](docs/install.md).
 
 ### Claude plugin
 
-The repository is also a Claude plugin. It bundles the MCP server with four
-skills: drum programming, drum humanizing, guitar and bass parts, and MIDI
-for an existing arrangement. The plugin drives the install above, so clone
-and run the installer first.
+The repository is also a Claude plugin. It bundles the MCP server with five
+skills: setup, drum programming, drum humanizing, guitar and bass parts, and
+MIDI for an existing arrangement. The plugin drives the install above, so if
+you added it before installing, ask Claude to set up Reaper Daemon. The setup
+skill finds what's missing, runs the clone and installer with you, asks which
+disk writes to allow, and checks that REAPER answers.
 
 When you add the plugin, Claude asks for two settings:
 

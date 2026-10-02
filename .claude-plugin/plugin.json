@@ -1,8 +1,8 @@
 {
   "name": "reaper-daemon",
   "displayName": "Reaper Daemon",
-  "version": "3.22.1",
-  "description": "REAPER MCP server: let Claude read your session, set FX, write automation and measure mix moves.",
+  "version": "3.22.2",
+  "description": "Lets Claude read your REAPER session, set FX, write automation and measure mix moves. Runs on your computer next to REAPER and needs a one-time local install.",
   "author": {
     "name": "Dead Pixel Design",
     "url": "https://www.deadpixeldesign.com/workflows/reaper-daemon/"

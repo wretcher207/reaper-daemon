@@ -8,4 +8,6 @@ def root(tmp_path):
     """A temp bridge root with the working folders the bridge expects."""
     for d in ("inbox", "outbox", "processing", "bridge"):
         (tmp_path / d).mkdir()
+    # The MCP server treats a folder without the bridge script as not installed.
+    (tmp_path / "bridge" / "reaper_agent_bridge.lua").write_text("")
     return str(tmp_path)
