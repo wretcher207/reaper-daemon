@@ -1,7 +1,7 @@
 {
   "name": "reaper-daemon",
   "displayName": "Reaper Daemon",
-  "version": "3.22.2",
+  "version": "3.23.0",
   "description": "Lets Claude read your REAPER session, set FX, write automation and measure mix moves. Runs on your computer next to REAPER and needs a one-time local install.",
   "author": {
     "name": "Dead Pixel Design",

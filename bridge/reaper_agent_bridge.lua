@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.22.1
+-- @version 3.23.0
 -- @author Dead Pixel Design
 -- @provides
 --   json.lua
@@ -18,6 +18,7 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.23.0: Action list search and run, Lua scripts behind their own gate, tempo and time-signature markers at a bar.
 --   3.22.1: Drum map discovery fixes for choke keys, Rack/Floor toms, cymbal sides and hat names.
 --   3.22.0: Offline drum composition workshop in the repository CLI and MCP.
 --   3.21.0: Audio-to-drum MIDI source snapshots and verified insertion.
