@@ -33,6 +33,17 @@ and Linux.
 
 ## Notes
 
+**Actions and scripts.** The action list and Lua scripts go through `cmd`:
+
+```bash
+python3 reaperd.py cmd list_actions '{"query":"normalize items"}'
+python3 reaperd.py cmd run_action '{"command_id":40001}'
+python3 reaperd.py cmd run_script '{"path":"my_edit.lua","args":{"gain_db":-3}}'
+```
+
+`run_script` needs `python3 setup/install.py --allow-script-execution` first.
+Payloads and replies are in [command_schema.md](../bridge/command_schema.md#actions-and-scripts).
+
 **Plugin loading.** `fxload` and `cmd add_fx` resolve a fuzzy query to
 REAPER's exact installed name from the VST, CLAP, and AU cache before loading.
 

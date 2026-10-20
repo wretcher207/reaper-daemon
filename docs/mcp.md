@@ -45,7 +45,7 @@ Tools, grouped:
 | Group | Tools |
 | --- | --- |
 | Discovery | `get_context`, `scan_fx`, `get_fx_parameters`, `get_track_routing` |
-| Project | transport, tracks, markers and regions, MIDI insertion |
+| Project | transport and the tempo map, tracks, markers and regions, MIDI insertion |
 | FX | FX chains, `set_fx_param` (formatted values like `"-16.00 dB"` work), `get_fx_param_automation` and automation writes |
 | Batch | `batch` runs several commands in one undo block |
 | Capture | post-FX stem capture |
@@ -54,6 +54,7 @@ Tools, grouped:
 | Parts | `insert_riff` (one guitar or bass part), `cut_band` (the four-track jam, per-leg results), `humanize_take` (dynamics and micro-timing on an existing take, `--follow-lead` included) |
 | Closed loop | `verify_change` (one mutation with measured pre/post proof, see [Verify](verify.md)), `tune_param` (search a parameter until a measured target like "bass LUFS-I down 3 dB" is hit) |
 | Analysis | `analyze_track`, `compare_tracks` (need [Post Mortem](https://github.com/wretcher207/post-mortem)) |
+| Actions and scripts | `list_actions` and `run_action` (REAPER's own action list), `run_script` (Lua with the full API, behind `allow_script_execution`) |
 
 Install Post Mortem for the analysis tools:
 
@@ -80,6 +81,11 @@ Things the tools tell you, so you do not have to guess:
   with `python3 setup/install.py --allow-audio-writes`, then send
   `reload_bridge`. Saving the project and writing REAPER preferences are
   separate gates, so measuring never requires granting those.
+- `run_script` is off until `allow_script_execution` is true
+  (`python3 setup/install.py --allow-script-execution`). That gate has no
+  legacy fallback: a script can do anything the API can, so nothing else
+  opens it. Save and render actions sent through `run_action` obey the same
+  gates as `save_project` and `render`.
 
 ## Stable identities
 

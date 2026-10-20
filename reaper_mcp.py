@@ -46,7 +46,19 @@ BRIDGE_ROOT = os.path.abspath(os.path.expanduser(
     os.environ.get("REAPER_DAEMON_ROOT") or SERVER_DIR
 ))
 
-SERVER_INFO = {"name": "reaper-daemon", "version": "1.0.0"}
+
+
+def _server_version():
+    """The released version, read from server.json next to this file so the
+    MCP handshake and the registry manifest can never disagree."""
+    try:
+        with open(os.path.join(SERVER_DIR, "server.json"), encoding="utf-8") as f:
+            return str(json.load(f).get("version") or "unknown")
+    except (OSError, ValueError):
+        return "unknown"
+
+
+SERVER_INFO = {"name": "reaper-daemon", "version": _server_version()}
 SUPPORTED_PROTOCOLS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 DEFAULT_PROTOCOL = "2025-06-18"
 
@@ -302,6 +314,8 @@ def tool_get_status(args):
                                ("project_save", "allow_project_save"),
                                ("preference_writes", "allow_preference_writes"))
         }
+        # The script gate is strict: only its own key opens it (run_script).
+        info["gates"]["script_execution"] = cfg.get("allow_script_execution") is True
     except (OSError, ValueError):
         info["allow_risk_level_3"] = None
         info["gates"] = None
@@ -369,6 +383,12 @@ def tool_transport(args):
         }))
     if action == "set_tempo":
         return _reply_result(_send("set_tempo", {"bpm": args.get("bpm")}))
+    if action == "get_tempo_markers":
+        return _reply_result(_send("get_tempo_markers", {}))
+    if action in ("set_tempo_marker", "delete_tempo_marker"):
+        return _forward(action, args,
+                        ("position", "index", "bpm", "numerator", "denominator", "linear"),
+                        dry_run=True)
     return _text(f"unknown transport action: {action!r}", is_error=True)
 
 
@@ -519,6 +539,34 @@ def tool_raw_command(args):
         cmd_type, args.get("payload") or {},
         timeout_ms=timeout_ms,
         dry_run=bool(args.get("dry_run"))))
+
+
+def tool_list_actions(args):
+    return _forward("list_actions", args, ("query", "section", "limit", "offset"),
+                    timeout_ms=30000)
+
+
+def tool_run_action(args):
+    if args.get("command_id") is None and not args.get("named_id"):
+        return _text("run_action needs command_id or named_id", is_error=True)
+    return _forward("run_action", args, ("command_id", "named_id", "section"),
+                    timeout_ms=60000, dry_run=True)
+
+
+def tool_run_script(args):
+    if not args.get("code") and not args.get("path"):
+        return _text("run_script needs code or path", is_error=True)
+    try:
+        timeout_s = float(args.get("timeout_seconds") or 30)
+    except (TypeError, ValueError):
+        return _text(f"timeout_seconds must be a number, got {args.get('timeout_seconds')!r}",
+                     is_error=True)
+    timeout_s = max(0.1, min(600.0, timeout_s))
+    # The bridge stops the script at timeout_seconds; the reply wait outlives
+    # that by a margin so a timeout comes back as the bridge's own error.
+    return _forward("run_script", args, ("code", "path", "args"),
+                    timeout_ms=int(timeout_s * 1000) + 10000, dry_run=True,
+                    extra={"timeout_seconds": timeout_s})
 
 
 # --- Drum workflow (profile / riff / groove) ---------------------------------
@@ -1352,18 +1400,28 @@ TOOLS = [
     {
         "name": "transport",
         "description": ("Transport and project timing: play, stop, pause, record, "
-                        "set_cursor, set_time_selection, set_tempo. Mutations run "
-                        "in an undo block (Ctrl/Cmd+Z reverts)."),
+                        "set_cursor, set_time_selection, set_tempo (the project's "
+                        "base tempo), plus the tempo map: get_tempo_markers, "
+                        "set_tempo_marker (a tempo and/or time-signature change at "
+                        "a position; a time-signature change needs a bar position; "
+                        "index edits an existing marker) and delete_tempo_marker. "
+                        "Mutations run in an undo block (Ctrl/Cmd+Z reverts)."),
         "inputSchema": _schema({
             "action": {"type": "string",
                        "enum": ["play", "stop", "pause", "record", "set_cursor",
-                                "set_time_selection", "set_tempo"]},
+                                "set_time_selection", "set_tempo", "get_tempo_markers",
+                                "set_tempo_marker", "delete_tempo_marker"]},
+            **DRY_RUN_PROP,
             "position": POSITION_PROP,
             "seek_play": {"type": "boolean"},
             "start": POSITION_PROP, "end": POSITION_PROP,
             "length_bars": {"type": "number"},
             "clear": {"type": "boolean", "description": "set_time_selection: clear it."},
             "bpm": {"type": "number"},
+            "numerator": {"type": "integer", "description": "set_tempo_marker: time signature top (with denominator)."},
+            "denominator": {"type": "integer", "description": "set_tempo_marker: 1, 2, 4, 8, 16, 32 or 64."},
+            "linear": {"type": "boolean", "description": "set_tempo_marker: ramp to the next marker."},
+            "index": {"type": "integer", "description": "set/delete_tempo_marker: an existing marker's index from get_tempo_markers."},
         }, required=["action"]),
         "handler": tool_transport,
     },
@@ -1968,6 +2026,59 @@ TOOLS = [
             "timeout_ms": {"type": "integer"},
         }, required=["type"]),
         "handler": tool_raw_command,
+    },
+    {
+        "name": "list_actions",
+        "description": ("Search REAPER's action list: every word in query must "
+                        "appear in the action name or its _SWS/_RS id. Returns "
+                        "command_id, name, named_id and toggle_state per match, "
+                        "paged by limit/offset. Sections: main (default), main_alt, "
+                        "midi_editor, midi_event_list, midi_inline, media_explorer."),
+        "inputSchema": _schema({
+            "query": {"type": "string"},
+            "section": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            "offset": {"type": "integer", "minimum": 0},
+        }),
+        "annotations": {"readOnlyHint": True},
+        "handler": tool_list_actions,
+    },
+    {
+        "name": "run_action",
+        "description": ("Run one REAPER action by command_id (a number from "
+                        "list_actions) or named_id (an _SWS_... / _RS... string), in "
+                        "the main section or a MIDI editor section. Runs in an undo "
+                        "block. Save and render actions obey the same gates as "
+                        "save_project and render; Quit is refused. An action that "
+                        "opens a dialog will block the bridge until it is closed."),
+        "inputSchema": _schema({
+            **DRY_RUN_PROP,
+            "command_id": {"type": "integer"},
+            "named_id": {"type": "string"},
+            "section": {"type": "string"},
+        }),
+        "handler": tool_run_action,
+    },
+    {
+        "name": "run_script",
+        "description": ("Run Lua inside REAPER with the full ReaScript API: pass "
+                        "code (source text) or path (a .lua file; relative paths "
+                        "resolve under the daemon folder, then REAPER's Scripts "
+                        "folder). The script's return value and anything it "
+                        "printed with ShowConsoleMsg come back in the reply; "
+                        "reaper.defer is not available (the script must finish in "
+                        "one pass) and it is stopped after timeout_seconds (default "
+                        "30). Project changes land in one undo block. Off until "
+                        "allow_script_execution is true in bridge_config.json "
+                        "(python3 setup/install.py --allow-script-execution)."),
+        "inputSchema": _schema({
+            **DRY_RUN_PROP,
+            "code": {"type": "string"},
+            "path": {"type": "string"},
+            "args": {"type": "object", "description": "Passed to the chunk as ... and as the global args."},
+            "timeout_seconds": {"type": "number", "minimum": 0.1, "maximum": 600},
+        }),
+        "handler": tool_run_script,
     },
 ]
 

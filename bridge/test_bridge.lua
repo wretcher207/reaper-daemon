@@ -2128,4 +2128,279 @@ end)()
   end
 end)()
 
+;(function()
+-- Actions, scripts and the tempo map (2026-10-20, issue #26). Fakes stand in
+-- for the action list, the kbd_* lookups and a sortable tempo-marker store;
+-- every claim is proved by reading the fake back, never by trusting the
+-- handler's own bookkeeping.
+local old = {}
+for k, v in pairs(reaper) do old[k] = v end
+local TA = B.tempo_and_actions
+local H = B.handlers
+
+-- action_section: names, numbers, refusals
+local id, name = TA.action_section(nil)
+eq(id, 0, "default section is main"); eq(name, "main", "default section name")
+id, name = TA.action_section("MIDI Editor")
+eq(id, 32060, "section names are case and space tolerant"); eq(name, "midi_editor", "normalized name")
+eq(TA.action_section(32061), 32061, "numeric section ids pass through")
+ok(not pcall(TA.action_section, "arrange"), "unknown section name refused")
+ok(not pcall(TA.action_section, 7), "unknown numeric section refused")
+
+-- list_actions over a fake action list
+local ACTIONS = {
+  { 40001, "Track: Insert new track" },
+  { 40005, "Track: Remove tracks" },
+  { 65001, "SWS: Normalize items to peak", "SWS_NORMPEAK" },
+  { 1007, "Transport: Play/stop" },
+  { 40364, "Options: Toggle metronome", nil, 1 },
+}
+local section_seen
+reaper.kbd_enumerateActions = function(section, i)
+  section_seen = section
+  local row = ACTIONS[i + 1]
+  if not row then return 0, "" end
+  return row[1], row[2]
+end
+reaper.ReverseNamedCommandLookup = function(cmd)
+  for _, row in ipairs(ACTIONS) do if row[1] == cmd then return row[3] end end
+  return nil
+end
+reaper.GetToggleCommandStateEx = function(_, cmd)
+  for _, row in ipairs(ACTIONS) do if row[1] == cmd then return row[4] or -1 end end
+  return -1
+end
+local r = H.list_actions({ payload = {} })
+eq(r.total_matches, 5, "no query lists everything"); eq(r.returned, 5, "all returned under the limit")
+eq(section_seen, 0, "main section enumerated by id")
+eq(r.actions[3].named_id, "_SWS_NORMPEAK", "named ids carry the underscore NamedCommandLookup wants")
+eq(r.actions[1].named_id, nil, "native actions have no named id")
+eq(r.actions[5].toggle_state, true, "toggle state is a boolean")
+eq(r.actions[1].toggle_state, nil, "plain actions report no toggle state")
+r = H.list_actions({ payload = { query = "track insert" } })
+eq(r.total_matches, 1, "every query word must match"); eq(r.actions[1].command_id, 40001, "match is the insert action")
+r = H.list_actions({ payload = { query = "normpeak" } })
+eq(r.total_matches, 1, "named ids are searchable")
+r = H.list_actions({ payload = { limit = 2, offset = 1 } })
+eq(r.returned, 2, "limit bounds the page"); eq(r.actions[1].command_id, 40005, "offset skips matches")
+eq(r.total_matches, 5, "total counts past the page")
+r = H.list_actions({ payload = { section = "midi_editor" } })
+eq(section_seen, 32060, "section is passed through"); eq(r.section, "midi_editor", "section echoed")
+reaper.kbd_enumerateActions = nil
+local okc, e = pcall(H.list_actions, { payload = {} })
+ok(not okc and tostring(e):find("UNSUPPORTED_API", 1, true) ~= nil, "an old REAPER without the enumerator is a typed refusal")
+reaper.kbd_enumerateActions = function(_, i)
+  local row = ACTIONS[i + 1]
+  if not row then return 0, "" end
+  return row[1], row[2]
+end
+
+-- run_action
+local ran = {}
+reaper.Main_OnCommand = function(cmd) ran[#ran + 1] = cmd end
+reaper.kbd_getTextFromCmd = function(cmd)
+  for _, row in ipairs(ACTIONS) do if row[1] == cmd then return row[2] end end
+  return ""
+end
+reaper.NamedCommandLookup = function(named)
+  for _, row in ipairs(ACTIONS) do if row[3] and "_" .. row[3] == named then return row[1] end end
+  return 0
+end
+local function refuse(h, payload, code)
+  local ok2, e2 = pcall(h, { payload = payload })
+  eq(ok2, false, "refuses " .. code)
+  ok(tostring(e2):find(code, 1, true) ~= nil, "refusal names " .. code .. " (got " .. tostring(e2) .. ")")
+  return tostring(e2)
+end
+r = H.run_action({ payload = { command_id = 40001 } })
+eq(ran[#ran], 40001, "main-section actions go through Main_OnCommand")
+eq(r.name, "Track: Insert new track", "name read back"); eq(r.ran, true, "ran flag")
+r = H.run_action({ payload = { named_id = "SWS_NORMPEAK" } })
+eq(ran[#ran], 65001, "named ids resolve without the underscore")
+eq(r.named_id, "SWS_NORMPEAK", "the caller's id is echoed")
+r = H.run_action({ payload = { named_id = "_SWS_NORMPEAK" } })
+eq(ran[#ran], 65001, "named ids resolve with the underscore")
+r = H.run_action({ payload = { command_id = 65001 } })
+eq(r.named_id, "_SWS_NORMPEAK", "a numeric call still reports the named id")
+local toggles = 0
+local old_toggle = reaper.GetToggleCommandStateEx
+reaper.GetToggleCommandStateEx = function(_, cmd)
+  if cmd ~= 40364 then return -1 end
+  toggles = toggles + 1
+  return toggles == 1 and 0 or 1
+end
+r = H.run_action({ payload = { command_id = 40364 } })
+eq(r.toggle_before, false, "toggle state before"); eq(r.toggle_after, true, "toggle state after")
+reaper.GetToggleCommandStateEx = old_toggle
+refuse(H.run_action, {}, "BAD_PAYLOAD")
+refuse(H.run_action, { command_id = 0 }, "BAD_PAYLOAD")
+refuse(H.run_action, { command_id = 99999 }, "ACTION_NOT_FOUND")
+refuse(H.run_action, { named_id = "_NOPE" }, "ACTION_NOT_FOUND")
+refuse(H.run_action, { command_id = 40004 }, "ACTION_REFUSED")
+B.config.allow_risk_level_3 = false
+B.config.allow_project_save = nil
+B.config.allow_audio_writes = nil
+local blocked = refuse(H.run_action, { command_id = 40026 }, "ACTION_BLOCKED")
+ok(blocked:find("--allow-project-save", 1, true) ~= nil, "the save block names the save gate")
+refuse(H.run_action, { command_id = 41824 }, "ACTION_BLOCKED")
+local before = #ran
+B.config.allow_project_save = true
+ACTIONS[#ACTIONS + 1] = { 40026, "File: Save project" }
+H.run_action({ payload = { command_id = 40026 } })
+eq(ran[#ran], 40026, "save runs once its own gate is open"); eq(#ran, before + 1, "exactly once")
+B.config.allow_project_save = nil
+B.config.allow_risk_level_3 = true
+H.run_action({ payload = { command_id = 40026 } })
+eq(#ran, before + 2, "the legacy key still opens the save gate for actions, as it does for save_project")
+reaper.MIDIEditor_GetActive = function() return nil end
+refuse(H.run_action, { command_id = 40001, section = "midi_editor" }, "NO_MIDI_EDITOR")
+local midi_ran
+reaper.MIDIEditor_GetActive = function() return "editor" end
+reaper.MIDIEditor_LastFocused_OnCommand = function(cmd, listview) midi_ran = { cmd, listview } end
+H.run_action({ payload = { command_id = 40001, section = "midi_event_list" } })
+eq(midi_ran[1], 40001, "MIDI editor actions use the focused-editor call")
+eq(midi_ran[2], true, "the event-list flag is set for that section")
+refuse(H.run_action, { command_id = 40001, section = "media_explorer" }, "UNSUPPORTED_SECTION")
+eq(#ran, before + 2, "no Main_OnCommand for the refused sections")
+
+-- run_script: the gate first, and strictly
+B.config.allow_risk_level_3 = true
+B.config.allow_script_execution = nil
+local blocked_msg = refuse(H.run_script, { code = "return 1" }, "SCRIPT_BLOCKED")
+ok(blocked_msg:find("no allow_risk_level_3 fallback", 1, true) ~= nil, "the refusal says the legacy key does not open it")
+ok(blocked_msg:find("--allow-script-execution", 1, true) ~= nil, "the refusal names the installer flag")
+B.config.allow_script_execution = "true"
+refuse(H.run_script, { code = "return 1" }, "SCRIPT_BLOCKED")
+B.config.allow_script_execution = true
+B.config.allow_risk_level_3 = false
+local t = 0
+reaper.time_precise = function() t = t + 0.001; return t end
+reaper.CountTracks = function() return 3 end
+r = H.run_script({ payload = { code = "return reaper.CountTracks(0) * 2" } })
+eq(r.return_value, 6, "the chunk sees the ReaScript API and its return value comes back")
+eq(r.ran, true, "ran flag"); eq(r.return_count, 1, "return count"); eq(r.path, nil, "inline code has no path")
+ok(r.elapsed_ms ~= nil and r.elapsed_ms >= 0, "elapsed time reported")
+r = H.run_script({ payload = { code = "reaper.ShowConsoleMsg('hello '); reaper.ShowConsoleMsg(42)" } })
+eq(r.output, "hello 42", "console output is captured instead of shown")
+eq(r.return_value, nil, "no return is nil"); eq(r.return_count, 0, "zero returns counted")
+eq(r.output_truncated, false, "short output is not truncated")
+r = H.run_script({ payload = { code = "local s = string.rep('x', 70000); reaper.ShowConsoleMsg(s); return #s" } })
+eq(#r.output, 65536, "output is capped"); eq(r.output_truncated, true, "and says so"); eq(r.return_value, 70000, "the script itself still ran")
+r = H.run_script({ payload = { code = "return { a = 1, list = { 1, 2 }, f = function() end, inf = 1/0 }" } })
+eq(r.return_value.a, 1, "tables come back"); eq(r.return_value.list[2], 2, "arrays come back")
+eq(type(r.return_value.f), "string", "functions become strings"); eq(r.return_value.inf, "inf", "non-finite numbers become strings")
+r = H.run_script({ payload = { code = "local a = ...; return a.x + args.x", args = { x = 5 } } })
+eq(r.return_value, 10, "args reach the chunk as ... and as the global args")
+r = H.run_script({ payload = { code = "return 1, 'two'" } })
+eq(r.return_count, 2, "multiple returns are counted"); eq(r.return_value, 1, "the first is return_value")
+refuse(H.run_script, { code = "return (" }, "SCRIPT_SYNTAX")
+local boom = refuse(H.run_script, { code = "error('boom')" }, "SCRIPT_ERROR")
+ok(boom:find("boom", 1, true) ~= nil, "runtime errors keep the message")
+refuse(H.run_script, { code = "reaper.defer(function() end)" }, "SCRIPT_DEFER_UNSUPPORTED")
+refuse(H.run_script, { code = "reaper.atexit(function() end)" }, "SCRIPT_DEFER_UNSUPPORTED")
+refuse(H.run_script, { code = "reaper.CountTracks = nil" }, "SCRIPT_ENV")
+eq(reaper.CountTracks(), 3, "the bridge's own API table is untouched")
+H.run_script({ payload = { code = "leaked = 1" } })
+eq(_G.leaked, nil, "script globals stay out of the bridge's globals")
+local timed = refuse(H.run_script, { code = "while true do end", timeout_seconds = 0.1 }, "SCRIPT_TIMEOUT")
+ok(timed:find("one undo step", 1, true) ~= nil, "the timeout says what happened to partial changes")
+eq(debug.gethook(), nil, "the instruction hook is cleared afterwards")
+r = H.run_script({ payload = { code = "return 1", timeout_seconds = 9999 } })
+eq(r.timeout_seconds, 600, "timeout is capped")
+refuse(H.run_script, { code = "x", path = "y.lua" }, "BAD_PAYLOAD")
+refuse(H.run_script, {}, "BAD_PAYLOAD")
+refuse(H.run_script, { code = "" }, "BAD_PAYLOAD")
+refuse(H.run_script, { path = "thing.eel" }, "BAD_PATH")
+refuse(H.run_script, { path = "missing.lua" }, "SCRIPT_NOT_FOUND")
+mkdirp(sandbox)  -- an earlier block may have swept the sandbox away
+local f = assert(io.open(join(sandbox, "agent_test.lua"), "w"))
+f:write("return 'from file ' .. tostring(select('#', ...))"); f:close()
+r = H.run_script({ payload = { path = "agent_test.lua" } })
+eq(r.return_value, "from file 1", "relative paths resolve under the bridge root")
+ok(r.path:find("agent_test.lua", 1, true) ~= nil, "the resolved path is reported")
+os.remove(join(sandbox, "agent_test.lua"))
+B.config.allow_script_execution = nil
+
+-- tempo map over a fake, sortable marker store (120 bpm 4/4: a bar is 2 s)
+local markers = {}
+local BAR = 2.0
+reaper.CountTempoTimeSigMarkers = function() return #markers end
+reaper.GetTempoTimeSigMarker = function(_, i)
+  local m = markers[i + 1]
+  if not m then return false end
+  return true, m.time, m.measure, m.beat, m.bpm, m.num, m.denom, m.linear
+end
+reaper.SetTempoTimeSigMarker = function(_, idx, timepos, measurepos, _beatpos, bpm, num, denom, linear)
+  local time = timepos >= 0 and timepos or measurepos * BAR
+  local row = { time = time, measure = math.floor(time / BAR), beat = 0, bpm = bpm, num = num, denom = denom, linear = linear }
+  if idx >= 0 then markers[idx + 1] = row else markers[#markers + 1] = row end
+  table.sort(markers, function(a, b) return a.time < b.time end)
+  return true
+end
+reaper.DeleteTempoTimeSigMarker = function(_, i)
+  if not markers[i + 1] then return false end
+  table.remove(markers, i + 1)
+  return true
+end
+reaper.FindTempoTimeSigMarker = function(_, time)
+  local found = -1
+  for i, m in ipairs(markers) do if m.time <= time then found = i - 1 end end
+  return found
+end
+reaper.TimeMap2_timeToBeats = function(_, s) return 0, math.floor(s / BAR) end
+reaper.TimeMap2_beatsToTime = function(_, _beat, measure) return measure * BAR end
+reaper.Master_GetTempo = function() return 120 end
+reaper.TimeMap_GetTimeSigAtTime = function() return 4, 4, 120 end
+reaper.UpdateTimeline = function() end
+
+r = H.get_tempo_markers({ payload = {} })
+eq(r.count, 0, "empty tempo map"); eq(r.at_start.numerator, 4, "start meter reported"); eq(r.base_tempo, 120, "base tempo reported")
+refuse(H.set_tempo_marker, {}, "BAD_PAYLOAD")
+refuse(H.set_tempo_marker, { bpm = 140 }, "BAD_PAYLOAD")
+refuse(H.set_tempo_marker, { position = { type = "bar", bar = 3 }, bpm = -1 }, "BAD_TEMPO")
+refuse(H.set_tempo_marker, { position = { type = "bar", bar = 3 }, numerator = 7 }, "BAD_PAYLOAD")
+refuse(H.set_tempo_marker, { position = { type = "bar", bar = 3 }, numerator = 7, denominator = 6 }, "BAD_TIME_SIGNATURE")
+refuse(H.set_tempo_marker, { position = { type = "bar", bar = 3 }, numerator = 0, denominator = 4 }, "BAD_TIME_SIGNATURE")
+refuse(H.set_tempo_marker, { position = { type = "time", seconds = 3 }, numerator = 7, denominator = 8 }, "TIME_SIGNATURE_NEEDS_BAR")
+refuse(H.set_tempo_marker, { position = { type = "bar", bar = 0 }, bpm = 100 }, "BAD_POSITION")
+refuse(H.set_tempo_marker, { position = { type = "bar", bar = 3 }, bpm = 100, linear = "yes" }, "BAD_PAYLOAD")
+refuse(H.set_tempo_marker, { index = 0, bpm = 100 }, "NO_TEMPO_MARKER")
+eq(#markers, 0, "every refusal happened before any write")
+r = H.set_tempo_marker({ payload = { position = { type = "bar", bar = 3 }, bpm = 140 } })
+eq(r.created, true, "new marker"); eq(r.count, 1, "one marker"); eq(r.marker.bar, 3, "bar read back")
+eq(r.marker.time, 4.0, "placed at the bar start"); eq(r.marker.bpm, 140, "tempo")
+eq(r.marker.has_time_signature, false, "a tempo-only marker keeps the meter")
+eq(markers[1].num, 0, "no meter in the payload means REAPER keeps the previous one")
+r = H.set_tempo_marker({ payload = { position = { type = "bar", bar = 5 }, numerator = 7, denominator = 8 } })
+eq(r.marker.bpm, 140, "a meter-only marker inherits the tempo in force at that bar")
+eq(r.marker.numerator, 7, "meter"); eq(r.marker.denominator, 8, "denominator"); eq(r.marker.has_time_signature, true, "flagged")
+r = H.set_tempo_marker({ payload = { position = { type = "time", seconds = 3 }, bpm = 90, linear = true } })
+eq(r.marker.time, 3, "a seconds position works for a tempo-only change"); eq(r.marker.linear, true, "linear flag")
+r = H.get_tempo_markers({ payload = {} })
+eq(r.count, 3, "three markers"); eq(r.markers[1].time, 3, "listed in time order"); eq(r.markers[1].index, 0, "indexes are REAPER's")
+r = H.set_tempo_marker({ payload = { index = 2, bpm = 160 } })
+eq(r.created, false, "index edits instead of creating"); eq(r.marker.numerator, 7, "meter kept when the payload leaves it out")
+eq(r.marker.bpm, 160, "tempo changed"); eq(r.count, 3, "count unchanged")
+r = H.set_tempo_marker({ payload = { index = 1, position = { type = "bar", bar = 4 } } })
+eq(r.marker.time, 6.0, "moved to bar 4"); eq(r.marker.bpm, 140, "tempo kept on a move")
+refuse(H.delete_tempo_marker, {}, "BAD_PAYLOAD")
+refuse(H.delete_tempo_marker, { index = 9 }, "NO_TEMPO_MARKER")
+refuse(H.delete_tempo_marker, { position = { type = "time", seconds = 3.5 } }, "NO_TEMPO_MARKER")
+eq(#markers, 3, "refused deletes delete nothing")
+r = H.delete_tempo_marker({ payload = { position = { type = "bar", bar = 4 } } })
+eq(r.deleted.bpm, 140, "deleted by position"); eq(r.count, 2, "two left")
+r = H.delete_tempo_marker({ payload = { index = 0 } })
+eq(r.deleted.time, 3, "deleted by index"); eq(r.count, 1, "one left")
+reaper.SetTempoTimeSigMarker = function() return true end
+refuse(H.set_tempo_marker, { position = { type = "bar", bar = 9 }, bpm = 100 }, "TEMPO_MARKER_VERIFY_FAILED")
+reaper.SetTempoTimeSigMarker = function() return false end
+refuse(H.set_tempo_marker, { position = { type = "bar", bar = 9 }, bpm = 100 }, "TEMPO_MARKER_FAILED")
+
+for _, cmd in ipairs({ "list_actions", "run_action", "run_script",
+    "get_tempo_markers", "set_tempo_marker", "delete_tempo_marker" }) do
+  eq(type(H[cmd]), "function", cmd .. " is a registered command")
+end
+for k in pairs(reaper) do reaper[k] = old[k] end
+end)()
+
 print(("test_bridge: OK (%d checks)"):format(checks))

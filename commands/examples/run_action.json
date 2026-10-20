@@ -1,0 +1,12 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "run_action",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "undo_label": "Agent: run action",
+  "payload": {
+    "command_id": 40001
+  }
+}

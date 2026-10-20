@@ -69,7 +69,7 @@ true.
 ## 4. First contact
 
 Report `gates` from `get_status` in plain words: which of audio writes,
-project save and preference writes are on.
+project save, preference writes and script execution are on.
 
 Then call `get_context` and tell the user the project name and track count.
 That proves the round trip without changing anything. Suggest one read-only

@@ -1,0 +1,13 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "run_script",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "undo_label": "Agent: run script",
+  "payload": {
+    "code": "return { tracks = reaper.CountTracks(0), tempo = reaper.Master_GetTempo() }",
+    "timeout_seconds": 10
+  }
+}

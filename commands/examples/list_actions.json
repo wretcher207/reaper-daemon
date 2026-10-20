@@ -1,0 +1,14 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "list_actions",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "undo_label": "Agent: list actions",
+  "payload": {
+    "query": "normalize items",
+    "section": "main",
+    "limit": 20
+  }
+}

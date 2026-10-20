@@ -46,7 +46,7 @@ Checkpoints:
 - `git` must be on PATH. If missing, tell the user to install it (Xcode CLT on
   macOS via `xcode-select --install`; from git-scm.com on Windows/Linux) and
   re-run when finished.
-- Python 3.8+ must be on PATH. If missing, point the user at
+- Python 3.10+ must be on PATH. If missing, point the user at
   <https://www.python.org/downloads/> and stop.
 - REAPER must be installed. Ask the user where if you can't find it
   (`/Applications/REAPER.app` on macOS, `C:\Program Files\REAPER (x64)\REAPER.exe`

@@ -1,6 +1,6 @@
 # Install
 
-Requires REAPER and Python 3.8 or newer. No pip packages.
+Requires REAPER and Python 3.10 or newer. No pip packages.
 
 ## One command
 
@@ -22,6 +22,24 @@ pointing at this clone. It is idempotent. Re-run it any time you move the repo.
 | `--uninstall` | remove the managed auto-start block |
 | `--bridge-root /path/to/clone` | point the auto-start at a different clone |
 | `REAPER_RESOURCE_PATH=/dir` environment variable | override the resource directory |
+
+## What the agent may write
+
+Everything undo can take back is allowed from the start. The things it cannot
+take back each have a switch, off by default, that the installer writes into
+`bridge/bridge_config.json`:
+
+| Flag | Allows |
+| --- | --- |
+| `--allow-audio-writes` | render and capture a track (every measurement needs this) |
+| `--allow-project-save` | save over the open `.rpp` |
+| `--allow-preference-writes` | change REAPER's own preferences |
+| `--allow-disk-writes` | the three above at once |
+| `--allow-script-execution` | run Lua the agent writes or names (`run_script`). Not part of `--allow-disk-writes`; only this flag opens it. |
+
+Each has a `--no-` form. A change applies after `reload_bridge` or a REAPER
+restart. The full rules are in
+[command_schema.md](../bridge/command_schema.md#render).
 
 ## Check it
 

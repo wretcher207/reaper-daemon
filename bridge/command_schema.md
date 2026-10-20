@@ -206,6 +206,36 @@ Or `"length_bars": 8` instead of `end`. `{ "clear": true }` clears it.
 
 ### set_tempo
 `{ "bpm": 174 }`
+Moves the project's base tempo only. For a tempo change at a bar, or a meter
+change, use the tempo map below.
+
+### get_tempo_markers
+`{}` reads the tempo map: `count`, `base_tempo`, `at_start` (`bpm`, `numerator`,
+`denominator`) and `markers`, each with `index`, `time`, `bar`, `measure`, `beat`,
+`bpm`, `linear` and `has_time_signature`, plus `numerator` and `denominator` on a
+marker that changes the meter. REAPER adds a marker at 0 for the base tempo the
+first time the map is written.
+
+### set_tempo_marker
+```json
+{ "position": { "type": "bar", "bar": 17 }, "bpm": 140 }
+{ "position": { "type": "bar", "bar": 33 }, "numerator": 7, "denominator": 8 }
+{ "index": 2, "bpm": 150, "linear": true }
+```
+A positioned tempo change, time-signature change, or both; what a mid-song
+change actually needs. Rules: a new marker needs `position` and at least `bpm`
+or a time signature; a time-signature change needs a `bar` position, because
+REAPER keeps meter changes on bar lines; a meter-only marker inherits the tempo
+in force at that bar; `index` edits an existing marker and keeps whatever the
+payload leaves out; `denominator` must be 1, 2, 4, 8, 16, 32 or 64. The reply
+reads the marker back (`marker`, `created`, `count`) and fails with
+`TEMPO_MARKER_VERIFY_FAILED` if nothing is there. Errors: `BAD_TEMPO`,
+`BAD_TIME_SIGNATURE`, `TIME_SIGNATURE_NEEDS_BAR`, `NO_TEMPO_MARKER`,
+`BAD_POSITION`.
+
+### delete_tempo_marker
+`{ "index": 2 }` or `{ "position": { "type": "bar", "bar": 33 } }` (a marker must
+sit exactly there). Reply: `deleted` (the marker as it was) and `count`.
 
 ### render
 Gated — requires `allow_audio_writes: true` in `bridge_config.json`
@@ -219,12 +249,16 @@ one class of mutation undo cannot reach, so each is gated:
 | `allow_audio_writes` | `render`, `capture_track_audio` — writes NEW files |
 | `allow_project_save` | `save_project` — overwrites the open `.rpp` |
 | `allow_preference_writes` | `set_media_offline_when_inactive` — REAPER's own prefs |
+| `allow_script_execution` | `run_script` — Lua the agent writes or names, with the whole API |
 
 A gate not present in the config falls back to `allow_risk_level_3`, which is
 why every config written before the 2026-09-02 split still behaves as it did
 and why that key still means "all of it". A specific key wins over the fallback
 in both directions, and only a real boolean counts — a string falls back.
-Measuring a mix needs `allow_audio_writes` alone.
+Measuring a mix needs `allow_audio_writes` alone. The script gate is the one
+exception: `allow_risk_level_3` never opens it and `--allow-disk-writes` leaves
+it closed, because a script can do anything the API can, not just write files.
+The save and render actions run through `run_action` obey the first two gates.
 
 The config is read once per bridge load, so apply a change with `reload_bridge`;
 a REAPER restart also works but is not required.
@@ -1051,6 +1085,67 @@ stay valid through confirmation. Results carry `applied`, `confirmed`, `invalid`
 
 The `reaperd humanize` CLI is the intended caller: it reads the take, plans the
 pass with `drumgen.humanize` (the shared taste model), and ships the edits here.
+
+---
+
+## Actions and scripts
+
+For a workflow the bridge has no verb for. `list_actions` and `run_action` reach
+REAPER's own action list (native, SWS, and any ReaScript bound to an ID);
+`run_script` runs Lua with the whole ReaScript API, behind its own gate.
+
+### list_actions
+`{ "query": "normalize items", "section": "main", "limit": 50, "offset": 0 }`
+Every word in `query` must appear in the action name or its `_SWS_...` / `_RS...`
+id (case-insensitive). Sections: `main` (default), `main_alt`, `midi_editor`,
+`midi_event_list`, `midi_inline`, `media_explorer`. `limit` caps at 200. Reply:
+`total_matches`, `returned`, `scanned` and `actions`, each with `command_id`,
+`name`, `named_id` (null for a native action) and `toggle_state` (true or false,
+null for a plain action). Needs REAPER 6.71 or newer (`UNSUPPORTED_API` before).
+
+### run_action
+```json
+{ "command_id": 40001 }
+{ "named_id": "_SWS_NORMPEAK" }
+{ "command_id": 40001, "section": "midi_editor" }
+```
+One of `command_id` (a number) or `named_id` (the string; the underscore is
+optional). Main-section actions run through `Main_OnCommand`; MIDI editor
+sections need an open editor (`NO_MIDI_EDITOR`) and run against the last focused
+one; media explorer actions cannot run through the API (`UNSUPPORTED_SECTION`).
+The action runs in an undo block. The save actions (40026, 40022, 41895) obey
+`allow_project_save` and the render actions (40015, 41824, 42230) obey
+`allow_audio_writes`, so an action cannot sidestep the gate on the bridge's own
+verb; `File: Quit REAPER` is refused. Anything else runs as given, including
+actions that open a dialog, and a dialog blocks the bridge until it is closed.
+Reply: `command_id`, `named_id`, `name`, `section`, `toggle_before`,
+`toggle_after`. Errors: `ACTION_NOT_FOUND`, `ACTION_BLOCKED`, `ACTION_REFUSED`,
+`BAD_SECTION`.
+
+### run_script
+Gated — requires `allow_script_execution: true` in `bridge_config.json`
+(`python3 setup/install.py --allow-script-execution` writes it, then
+`reload_bridge`). This gate has no `allow_risk_level_3` fallback and
+`--allow-disk-writes` does not open it: a script can do anything the API can,
+including the disk writes the other gates exist for.
+```json
+{ "code": "return reaper.CountTracks(0)" }
+{ "path": "my_edit.lua", "args": { "gain_db": -3 }, "timeout_seconds": 60 }
+```
+One of `code` (Lua source) or `path` (a `.lua` file: absolute, or relative to the
+daemon folder, then to REAPER's `Scripts` folder). `args` reaches the chunk as
+`...` and as the global `args`. The script runs with the full `reaper` API in a
+fresh global table, inside one undo block, and is stopped after
+`timeout_seconds` (default 30, max 600) with `SCRIPT_TIMEOUT`. `reaper.defer`,
+`reaper.atexit` and `reaper.runloop` are not available
+(`SCRIPT_DEFER_UNSUPPORTED`): the script must finish in one pass, because a
+deferred loop would ride the bridge's own script chain. `reaper.ShowConsoleMsg`
+output is captured into the reply (`output`, up to 64 KB) instead of opening
+the console. Reply: `return_value` (JSON types pass through, tables are copied,
+anything else is stringified), `return_count`, `output`, `output_truncated`,
+`elapsed_ms`, `path`. Errors: `SCRIPT_BLOCKED`, `SCRIPT_SYNTAX`, `SCRIPT_ERROR`
+(with traceback), `SCRIPT_NOT_FOUND`, `BAD_PATH`, `SCRIPT_ENV` (a script assigned
+to `reaper.*`).
 
 ---
 

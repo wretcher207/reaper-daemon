@@ -48,8 +48,8 @@ measurement needs them, including `verify_change`. To do that, run:
 python3 setup/install.py --allow-audio-writes
 ```
 
-Saving the project and changing REAPER preferences have their own switches;
-see [docs/install.md](docs/install.md).
+Saving the project, changing REAPER preferences and running Lua scripts have
+their own switches; see [docs/install.md](docs/install.md).
 
 Prefer ReaPack, or want to load the bridge by hand? See [docs/install.md](docs/install.md).
 
@@ -102,7 +102,7 @@ what the measurements do and do not prove.
 
 | Area | Commands |
 | --- | --- |
-| Project | transport, tempo, cursor, time selection, render, save |
+| Project | transport, tempo and the tempo map, cursor, time selection, render, save |
 | Tracks | add, delete, rename, select, volume, pan, mute, solo, arm, color |
 | Routing | read sends and receives, create sends, toggle master feed |
 | FX | add, remove, bypass, reorder, set parameters, write automation, save chains |
@@ -112,6 +112,7 @@ what the measurements do and do not prove.
 | Guitar and bass | `shred` renders a humanized riff, `band` cuts a whole rhythm section |
 | Discovery | `scan_fx` dumps every plugin and parameter; `discover_drum_map` reads any kit's note map |
 | Verify | measure loudness, spectrum and dynamics before and after a mix move |
+| Actions and scripts | search and run anything in REAPER's action list; run Lua by source or path, behind its own switch |
 
 The bridge knows nothing about any specific plugin or drum library. Agents
 discover what a project contains and act on it by name.

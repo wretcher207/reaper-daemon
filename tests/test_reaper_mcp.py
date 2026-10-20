@@ -354,7 +354,8 @@ def test_get_status_reports_live_bridge_and_risk_gate(root, monkeypatch):
     # get_status has to show that shape or a caller cannot tell why capture
     # works while save does not.
     assert info["gates"] == {"audio_writes": True, "project_save": False,
-                             "preference_writes": False}
+                             "preference_writes": False,
+                             "script_execution": False}
     assert info["heartbeat"]["project_name"] == "Song"
 
 
@@ -1544,3 +1545,112 @@ def test_snapshot_forwarding_and_partial_batch(monkeypatch):
     assert "max_params" in seen[-1][2]
     call("batch", {"commands": [], "return_partial_results": True})
     assert "return_partial_results" in seen[-1][2]
+
+
+# --- actions, scripts and the tempo map (2026-10-20) ------------------------
+
+def test_tools_list_includes_actions_scripts_and_tempo_map():
+    resp = reaper_mcp.handle_message(rpc("tools/list"))
+    tools = {t["name"]: t for t in resp["result"]["tools"]}
+    assert tools["list_actions"]["annotations"] == {"readOnlyHint": True}
+    assert "annotations" not in tools["run_action"]
+    assert "annotations" not in tools["run_script"]
+    enum = tools["transport"]["inputSchema"]["properties"]["action"]["enum"]
+    assert {"get_tempo_markers", "set_tempo_marker", "delete_tempo_marker"} <= set(enum)
+    assert "allow_script_execution" in tools["run_script"]["description"]
+
+
+def test_server_version_matches_server_json():
+    with open(os.path.join(REPO, "server.json"), encoding="utf-8") as f:
+        assert reaper_mcp.SERVER_INFO["version"] == json.load(f)["version"]
+    assert reaper_mcp.SERVER_INFO["version"] != "unknown"
+
+
+def test_run_action_requires_an_id(root):
+    resp = call("run_action", {})
+    assert resp["result"]["isError"] is True
+    assert "command_id" in result_text(resp)
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_run_action_forwards_id_section_and_dry_run(root):
+    seen = []
+    fake_bridge(root, {"ok": True, "type": "run_action",
+                       "data": {"dry_run": True, "would_run": "run_action"}},
+                record=seen)
+    resp = call("run_action", {"named_id": "_SWS_NORMPEAK", "section": "main",
+                               "dry_run": True})
+    assert resp["result"].get("isError") is not True
+    assert seen[0]["type"] == "run_action"
+    assert seen[0]["dry_run"] is True
+    assert seen[0]["payload"] == {"named_id": "_SWS_NORMPEAK", "section": "main"}
+
+
+def test_run_script_requires_code_or_path(root):
+    resp = call("run_script", {})
+    assert resp["result"]["isError"] is True
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_run_script_bad_timeout_rejected_before_sending(root):
+    resp = call("run_script", {"code": "return 1", "timeout_seconds": "soon"})
+    assert resp["result"]["isError"] is True
+    assert "timeout_seconds" in result_text(resp)
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_run_script_forwards_code_args_and_a_capped_timeout(root):
+    seen = []
+    fake_bridge(root, {"ok": True, "type": "run_script",
+                       "data": {"ran": True, "return_value": 3}}, record=seen)
+    resp = call("run_script", {"code": "return 3", "args": {"x": 1},
+                               "timeout_seconds": 5000})
+    assert resp["result"].get("isError") is not True
+    payload = seen[0]["payload"]
+    assert payload["code"] == "return 3"
+    assert payload["args"] == {"x": 1}
+    assert payload["timeout_seconds"] == 600.0
+    assert "path" not in payload
+    assert json.loads(result_text(resp))["data"]["return_value"] == 3
+
+
+def test_run_script_blocked_reply_is_a_tool_error(root):
+    fake_bridge(root, {"ok": False, "type": "run_script",
+                       "error": {"code": "SCRIPT_BLOCKED",
+                                 "details": "run_script is off"}})
+    resp = call("run_script", {"path": "edit.lua"})
+    assert resp["result"]["isError"] is True
+    assert "SCRIPT_BLOCKED" in result_text(resp)
+
+
+def test_transport_set_tempo_marker_forwards_the_meter(root):
+    seen = []
+    fake_bridge(root, {"ok": True, "type": "set_tempo_marker",
+                       "data": {"created": True}}, record=seen)
+    resp = call("transport", {"action": "set_tempo_marker",
+                              "position": {"type": "bar", "bar": 5},
+                              "numerator": 7, "denominator": 8})
+    assert resp["result"].get("isError") is not True
+    assert seen[0]["type"] == "set_tempo_marker"
+    assert seen[0]["payload"] == {"position": {"type": "bar", "bar": 5},
+                                  "numerator": 7, "denominator": 8}
+
+
+def test_transport_delete_tempo_marker_by_index(root):
+    seen = []
+    fake_bridge(root, {"ok": True, "type": "delete_tempo_marker",
+                       "data": {"count": 0}}, record=seen)
+    call("transport", {"action": "delete_tempo_marker", "index": 0})
+    assert seen[0]["type"] == "delete_tempo_marker"
+    assert seen[0]["payload"] == {"index": 0}
+
+
+def test_get_status_reports_the_script_gate_strictly(root, monkeypatch):
+    monkeypatch.setattr(reaper_mcp.reaperd, "reaper_running", lambda: True)
+    cfg_dir = os.path.join(root, "bridge")
+    os.makedirs(cfg_dir, exist_ok=True)
+    with open(os.path.join(cfg_dir, "bridge_config.json"), "w", encoding="utf-8") as f:
+        json.dump({"allow_risk_level_3": True}, f)
+    body = json.loads(result_text(call("get_status")))
+    assert body["gates"]["audio_writes"] is True
+    assert body["gates"]["script_execution"] is False

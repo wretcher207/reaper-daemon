@@ -1,0 +1,16 @@
+{
+  "id": "<auto>",
+  "version": 3,
+  "type": "set_tempo_marker",
+  "created_by": "manual",
+  "created_at": "",
+  "dry_run": false,
+  "undo_label": "Agent: tempo change at bar 17",
+  "payload": {
+    "position": {
+      "type": "bar",
+      "bar": 17
+    },
+    "bpm": 140
+  }
+}

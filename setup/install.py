@@ -27,6 +27,12 @@ Each has a --no- form, and a specific flag beats --allow-disk-writes on the
 same command line: --allow-disk-writes --no-project-save means "everything
 except overwriting my project".
 
+A fifth gate stands apart. run_script executes Lua the agent writes or names,
+with the whole ReaScript API, so --allow-disk-writes does not open it and the
+old allow_risk_level_3 key never did:
+
+    python3 setup/install.py --allow-script-execution   # run_script
+
 After installing, (re)start REAPER, then verify the bridge is live:
     python3 reaperd.py send commands/examples/get_context.json --wait
 """
@@ -155,6 +161,11 @@ def write(path, text):
 #
 # allow_risk_level_3 stays the fallback for any gate not named in the file, so
 # every config written before the split behaves exactly as it did.
+#
+# A fourth gate, allow_script_execution (2026-10-20), covers run_script: Lua the
+# agent writes or names runs inside REAPER with the whole API. It is not a disk
+# write and undo does not bound it, so it has NO allow_risk_level_3 fallback and
+# --allow-disk-writes does not open it. Only its own flag does.
 
 # gate key -> (CLI flag stem, what it covers)
 GATES = (
@@ -164,8 +175,14 @@ GATES = (
      "save the project over its .rpp"),
     ("allow_preference_writes", "preference-writes",
      "change REAPER's own preferences"),
+    ("allow_script_execution", "script-execution",
+     "run Lua scripts it writes or names (run_script)"),
 )
+# The script gate is not a disk-write gate: --allow-disk-writes leaves it
+# alone and the bridge never reads it from allow_risk_level_3.
+DISK_GATES = GATES[:3]
 LEGACY_GATE = "allow_risk_level_3"
+SCRIPT_GATE = "allow_script_execution"
 
 
 def config_path(repo_root):
@@ -198,6 +215,8 @@ def gate_state(config, key):
     specific = config.get(key)
     if isinstance(specific, bool):
         return specific
+    if key == SCRIPT_GATE:
+        return False  # strict: no legacy fallback, matching the bridge
     return config.get(LEGACY_GATE) is True
 
 
@@ -243,7 +262,7 @@ def print_gate_status(repo_root):
         else:
             print(f"           turn off with: {py} setup/install.py --no-{flag}")
     print("  Track, FX, and automation commands work either way. They are")
-    print("  undoable; these four write to disk.")
+    print("  undoable; the gates cover what undo cannot take back.")
     print("  A change applies when the bridge next loads: send the")
     print("  reload_bridge command, or restart REAPER.")
 
@@ -391,7 +410,7 @@ def main(argv=None):
     updates = {}
     if args.disk_writes is not None:
         updates[LEGACY_GATE] = args.disk_writes
-        for key, _flag, _covers in GATES:
+        for key, _flag, _covers in DISK_GATES:
             updates[key] = args.disk_writes
     for key, _flag, _covers in GATES:
         chosen = getattr(args, key)
