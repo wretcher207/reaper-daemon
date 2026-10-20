@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "reaper-daemon",
   "display_name": "Reaper Daemon",
-  "version": "3.23.0",
+  "version": "3.23.1",
   "description": "REAPER MCP server: let Claude read your session, set FX, write automation and measure mix moves.",
-  "long_description": "Connects Claude to an existing Reaper Daemon install. Reaper Daemon drives REAPER over a local file bridge with no network port: read every plugin and parameter, set FX values, write automation, and verify a mix move with before and after measurements. Every change runs inside a REAPER undo block.\n\nInstall Reaper Daemon first (git clone https://github.com/wretcher207/reaper-daemon, then python3 setup/install.py, then restart REAPER), and point this extension at that folder.\n\nVersion 3.23.0 adds REAPER's action list (search it, run any action by id or name), Lua script execution behind its own allow_script_execution switch, and tempo or time-signature changes placed at a bar.",
+  "long_description": "Connects Claude to an existing Reaper Daemon install. Reaper Daemon drives REAPER over a local file bridge with no network port: read every plugin and parameter, set FX values, write automation, and verify a mix move with before and after measurements. Every change runs inside a REAPER undo block.\n\nInstall Reaper Daemon first (git clone https://github.com/wretcher207/reaper-daemon, then python3 setup/install.py, then restart REAPER), and point this extension at that folder.\n\nVersions 3.23.0 and 3.23.1 add REAPER's action list (search it, run any action by id or name), Lua script execution behind its own allow_script_execution switch, and tempo or time-signature changes placed at a bar.",
   "author": {
     "name": "Dead Pixel Design",
     "url": "https://www.deadpixeldesign.com/workflows/reaper-daemon/"

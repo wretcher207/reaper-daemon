@@ -71,7 +71,7 @@ first run.
 2. Paste `https://github.com/wretcher207/reaper-daemon/raw/main/index.xml`
 3. `Extensions > ReaPack > Browse packages`, find **Reaper Daemon**, install.
 
-The ReaPack package (3.23.0) contains the three bridge Lua files, the two workflow
+The ReaPack package (3.23.1) contains the four bridge Lua files, the two workflow
 skills, and the MIDI note writer. Three things to know:
 
 - **It does not auto-start.** ReaPack installs the bridge as an Action. Run it

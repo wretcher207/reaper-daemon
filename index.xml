@@ -6,6 +6,18 @@
       <metadata>
         <link rel="website" href="https://github.com/wretcher207/reaper-daemon">Reaper Daemon on GitHub</link>
       </metadata>
+      <version name="3.23.1" author="Dead Pixel Design" time="2026-10-20T21:46:11Z">
+        <changelog><![CDATA[Packaging only: the action, script and tempo-map commands added in 3.23.0 move from the bridge file into tempo_and_actions.lua, which the bridge loads at startup, so the bridge file is back under the size the Claude plugin directory inspects. No behavior change. ReaPack now installs four bridge files.]]></changelog>
+        <source main="main">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.23.1/bridge/reaper_agent_bridge.lua</source>
+        <source file="json.lua">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.23.1/bridge/json.lua</source>
+        <source file="automation.lua">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.23.1/bridge/automation.lua</source>
+        <source file="tempo_and_actions.lua">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.23.1/bridge/tempo_and_actions.lua</source>
+        <source file="../skills/arrangement-midi/SKILL.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.23.1/skills/arrangement-midi/SKILL.md</source>
+        <source file="../skills/arrangement-midi/references/midi-plan.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.23.1/skills/arrangement-midi/references/midi-plan.md</source>
+        <source file="../skills/arrangement-midi/scripts/midi_plan.py">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.23.1/skills/arrangement-midi/scripts/midi_plan.py</source>
+        <source file="../skills/drum-humanize/SKILL.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.23.1/skills/drum-humanize/SKILL.md</source>
+        <source file="../skills/drum-humanize/references/planning.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.23.1/skills/drum-humanize/references/planning.md</source>
+      </version>
       <version name="3.23.0" author="Dead Pixel Design" time="2026-10-20T19:38:05Z">
         <changelog><![CDATA[Action list and Lua scripts: list_actions searches REAPER's action list, run_action runs one action by command id or named id inside an undo block (the save and render actions keep their gates, Quit is refused), and run_script runs Lua with the full ReaScript API behind a new allow_script_execution gate that nothing else opens. Tempo map: get_tempo_markers, set_tempo_marker and delete_tempo_marker place tempo and time-signature changes at a bar. The package now includes automation.lua, which the bridge loads at startup. The MCP tools and the installer flag need the repository installation.]]></changelog>
         <source main="main">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.23.0/bridge/reaper_agent_bridge.lua</source>
