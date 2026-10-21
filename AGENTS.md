@@ -3,6 +3,18 @@
 Cross-platform local bridge for controlling a running REAPER instance through MCP or
 the zero-dependency `reaperd.py` CLI.
 
+## Hard rule: composing
+
+Any agent composing or writing song parts through the daemon MUST follow the composing
+workflow. No exceptions for one-off scripts or "quick" parts:
+
+1. Read `skills/composing-workflow/SKILL.md` and the relevant sections of
+   `docs/composing-workflow.md` before writing MIDI.
+2. Before planning, read the song history with `composer.history.recent()` (last ~10
+   one-line entries; never open the full `songs/history.jsonl`). Choose a clearly
+   different key, tempo, feel and riff concept unless the user asks for similarity.
+3. After the song is verified, append exactly one entry with `history.append_song()`.
+
 ## Read only what the task needs
 
 - `HANDOFF.md`: current repo state, verified live behavior, and next work. Read the
@@ -18,6 +30,11 @@ the zero-dependency `reaperd.py` CLI.
   require the user to dictate the rhythm. Scoped corrections aren't global bans.
 - `skills/guitar-apparatus/`: riff notation, tuning/keyswitch maps, and the performance
   engine behind `shred` and `band`. Read it before writing or editing a riff file.
+- `skills/composing-workflow/` + `docs/composing-workflow.md`: read before composing
+  or writing song parts (guitar/bass/drums/atmosphere) with sampled instruments:
+  measure sounding pitch, per-note articulations and note lengths (Argent, Umansky),
+  cymbal variation, section-by-section insert + read-back verify. The `composer`
+  module there (`artic`, `cymbals`, `measure`, `verify`) is the reusable helper set.
 - `docs/CONSOLE.md`: the Daemon Console (in-REAPER panel + `console_sidecar.py`):
   architecture, file protocol, money/liveness rules. Read it only when the task
   touches the console; its session rules live in `docs/console_contract.md`.

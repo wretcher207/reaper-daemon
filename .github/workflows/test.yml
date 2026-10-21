@@ -89,7 +89,7 @@ jobs:
       - name: install pytest
         run: python -m pip install --quiet pytest
       - name: Root + drum-apparatus tests
-        run: python -m pytest tests skills/drum-apparatus/tests -q
+        run: python -m pytest tests skills/drum-apparatus/tests skills/composing-workflow/tests -q
 
       - name: Arrangement MIDI helper checks
         run: python skills/arrangement-midi/scripts/test_midi_plan.py

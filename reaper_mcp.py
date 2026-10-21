@@ -59,6 +59,16 @@ def _server_version():
 
 
 SERVER_INFO = {"name": "reaper-daemon", "version": _server_version()}
+SERVER_INSTRUCTIONS = (
+    "HARD RULE: Composing is MANDATORY-workflow: any agent writing song parts through the daemon must follow skills/composing-workflow/SKILL.md and docs/composing-workflow.md, read composer.history.recent() (last ~10 songs only, never the full file) before planning and pick a clearly different key/tempo/feel/riff concept unless the user asks for similarity, and append one history entry after the song is verified. "
+    "Before composing or writing song parts with sampled instruments, read "
+    "skills/composing-workflow/SKILL.md and docs/composing-workflow.md in the "
+    "Reaper Daemon folder: measure each patch's sounding pitch, give every guitar/"
+    "bass note an articulation and a held length (short notes sound stabby), vary "
+    "cymbals per phrase, obey the drum velocity golden rule, and insert one section "
+    "at a time with a get_midi_notes read-back. Don't save the project or change "
+    "plugin settings without approval."
+)
 SUPPORTED_PROTOCOLS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 DEFAULT_PROTOCOL = "2025-06-18"
 
@@ -2479,6 +2489,7 @@ def handle_message(msg):
             "protocolVersion": version,
             "capabilities": {"tools": {}},
             "serverInfo": SERVER_INFO,
+            "instructions": SERVER_INSTRUCTIONS,
         })
     if method == "ping":
         return _rpc_result(mid, {})

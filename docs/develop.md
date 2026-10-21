@@ -6,7 +6,7 @@ CI runs on Windows, macOS, and Linux. From the repository root:
 
 ```bash
 python -m pip install pytest
-python -m pytest tests skills/drum-apparatus/tests -q
+python -m pytest tests skills/drum-apparatus/tests skills/composing-workflow/tests -q
 python -m py_compile reaperd.py reaper_mcp.py setup/install.py
 lua bridge/test_bridge.lua
 lua bridge/test_json.lua
@@ -35,6 +35,7 @@ gate, because CI does not launch the DAW. See
 | `skills/song-planner/` | how an agent turns a brief, riff or reference into a sheet |
 | `commands/examples/` | one JSON example per command |
 | `skills/drum-apparatus/` | drum DSL engine and kit-map discovery |
+| `skills/composing-workflow/` | composing workflow skill + `composer` helpers (articulations, cymbals, pitch probe, section verify); guide in `docs/composing-workflow.md` |
 | `skills/guitar-apparatus/` | guitar and bass riff notation and performance engine |
 | `docs/CONSOLE.md` | console architecture and operating rules |
 | `inbox/ outbox/ processing/ archive/ failed/` | runtime folders |
