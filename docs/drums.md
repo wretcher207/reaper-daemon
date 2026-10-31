@@ -84,3 +84,22 @@ python3 reaperd.py humanize --track drums --follow-lead   # copy the hand from y
   model. It auto-detects the first flat bar. `--example-through-bar N` sets
   the boundary explicitly.
 - `--seed` is fixed by default, so a run is reproducible.
+
+
+## Monarch kit velocity rules (David)
+
+Encoded in `drumgen.groovekit.VOICE_PROFILE["RS Monarch"]` and applied by
+`humanize` / `groovekit.render`. Alias: `RS_Monarch_live`.
+
+| Piece | Velocity band | Notes |
+| --- | --- | --- |
+| Kick | 101-109 | Double-bass: every 2nd hit lighter (weak foot, drop 3-5) |
+| Snare (groove) | 92-98 | Center and rimshot |
+| Snare (blast) | 90-98 | Audible, not shotgun; mild fatigue sag over long blasts |
+| Toms | 101-115 | Fills use an ascending crescendo; heaviest on the last toms |
+| Crashes / china / splash | strong (~108-127) | Stay loud |
+| Ride / hats | lighter | Harder when hitting with kick or snare; lighter between |
+| Golden rule | gap >= 2 | No kit piece may repeat the same velocity twice in a row |
+
+Blasts stay straight and tight. Detected as fast alternating kick/snare at
+16th-or-faster spacing.

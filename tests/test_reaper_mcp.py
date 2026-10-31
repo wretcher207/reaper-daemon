@@ -1654,3 +1654,19 @@ def test_get_status_reports_the_script_gate_strictly(root, monkeypatch):
     body = json.loads(result_text(call("get_status")))
     assert body["gates"]["audio_writes"] is True
     assert body["gates"]["script_execution"] is False
+
+
+def test_session_log_records_calls_only_while_active(tmp_path, monkeypatch):
+    monkeypatch.setattr(reaper_mcp, "SESSION_DIR", str(tmp_path))
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "bogus", "arguments": {"a": 1}}}
+    resp = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "unknown tool"}}
+    reaper_mcp._session_log(call, resp, 10.0, 10.5)
+    assert list(tmp_path.iterdir()) == []
+
+    (tmp_path / "ACTIVE").write_text("run1", encoding="utf-8")
+    reaper_mcp._session_log(call, resp, 10.0, 10.5)
+    reaper_mcp._session_log({"method": "notifications/x"}, None, 11.0, 11.0)
+    recs = [json.loads(l) for l in (tmp_path / "run1.jsonl").read_text().splitlines()]
+    assert len(recs) == 1
+    assert recs[0]["tool"] == "bogus" and recs[0]["is_error"] and recs[0]["ms"] == 500.0

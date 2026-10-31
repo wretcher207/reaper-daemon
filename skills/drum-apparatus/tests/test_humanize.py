@@ -43,14 +43,14 @@ def test_flat_take_gets_dynamics_within_bands():
     assert len(edits) == len(notes)
     # nothing is left dead-flat at 127
     assert all(e["velocity"] < 127 for e in edits.values())
-    # kick ceiling honoured
+    # Monarch kick band 101-109
     for n in notes:
         if n["pitch"] == 24:
-            assert edits[n["index"]]["velocity"] <= 114
-    # rimshot stays in its 90-110 band
+            assert 101 <= edits[n["index"]]["velocity"] <= 109
+    # Monarch non-blast rimshot band 92-98
     for n in notes:
         if n["pitch"] == 28:
-            assert 90 <= edits[n["index"]]["velocity"] <= 110
+            assert 92 <= edits[n["index"]]["velocity"] <= 98
 
 
 def test_stacked_notes_are_both_edited():
@@ -63,7 +63,7 @@ def test_stacked_notes_are_both_edited():
     edits = {e["index"]: e for e in out["edits"]}
     for n in stacked:
         assert n["index"] in edits          # neither skipped
-        assert edits[n["index"]]["velocity"] <= 114
+        assert 101 <= edits[n["index"]]["velocity"] <= 109
 
 
 def test_determinism():
@@ -230,3 +230,28 @@ def test_every_family_has_a_band():
     for fam in set(FAMILY_BAND):
         c, lo, hi = FAMILY_BAND[fam]
         assert 1 <= lo <= c <= hi <= 127
+
+
+def test_monarch_blast_snare_band():
+    """Alternating 16th kick/snare is a blast; snare lands in 90-98 with fatigue."""
+    from drumgen.humanize import detect_blasts
+    notes, i = [], 0
+    # 2 bars of 16th blast: kick 24 / rim 28 alternating
+    for step in range(32):
+        pitch = 24 if step % 2 == 0 else 28
+        notes.append(_note(i, step * SIXTEENTH, pitch)); i += 1
+    kit = load_maps()["RS Monarch"]
+    fam = pitch_families(kit)
+    blasts = detect_blasts(notes, fam, SIXTEENTH)
+    assert len(blasts) == 1 and len(blasts[0]) == 32
+    out = plan_humanize(notes, PPQ, map_name="RS Monarch", kit_map=kit, amount=0)
+    edits = {e["index"]: e for e in out["edits"]}
+    snares = [edits[n["index"]]["velocity"] for n in notes if n["pitch"] == 28]
+    assert all(90 <= v <= 98 for v in snares)
+    kicks = [edits[n["index"]]["velocity"] for n in notes if n["pitch"] == 24]
+    assert all(101 <= v <= 109 for v in kicks)
+    # golden rule: no consecutive same-pitch identical (gap >= 2)
+    for pitch in (24, 28):
+        seq = [edits[n["index"]]["velocity"] for n in notes if n["pitch"] == pitch]
+        for a, b in zip(seq, seq[1:]):
+            assert abs(a - b) >= 2

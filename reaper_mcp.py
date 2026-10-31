@@ -81,6 +81,42 @@ def _log(msg):
     print(f"[reaper-mcp] {msg}", file=sys.stderr, flush=True)
 
 
+# Session recording: while logs/sessions/ACTIVE names a run, every request and
+# its reply is appended to logs/sessions/<run>.jsonl (tools/session.py).
+SESSION_DIR = os.path.join(BRIDGE_ROOT, "logs", "sessions")
+SESSION_TEXT_LIMIT = 4000
+
+
+def _session_log(msg, response, started, finished):
+    try:
+        with open(os.path.join(SESSION_DIR, "ACTIVE"), encoding="utf-8") as f:
+            run = f.read().strip()
+    except OSError:
+        return
+    if not run or "id" not in msg:
+        return
+    params = msg.get("params") or {}
+    result = (response or {}).get("result") or {}
+    text = "\n".join(c.get("text", "") for c in result.get("content") or []
+                     if isinstance(c, dict))
+    rec = {"t": started, "ms": round((finished - started) * 1000, 1),
+           "method": msg.get("method"), "pid": os.getpid()}
+    if msg.get("method") == "initialize":
+        rec["client"] = params.get("clientInfo")
+    if msg.get("method") == "tools/call":
+        rec["tool"] = params.get("name")
+        rec["args"] = params.get("arguments") or {}
+        rec["is_error"] = bool(result.get("isError")) or "error" in (response or {})
+        rec["text"] = text[:SESSION_TEXT_LIMIT]
+        if "error" in (response or {}):
+            rec["text"] = json.dumps(response["error"])[:SESSION_TEXT_LIMIT]
+    try:
+        with open(os.path.join(SESSION_DIR, run + ".jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, default=str) + "\n")
+    except OSError as e:
+        _log(f"session log failed: {e!r}")
+
+
 # ---------------------------------------------------------------------------
 # Bridge plumbing
 # ---------------------------------------------------------------------------
@@ -2540,7 +2576,9 @@ def main():
             if not isinstance(msg, dict):
                 response = _rpc_error(None, -32600, "invalid request")
             else:
+                started = time.time()
                 response = handle_message(msg)
+                _session_log(msg, response, started, time.time())
         if response is not None:
             sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
             sys.stdout.flush()

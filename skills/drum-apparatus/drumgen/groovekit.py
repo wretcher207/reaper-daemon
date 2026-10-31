@@ -107,10 +107,31 @@ KICK_RUN_BAND = (105, 112)
 # Per-kit voice preferences, keyed by map name. A kit can say "the snare I reach
 # for is the rimshot, held in this band." Unset -> plain role, full 1-127 range.
 VOICE_PROFILE = {
-    # Monarch: David plays the rimshot snare (fuller, louder), 90-110. He played
-    # 91/99/108/110 here and confirmed loud-as-fuck is the intent.
-    "RS Monarch": {"snare_role": "SNARE_RIM", "snare_vel": (90, 110)},
+    # Monarch (David, 2026-10-24): tight per-piece bands + blast/double-bass rules.
+    # Shared by groovekit.render and humanize.plan_humanize. Alias RS_Monarch_live
+    # covers the discover-map overlay from a live Kontakt session.
+    "RS Monarch": {
+        "snare_role": "SNARE_RIM",
+        "snare_vel": (92, 98),            # non-blast snare (center + rim)
+        "snare_center_vel": (92, 98),
+        "blast_snare_vel": (90, 98),      # blast snare: audible, not shotgun
+        "kick_vel": (101, 109),
+        "kick_run_band": (101, 109),      # double-bass stays in the same band
+        "kick_weakfoot_drop": (3, 5),     # left-foot weakness inside the narrow band
+        "tom_vel": (101, 115),            # fills crescendo to the last tom hits
+        "crash_vel": (108, 127),          # crashes/china/splash stay strong
+        "china_vel": (108, 127),
+        "splash_vel": (104, 124),
+        "stack_vel": (100, 120),
+        "hat_closed_vel": (70, 100),      # lighter between shell accents
+        "hat_open_vel": (85, 110),
+        "hat_pedal_vel": (55, 85),
+        "ride_vel": (75, 105),            # ride tip: lighter unless with kick/snare
+        "bell_vel": (95, 118),
+        "golden_min_gap": 2,              # never same velocity twice in a row
+    },
 }
+VOICE_PROFILE["RS_Monarch_live"] = VOICE_PROFILE["RS Monarch"]
 
 # Hi-hat velocity curve: closed is played softer, open is louder. Multiplies the
 # resolved hat velocity by role.

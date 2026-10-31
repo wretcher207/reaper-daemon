@@ -29,7 +29,11 @@ except Exception:  # pragma: no cover - standalone fallback keeps the module usa
     KICK_VEL_MAX = 114
     KICK_VEL_MIN = 96
     KICK_RUN_BAND = (105, 112)
-    VOICE_PROFILE = {"RS Monarch": {"snare_role": "SNARE_RIM", "snare_vel": (90, 110)}}
+    VOICE_PROFILE = {"RS Monarch": {"snare_role": "SNARE_RIM", "snare_vel": (92, 98),
+                            "blast_snare_vel": (90, 98), "kick_vel": (101, 109),
+                            "kick_run_band": (101, 109), "tom_vel": (101, 115),
+                            "golden_min_gap": 2}}
+    VOICE_PROFILE["RS_Monarch_live"] = VOICE_PROFILE["RS Monarch"]
     HAT_CURVE = {"HH_CLOSED_TIP": 0.8, "HH_CLOSED_EDGE": 0.8, "HH_PEDAL": 0.8,
                  "HH_OPEN_1": 1.0, "HH_OPEN_2": 1.0, "HH_OPEN_3": 1.0}
     CYMBAL_SHELL_BOOST = 1.12
@@ -165,6 +169,41 @@ def detect_fills(ordered, fam, sixteenth, min_hits=3, min_toms=1):
     return runs
 
 
+
+def detect_blasts(ordered, fam, sixteenth, min_hits=8):
+    """Find blast regions: fast alternating kick/snare runs.
+
+    A blast is a dense stream of kick+snare hits with gaps at most one 16th
+    (straight and tight). Returns list of runs (note dicts in time order).
+    Used to (a) pull snare into the blast band and (b) apply a mild fatigue
+    sag so intensity wanes slightly over a long blast.
+    """
+    stream = sorted(
+        (n for n in ordered if fam.get(n["pitch"]) in
+         {"kick", "snare_center", "snare_rim", "snare_flam"}),
+        key=lambda n: n["ppq"],
+    )
+    gap = sixteenth + 1
+    runs, cur = [], []
+
+    def flush():
+        if len(cur) < min_hits:
+            return
+        kinds = {fam.get(n["pitch"]) for n in cur}
+        has_kick = "kick" in kinds
+        has_snare = bool(kinds & {"snare_center", "snare_rim", "snare_flam"})
+        if has_kick and has_snare:
+            runs.append(list(cur))
+
+    for n in stream:
+        if cur and (n["ppq"] - cur[-1]["ppq"]) > gap:
+            flush()
+            cur = []
+        cur.append(n)
+    flush()
+    return runs
+
+
 # Fill crescendo shape: a gentle linear rise from a touch under the groove to a
 # moderate lift at the resolve. Kept gentle on purpose -- a fill builds, it does
 # not leap on the last hit (David: the final step should be subtle). The
@@ -206,15 +245,39 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
     steps_per_beat = 4               # 16th grid
     fam = pitch_families(kit_map, note_names)
 
-    # per-kit band overrides from the renderer's voice profile
+    # per-kit band overrides from the renderer's voice profile (Monarch etc.)
     band = dict(FAMILY_BAND)
     profile = VOICE_PROFILE.get(map_name or "", {})
+    def _apply_band(family, key, fallback_key=None):
+        pair = profile.get(key) or (profile.get(fallback_key) if fallback_key else None)
+        if not pair:
+            return
+        lo, hi = pair
+        band[family] = ((lo + hi) // 2, lo, hi)
     if profile.get("snare_vel"):
         lo, hi = profile["snare_vel"]
         c = (lo + hi) // 2
         role = profile.get("snare_role", "SNARE")
         f = ROLE_FAMILY.get(role, "snare_rim")
         band[f] = (c, lo, hi)
+        # Non-blast center snare shares the same Monarch band unless overridden.
+        if "snare_center" not in (k for k in profile if k.startswith("snare_center")):
+            band["snare_center"] = (c, lo, hi)
+    _apply_band("snare_center", "snare_center_vel", "snare_vel")
+    _apply_band("kick", "kick_vel")
+    _apply_band("tom", "tom_vel")
+    _apply_band("crash", "crash_vel")
+    _apply_band("china", "china_vel")
+    _apply_band("splash", "splash_vel")
+    _apply_band("stack", "stack_vel")
+    _apply_band("hat_closed", "hat_closed_vel")
+    _apply_band("hat_open", "hat_open_vel")
+    _apply_band("hat_pedal", "hat_pedal_vel")
+    _apply_band("ride", "ride_vel")
+    _apply_band("bell", "bell_vel")
+    blast_snare_band = profile.get("blast_snare_vel")  # (lo, hi) or None
+    weak_drop = profile.get("kick_weakfoot_drop", (7, 9))
+    golden_gap = int(profile.get("golden_min_gap", 3))
 
     ordered = sorted(notes, key=lambda n: n["index"])
     tick_index = {}
@@ -231,7 +294,7 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
     # not the general kick center — a foot on a beater does not ride the
     # section's dynamic the way a hand on a shell does.
     run_kicks = set()
-    run_lo, run_hi = KICK_RUN_BAND
+    run_lo, run_hi = profile.get("kick_run_band", KICK_RUN_BAND)
     kicks = [n for n in ordered if family_of(n) == "kick"]
     kicks.sort(key=lambda n: n["ppq"])
     i = 0
@@ -252,6 +315,15 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
     # scale with amount; amount only scales the random garnish on top.
     fills = detect_fills(ordered, fam, sixteenth)
     fill_ramp, fill_notes = _fill_ramp(fills)
+
+    # ---- blasts: alternating kick/snare at 16th-or-faster. Snare uses the
+    # blast band; a mild fatigue curve sags intensity over long runs.
+    blasts = detect_blasts(ordered, fam, sixteenth)
+    blast_notes = {}  # index -> (progress 0..1 within its run)
+    for run in blasts:
+        L = max(1, len(run) - 1)
+        for i, n in enumerate(run):
+            blast_notes[n["index"]] = i / L
 
     # ---- velocity pass -----
     # Randomness is the garnish, not the driver: the deterministic contour
@@ -301,12 +373,31 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
         # snare_ghost and the cymbal families: no metric lift
 
         if n["index"] in weakfoot:
-            v -= vrng.randint(7, 9)
+            v -= vrng.randint(int(weak_drop[0]), int(weak_drop[1]))
+        # Blast snare: lighter overall band + mild fatigue sag over the run.
+        if n["index"] in blast_notes and f in ("snare_center", "snare_rim", "snare_flam"):
+            if blast_snare_band:
+                lo, hi = blast_snare_band
+                c = (lo + hi) // 2
+                v = float(c)
+            progress = blast_notes[n["index"]]
+            v -= 4.0 * progress   # wane slightly as the blast goes on
+        elif n["index"] in blast_notes and f == "kick":
+            progress = blast_notes[n["index"]]
+            v -= 3.0 * progress   # kick fatigue matches the snare sag
         if f == "hat_closed":
             v *= HAT_CURVE.get("HH_CLOSED_TIP", 0.8)
             eighth = round(off / (sixteenth * 2))
             v += 7 if eighth % 2 == 0 else -5
-        if f in CYMBAL_FAMILIES:
+        if f in ("hat_closed", "hat_open", "hat_pedal", "ride"):
+            # Harder when coinciding with kick/snare; lighter between accents.
+            shelled = any(family_of(m) in {"kick", "snare_center", "snare_rim", "snare_flam"}
+                          for m in tick_index.get(n["ppq"], []))
+            if shelled:
+                v += 8
+            else:
+                v -= 6
+        if f in CYMBAL_FAMILIES and f != "ride":
             shelled = any(family_of(m) in SHELL_FAMILIES for m in tick_index.get(n["ppq"], []))
             if shelled:
                 v += 3   # additive, not x1.12 -- the multiply overshot the ceiling
@@ -319,6 +410,9 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
             v += max(-1.5, min(1.5, g))
         else:
             v += vrng.gauss(0, this_jit)
+        # Re-resolve lo/hi after blast snare band swap.
+        if n["index"] in blast_notes and f in ("snare_center", "snare_rim", "snare_flam") and blast_snare_band:
+            lo, hi = blast_snare_band
         new_vel[n["index"]] = _clamp(v, lo, hi)
 
     # ---- fill crescendo guarantee. A fill builds: velocity climbs to its peak
@@ -354,7 +448,7 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
     by_pitch = {}
     for n in ordered:
         by_pitch.setdefault(n["pitch"], []).append(n)
-    MIN_GAP = 3
+    MIN_GAP = max(2, golden_gap)
     for pitch, lst in by_pitch.items():
         lst.sort(key=lambda n: n["ppq"])
         f = family_of(lst[0])
@@ -450,6 +544,8 @@ def plan_humanize(notes, ppq, *, kit_map=None, note_names=None, map_name=None,
         "families": fam_counts,
         "fills": len(fills),
         "fill_notes": len(fill_notes),
+        "blasts": len(blasts),
+        "blast_notes": len(blast_notes),
         "unclassified": fam_counts.get("other", 0),
         "max_move_ticks": max(moves) if moves else 0,
         "mean_move_ticks": round(sum(moves) / len(moves), 2) if moves else 0,
