@@ -2521,12 +2521,17 @@ def handle_message(msg):
     if method == "initialize":
         requested = (msg.get("params") or {}).get("protocolVersion")
         version = requested if requested in SUPPORTED_PROTOCOLS else DEFAULT_PROTOCOL
-        return _rpc_result(mid, {
+        result = {
             "protocolVersion": version,
             "capabilities": {"tools": {}},
             "serverInfo": SERVER_INFO,
             "instructions": SERVER_INSTRUCTIONS,
-        })
+        }
+        # Blind tests (e.g. model composing challenges) must not hand the
+        # model the composing guide, so the instructions can be switched off.
+        if os.environ.get("REAPER_MCP_NO_INSTRUCTIONS"):
+            del result["instructions"]
+        return _rpc_result(mid, result)
     if method == "ping":
         return _rpc_result(mid, {})
     if method == "tools/list":
