@@ -7,8 +7,9 @@
 
 The MCP server appends to logs/sessions/<run>.jsonl while logs/sessions/ACTIVE
 names the run, so any client (Claude Code, Codex, Grok) is recorded the same way.
-The report covers time, every call, every error, and checks the saved project
-against the thall challenge rules (100 BPM, 68 bars, see PROMPT.md).
+The report covers time, every call, every error, what was written, and checks the
+saved project against the fixed thall challenge rules (see PROMPT.md); tempo, key
+and structure are the model's choice, so they are reported, not judged.
 """
 import argparse
 import collections
@@ -23,15 +24,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SESSION_DIR = os.path.join(ROOT, "logs", "sessions")
 ACTIVE = os.path.join(SESSION_DIR, "ACTIVE")
 
-BPM = 100
-BAR_QN = 4
-SECTIONS = [("Intro", 1, 8), ("Riff A", 9, 24), ("Riff B", 25, 32),
-            ("Break", 33, 44), ("Build", 45, 48), ("Climax", 49, 64),
-            ("Ending", 65, 68)]
-HEAVY = [(9, 32), (49, 64)]
 WRITE_TOOLS = re.compile(r"insert|groove|riff|band|humanize|midi|delete|item|automation")
-SNARE = 26
-GUITAR_RANGE = (25, 61)
+LENGTH = (150, 270)  # 2:30 to 4:30
+INSTRUMENTS = ["argent-l", "argent-r", "djinnbass", "rs-drums-monarch", "mysteria-voices"]
+# lowest real pitch per track; notes under it are keyswitches
+KEYSWITCH_BELOW = {"argent-l": 25, "argent-r": 25, "djinnbass": 24}
+CHOIR_RANGE = (36, 84)
 
 
 def _meta_path(run):
@@ -40,6 +38,10 @@ def _meta_path(run):
 
 def _clock(t):
     return datetime.fromtimestamp(t).strftime("%H:%M:%S")
+
+
+def _mmss(s):
+    return f"{int(s) // 60}:{int(s) % 60:02d}"
 
 
 def _dur(s):
@@ -79,7 +81,7 @@ def cmd_stop(args):
 
 def parse_project(path):
     """Tracks with their FX names, VOLPAN and MIDI notes (bar-based, 1-indexed)."""
-    tracks, tempo_points, header_tempo = [], 0, None
+    tracks, tempo_points, header_tempo = [], [], None
     stack, cur, item = [], None, None
     for line in open(path, encoding="utf-8", errors="replace"):
         s = line.strip()
@@ -108,7 +110,8 @@ def parse_project(path):
         if top == "REAPER_PROJECT" and s.startswith("TEMPO "):
             header_tempo = float(s.split()[1])
         elif top == "TEMPOENVEX" and s.startswith("PT "):
-            tempo_points += 1
+            p = s.split()
+            tempo_points.append((float(p[1]), float(p[2])))
         elif top == "TRACK" and cur is not None:
             if s.startswith("NAME ") and cur["name"] is None:
                 cur["name"] = s[5:].strip('"')
@@ -125,32 +128,90 @@ def parse_project(path):
                     continue
                 item["tick"] += int(p[1])
                 status, pitch, vel = int(p[2], 16), int(p[3], 16), int(p[4], 16)
-                qn = item["pos"] * BPM / 60 + item["tick"] / item["tpq"]
+                qn = item["tick"] / item["tpq"]  # QN from the item start
                 kind = status & 0xF0
                 if kind == 0x90 and vel > 0:
                     item["on"][pitch] = (qn, vel)
                 elif kind == 0x80 or (kind == 0x90 and vel == 0):
                     if pitch in item["on"]:
                         start, v = item["on"].pop(pitch)
-                        cur["notes"].append({"pitch": pitch, "vel": v,
+                        cur["notes"].append({"pitch": pitch, "vel": v, "item": item["pos"],
                                              "start": start, "end": qn})
-    return {"tracks": tracks, "header_tempo": header_tempo, "tempo_points": tempo_points}
+    proj = {"tracks": tracks, "header_tempo": header_tempo, "tempo_points": tempo_points}
+    _to_seconds(proj)
+    return proj
 
 
-def bar_of(qn):
-    return int(qn // BAR_QN) + 1
+def _tempo_map(proj):
+    """(start second, start QN, bpm) segments. Ramps are treated as steps."""
+    pts = sorted(proj["tempo_points"]) or [(0.0, proj["header_tempo"] or 120.0)]
+    if pts[0][0] > 0:
+        pts.insert(0, (0.0, proj["header_tempo"] or pts[0][1]))
+    segs, qn = [], 0.0
+    for i, (t, bpm) in enumerate(pts):
+        if i:
+            qn += (t - pts[i - 1][0]) * pts[i - 1][1] / 60
+        segs.append((t, qn, bpm))
+    return segs
+
+
+def _to_seconds(proj):
+    """Notes were read as QN offsets from their item's start (seconds); turn them into seconds."""
+    segs = _tempo_map(proj)
+
+    def sec_to_qn(t):
+        s0, q0, bpm = [g for g in segs if g[0] <= t][-1]
+        return q0 + (t - s0) * bpm / 60
+
+    def qn_to_sec(q):
+        s0, q0, bpm = [g for g in segs if g[1] <= q][-1]
+        return s0 + (q - q0) * 60 / bpm
+
+    for t in proj["tracks"]:
+        for n in t["notes"]:
+            base = sec_to_qn(n.pop("item"))
+            n["start"], n["end"] = qn_to_sec(base + n["start"]), qn_to_sec(base + n["end"])
+
+
+def pitched(name, notes):
+    """Notes that sound, without the keyswitches under the instrument's range."""
+    low = KEYSWITCH_BELOW.get(name)
+    return [n for n in notes if low is None or n["pitch"] >= low]
+
+
+def song_facts(proj):
+    pts = sorted(proj["tempo_points"])
+    bpms = sorted({round(b, 2) for _, b in pts}) or [proj["header_tempo"]]
+    notes = [n for t in proj["tracks"] for n in t["notes"]]
+    out = [f"- Tempo: {', '.join(f'{b:g}' for b in bpms)} BPM"
+           + (f" ({len(pts)} tempo-map points)" if len(pts) > 1 else "")]
+    if notes:
+        out.append(f"- Length: first note at {_mmss(min(n['start'] for n in notes))}, "
+                   f"last note ends at {_mmss(max(n['end'] for n in notes))}")
+    drums = sorted(next((t["notes"] for t in proj["tracks"] if t["name"] == "rs-drums-monarch"), []),
+                   key=lambda n: n["start"])
+    last_vel, repeats = {}, 0
+    for n in drums:
+        repeats += last_vel.get(n["pitch"]) == n["vel"]
+        last_vel[n["pitch"]] = n["vel"]
+    if drums:
+        out.append(f"- Drum hits with the same velocity as that drum's previous hit: {repeats} of {len(drums)}")
+    return out
 
 
 def check_rules(proj, template):
     out, by = [], {t["name"]: t for t in proj["tracks"]}
     ok = lambda good, text: out.append(("PASS" if good else "FAIL", text))
 
-    ok(proj["header_tempo"] == BPM and proj["tempo_points"] <= 1,
-       f"Tempo stayed {BPM} BPM (found {proj['header_tempo']}, {proj['tempo_points']} tempo-map points)")
+    notes = [n for t in proj["tracks"] for n in t["notes"]]
+    end = max((n["end"] for n in notes), default=0)
+    ok(LENGTH[0] <= end <= LENGTH[1],
+       f"Length between {_mmss(LENGTH[0])} and {_mmss(LENGTH[1])} (ends at {_mmss(end)})")
 
-    allowed = {"argent-l", "argent-r", "rs-drums-monarch", "mysteria-voices"}
-    allowed |= {t["name"] for t in proj["tracks"] if "bass" in (t["name"] or "").lower()}
-    stray = [t["name"] for t in proj["tracks"] if t["items"] and t["name"] not in allowed]
+    unused = [name for name in INSTRUMENTS if not pitched(name, by.get(name, {}).get("notes", []))]
+    ok(not unused, "All five instruments used" + (f" (silent: {', '.join(unused)})" if unused else ""))
+
+    stray = [t["name"] for t in proj["tracks"] if t["items"] and t["name"] not in INSTRUMENTS]
     ok(not stray, "MIDI only on the five instrument tracks" + (f" (also on: {', '.join(stray)})" if stray else ""))
 
     if template:
@@ -164,51 +225,10 @@ def check_rules(proj, template):
                 changed.append(name)
         ok(not changed, "Tracks, plugins and faders untouched" + (f" (changed: {', '.join(changed)})" if changed else ""))
 
-    all_notes = [n for t in proj["tracks"] for n in t["notes"]]
-    if all_notes:
-        last = max(n["end"] for n in all_notes)
-        ok(last <= 68 * BAR_QN + 0.01, f"Song ends by bar 68 (last note ends in bar {bar_of(last - 1e-6)})")
-        hit = [n for n in all_notes if abs(n["start"] - 64 * BAR_QN) < 0.25]
-        ok(bool(hit), f"Final hit on bar 65 beat 1 ({len(hit)} notes there)")
-        late = [n for n in all_notes if n["start"] > 64 * BAR_QN + 0.25]
-        ok(not late, f"Nothing new after the bar 65 hit ({len(late)} later notes)")
-
-    for name in ("argent-l", "argent-r"):
-        t = by.get(name)
-        if t and t["notes"]:
-            bad = [n["pitch"] for n in t["notes"] if not GUITAR_RANGE[0] <= n["pitch"] <= GUITAR_RANGE[1]]
-            # notes below 25 are Argent keyswitches, not pitches
-            bad = [p for p in bad if p > GUITAR_RANGE[1]]
-            ok(not bad, f"{name} stays at or below MIDI {GUITAR_RANGE[1]} ({len(bad)} notes above)")
-
-    intro_drums = [n for n in by.get("rs-drums-monarch", {}).get("notes", []) if n["start"] < 8 * BAR_QN]
-    ok(not intro_drums, f"No drums in the intro ({len(intro_drums)} hits)")
-
-    drums = sorted(by.get("rs-drums-monarch", {}).get("notes", []), key=lambda n: n["start"])
-    last_vel, repeats = {}, 0
-    for n in drums:
-        if last_vel.get(n["pitch"]) == n["vel"]:
-            repeats += 1
-        last_vel[n["pitch"]] = n["vel"]
-    if drums:
-        ok(repeats == 0, f"No back-to-back repeated drum velocities ({repeats} repeats in {len(drums)} hits)")
-
-    snares = [n for n in drums if n["pitch"] == SNARE
-              and any(a <= bar_of(n["start"]) <= b for a, b in HEAVY)]
-    off = [n for n in snares if abs(n["start"] % BAR_QN - 2) > 0.05]
-    if snares:
-        ok(not off, f"Snare only on beat 3 in riffs and climax ({len(off)} of {len(snares)} snares elsewhere)")
-
-    gl = by.get("argent-l", {}).get("notes", [])
-    dense = []
-    for a, b in HEAVY:
-        for bar in range(a, b + 1):
-            slots = {int((n["start"] - (bar - 1) * BAR_QN) * 4) for n in gl
-                     if bar_of(n["start"]) == bar and n["pitch"] >= GUITAR_RANGE[0]}
-            if len(slots) > 16 * 2 / 3:
-                dense.append(bar)
-    if gl:
-        ok(not dense, f"At least a third of each riff bar is silent on argent-l ({len(dense)} bars too busy)")
+    choir = by.get("mysteria-voices", {}).get("notes", [])
+    if choir:
+        bad = [n for n in choir if not CHOIR_RANGE[0] <= n["pitch"] <= CHOIR_RANGE[1]]
+        ok(not bad, f"Choir stays in MIDI {CHOIR_RANGE[0]}-{CHOIR_RANGE[1]} ({len(bad)} notes outside)")
     return out
 
 
@@ -261,15 +281,23 @@ def cmd_report(args):
     if args.project:
         proj = parse_project(args.project)
         tmpl = parse_project(args.template) if args.template else None
-        L += ["", "## What it wrote", "", "| Track | " + " | ".join(s[0] for s in SECTIONS) + " | Total |",
-              "|---|" + "---|" * (len(SECTIONS) + 1)]
+        L += ["", "## The song", ""] + song_facts(proj)
+        L += ["", "## What it wrote", "",
+              "| Track | Notes | Keyswitches | Plays from | to | Pitch range | Velocities | Distinct velocities |",
+              "|---|---|---|---|---|---|---|---|"]
         for t in proj["tracks"]:
             if not t["notes"]:
                 continue
-            row = [sum(1 for n in t["notes"] if a <= bar_of(n["start"]) <= b) for _, a, b in SECTIONS]
-            L.append(f"| {t['name']} | " + " | ".join(map(str, row)) + f" | {len(t['notes'])} |")
-        L += ["", "Notes per section (note-ons). Drum and guitar counts include keyswitches.", "",
-              "## Rule check", ""]
+            ps = pitched(t["name"], t["notes"])
+            if not ps:
+                L.append(f"| {t['name']} | 0 | {len(t['notes'])} | | | | | |")
+                continue
+            vel = [n["vel"] for n in ps]
+            L.append(f"| {t['name']} | {len(ps)} | {len(t['notes']) - len(ps)} "
+                     f"| {_mmss(min(n['start'] for n in ps))} | {_mmss(max(n['end'] for n in ps))} "
+                     f"| {min(n['pitch'] for n in ps)}-{max(n['pitch'] for n in ps)} "
+                     f"| {min(vel)}-{max(vel)} | {len(set(vel))} |")
+        L += ["", "## Rule check", ""]
         rules = check_rules(proj, tmpl)
         L += [f"- {r}: {text}" for r, text in rules]
         L.append(f"\n**{sum(r == 'PASS' for r, _ in rules)} of {len(rules)} rules passed.**")
