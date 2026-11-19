@@ -76,3 +76,4 @@ state/
 instruments/user.json
 # Song sheets are the user's songs, not repo content
 songs/
+dist/
