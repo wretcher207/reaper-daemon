@@ -16,7 +16,7 @@ with Claude Code, Codex, Cursor, or anything else that can read and write
 files, and an optional stdio MCP server, `reaper_mcp.py`, exposes the same
 bridge as tools for Claude Desktop and any other MCP client.
 
-macOS, Windows, Linux. Pure Lua inside REAPER, plain Python 3 outside, no
+macOS, Windows, Linux. Pure Lua inside REAPER, plain Python 3.10 or newer outside, no
 pip packages for the core bridge and MCP server.
 [Audio-to-drum MIDI transcription](docs/transcription.md) uses a separate optional
 model environment. Every change runs inside a REAPER undo block, so Ctrl+Z
@@ -55,9 +55,9 @@ Prefer ReaPack, or want to load the bridge by hand? See [docs/install.md](docs/i
 
 ### Claude plugin
 
-The repository is also a Claude plugin. It bundles the MCP server with five
-skills: setup, drum programming, drum humanizing, guitar and bass parts, and
-MIDI for an existing arrangement. The plugin drives the install above, so if
+The repository is also a Claude plugin. It bundles the MCP server with seven
+skills: setup, song planning, full song composing, drum programming, drum
+humanizing, guitar and bass parts, and MIDI for an existing arrangement. The plugin drives the install above, so if
 you added it before installing, ask Claude to set up Reaper Daemon. The setup
 skill finds what's missing, runs the clone and installer with you, asks which
 disk writes to allow, and checks that REAPER answers.
@@ -78,6 +78,13 @@ claude --plugin-dir /path/to/reaper-daemon
 The MCP server runs on your computer, next to REAPER. It works in Claude
 Code and in Cowork sessions on your machine. Chat on claude.ai loads the
 skills but can't reach REAPER.
+
+### Claude Desktop extension
+
+On Claude Desktop, download `reaper-daemon.mcpb` from the
+[latest release](https://github.com/wretcher207/reaper-daemon/releases/latest),
+open it, and pick your Reaper Daemon folder when asked. It launches the
+install above, so clone and install first. See [MCP server](docs/mcp.md).
 
 ## Mix with an AI agent
 
@@ -153,10 +160,13 @@ Claude Code session that always knows which track you have selected.
 | [Troubleshooting](docs/troubleshooting.md) | silent captures, stale heartbeats |
 | [Watchdog](docs/watchdog.md) | unattended runs: relaunch REAPER, dialogs, stale queue files |
 | [Song planner](docs/song-planner.md) | instrument library, song sheets, approved drafts |
+| [Keyboard performance](docs/keyboard-performance.md) | MIDI input, controller tests, CC links, saving a playable setup |
+| Plugin maps | verified parameters for [Pro-Q 4](docs/proq4_parameter_map.md), [Pro-C 3](docs/proc3_parameter_map.md), [Odeholm Thall](docs/odeholm_thall_parameter_map.md) and [Archetype Misha Mansoor X](docs/misha_parameter_map.md) |
 | [Security](docs/security.md) | trust model and the optional token |
+| [Safety](docs/safety.md) | keeping the bridge folder local |
 | [Develop](docs/develop.md) | tests, CI, repo layout |
 
-Agents should read [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), and
+Agents should read [AGENTS.md](AGENTS.md) and
 [bridge/command_schema.md](bridge/command_schema.md). Two bundled skills,
 [arrangement-midi](skills/arrangement-midi/SKILL.md) and
 [drum-humanize](skills/drum-humanize/SKILL.md), cover MIDI composition and
@@ -190,8 +200,6 @@ Three optional pieces do more, and only if you install them:
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-Keyboard performance setup, MIDI/controller tests and template saving are documented in [the performance workflow](docs/keyboard-performance.md).
 
 ## Star History
 
