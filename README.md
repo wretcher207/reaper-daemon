@@ -192,3 +192,13 @@ Three optional pieces do more, and only if you install them:
 MIT. See [LICENSE](LICENSE).
 
 Keyboard performance setup, MIDI/controller tests and template saving are documented in [the performance workflow](docs/keyboard-performance.md).
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=wretcher207%2Freaper-daemon&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=wretcher207/reaper-daemon&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=wretcher207/reaper-daemon&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=wretcher207/reaper-daemon&type=date&legend=top-left" />
+ </picture>
+</a>
