@@ -46,7 +46,7 @@ Tools, grouped:
 | --- | --- |
 | Discovery | `get_context`, `scan_fx`, `get_fx_parameters`, `get_track_routing` |
 | Project | transport, tracks, markers and regions, MIDI insertion |
-| FX | FX chains, `set_fx_param` (formatted values like `"-16.00 dB"` work), `get_fx_param_automation` and automation writes |
+| FX | FX chains, `set_fx_param` (formatted values like `"-16.00 dB"` work), `set_fx_file` (load a sample into ReaSamplOmatic5000), `get_fx_param_automation` and automation writes |
 | Batch | `batch` runs several commands in one undo block |
 | Capture | post-FX stem capture |
 | Drums | `profile_track`, `riff_grid`, `insert_groove` |

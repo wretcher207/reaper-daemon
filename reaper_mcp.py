@@ -430,6 +430,13 @@ def tool_set_fx_param(args):
                     track=True, dry_run=True)
 
 
+def tool_set_fx_file(args):
+    return _forward("set_fx_file", args,
+                    ("fx_name_contains", "fx_index", "fx_scope", "path",
+                     "file_index"),
+                    track=True, dry_run=True)
+
+
 def tool_write_automation(args):
     return _forward("write_fx_param_automation", args,
                     ("fx_name_contains", "fx_index", "fx_scope",
@@ -1438,6 +1445,26 @@ TOOLS = [
             "relative": {"type": "string"},
         }),
         "handler": tool_set_fx_param,
+    },
+    {
+        "name": "set_fx_file",
+        "description": ("Load an audio file into a sample-based FX already on "
+                        "the track (ReaSamplOmatic5000), through REAPER's "
+                        "FILE<n> named config parameter. path must be an "
+                        "existing file on the REAPER machine; the result reads "
+                        "the applied path back. file_index defaults to 0, the "
+                        "plugin's only slot in the common case. Add the plugin "
+                        "with fx first. Undo-block wrapped; supports dry_run."),
+        "inputSchema": _schema({
+            **TRACK_PROPS, **DRY_RUN_PROP,
+            "fx_name_contains": {"type": "string"},
+            "fx_index": {"type": "integer"},
+            "fx_scope": {"type": "string", "enum": ["track", "input", "all"],
+                         "description": "Required with fx_index."},
+            "path": {"type": "string", "description": "Absolute path to the audio file."},
+            "file_index": {"type": "integer", "description": "FILE<n> slot, default 0."},
+        }, required=["path"]),
+        "handler": tool_set_fx_file,
     },
     {
         "name": "get_fx_param_automation",

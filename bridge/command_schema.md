@@ -664,6 +664,17 @@ probe is a real write, and the original value is restored on any failure. Numeri
 precision matters, scan with `get_fx_parameters` and send `normalized_value`
 directly.
 
+### set_fx_file
+```json
+{ "target_track_name": "Drums", "fx_name_contains": "ReaSamplOmatic",
+  "path": "/samples/kick.wav" }
+```
+Loads an audio file into a sample-based FX (ReaSamplOmatic5000) through
+`TrackFX_SetNamedConfigParm(track, fx, "FILE<n>", path)`. `file_index` picks
+`<n>` and defaults to 0. A missing file fails with `FILE_NOT_FOUND`; a plugin
+that refuses the key fails with `SET_FILE_FAILED`. The result carries
+`applied`, the path read back from the plugin.
+
 ### write_fx_param_automation
 ```json
 { "target_track_guid": "{TRACK-GUID}", "fx_guid": "{FX-GUID}",

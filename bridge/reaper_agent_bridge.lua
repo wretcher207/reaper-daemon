@@ -4498,6 +4498,38 @@ handlers.remove_fx = command_remove_fx
 handlers.bypass_fx = command_bypass_fx
 handlers.move_fx = command_move_fx
 handlers.set_fx_param = command_set_fx_param
+-- Sample-based instruments (ReaSamplOmatic5000) take their media file through
+-- a named config parm rather than a normal automatable parameter — REAPER's
+-- documented mechanism is TrackFX_SetNamedConfigParm(track, fx, "FILE"..n,
+-- path), n defaulting to 0 (the plugin's only sample slot in the common case).
+-- Inlined (not a top-level local) because this file sits at Lua's 200-local
+-- limit for its main chunk; see the fx_chain/automation tables above for the
+-- same constraint. Reads the key back after writing it so a typoed path is
+-- visible in the result instead of silently loading nothing.
+handlers.set_fx_file = function(command)
+  local payload = command.payload or {}
+  local track, track_index, api_index, fx_name, fx_scope, display_fx_index = find_fx(payload)
+  local path = payload.path
+  if not path or path == "" then error("BAD_FILE_PATH: Provide path") end
+  local probe = io.open(path, "rb")
+  if not probe then error("FILE_NOT_FOUND: " .. tostring(path)) end
+  probe:close()
+  local file_index = math.floor(tonumber(payload.file_index) or 0)
+  local key = "FILE" .. file_index
+  local ok = reaper.TrackFX_SetNamedConfigParm(track, api_index, key, path)
+  if not ok then
+    error("SET_FILE_FAILED: REAPER rejected the sample path for " .. tostring(fx_name) ..
+      " (plugin may not support FILE-style named config, e.g. is not ReaSamplOmatic5000)")
+  end
+  local read_ok, applied = reaper.TrackFX_GetNamedConfigParm(track, api_index, key)
+  return {
+    track = track_summary(track),
+    fx = fx_summary(track, api_index, display_fx_index, fx_scope, fx_name),
+    file_index = file_index,
+    path = path,
+    applied = read_ok and applied or nil,
+  }
+end
 handlers.write_fx_param_automation = automation.write_command
 handlers.get_fx_param_automation = automation.read_command
 handlers.set_fx_param_automation_state = automation.set_state_command

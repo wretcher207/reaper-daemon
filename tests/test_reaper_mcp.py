@@ -66,7 +66,8 @@ def test_tools_list_names_and_schemas():
     resp = reaper_mcp.handle_message(rpc("tools/list"))
     tools = {t["name"]: t for t in resp["result"]["tools"]}
     for expected in ("get_status", "get_context", "scan_fx", "track", "fx",
-                     "set_fx_param", "get_fx_param_automation", "batch",
+                     "set_fx_param", "set_fx_file",
+                     "get_fx_param_automation", "batch",
                      "write_automation", "apply_automation_transaction",
                      "capture_track_audio",
                      "verify_change", "tune_param",
@@ -78,6 +79,21 @@ def test_tools_list_names_and_schemas():
     assert tools["verify_change"]["inputSchema"]["required"] == [
         "track", "command_type", "payload"]
     assert tools["tune_param"]["inputSchema"]["required"] == ["track", "target"]
+    assert tools["set_fx_file"]["inputSchema"]["required"] == ["path"]
+
+
+def test_set_fx_file_forwards_path_and_selector(root):
+    seen = []
+    fake_bridge(root, {"ok": True, "type": "set_fx_file",
+                       "data": {"file_index": 0, "applied": "/s/kick.wav"}},
+                record=seen)
+    resp = call("set_fx_file", {"track": "Drums", "fx_index": 3,
+                                "fx_scope": "track", "path": "/s/kick.wav"})
+    assert "isError" not in resp["result"]
+    assert json.loads(result_text(resp))["data"]["applied"] == "/s/kick.wav"
+    assert seen[0]["type"] == "set_fx_file"
+    assert seen[0]["payload"] == {"target_track_name": "Drums", "fx_index": 3,
+                                  "fx_scope": "track", "path": "/s/kick.wav"}
 
 
 def test_get_fx_param_automation_forwards_read_only_payload(root):
